@@ -52,6 +52,16 @@ jobs:
           # pywebview supplies the WebView2 window; PyInstaller does the packaging.
           pip install "pywebview>=5.0" "pyinstaller>=6.6"
 
+      - name: Verify the runtime dependencies the kernel needs
+        shell: pwsh
+        run: |
+          # SQLAlchemy only pulls greenlet when its platform marker matches, and
+          # that marker has historically missed some Windows builds — the
+          # symptom is an ImportError deep inside a build. Assert it up front so
+          # the failure costs two seconds instead of ten minutes.
+          python -c "import greenlet, aiosqlite, sqlalchemy.ext.asyncio as a; print('greenlet', greenlet.__version__); print('sqlalchemy', a.__name__, 'ok')"
+          if ($LASTEXITCODE -ne 0) { Write-Error "runtime dependency check failed"; exit 1 }
+
       - name: Smoke-test the desktop shell
         shell: pwsh
         run: python scripts/smoke_test.py

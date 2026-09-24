@@ -91,6 +91,10 @@ hiddenimports += [
 hiddenimports += [
     # sqlite+aiosqlite driver is imported inside SQLAlchemy at engine-creation
     "aiosqlite",
+    # SQLAlchemy's asyncio shim does `from greenlet import getcurrent` inside a
+    # function, so the static scan can miss it. Without it the frozen exe dies
+    # with "The SQLAlchemy asyncio module requires ... 'greenlet'".
+    "greenlet",
     # read_image resizes/re-encodes via Pillow, and Pillow loads its format
     # plugins lazily.
     "PIL",
