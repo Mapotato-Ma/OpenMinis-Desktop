@@ -186,6 +186,33 @@ markdown 生效，会话落库，刷新后从 `runs` 恢复卡片。
 **未验证**：Windows 上的实际窗口与 `.exe` 产物（需要在 Windows runner 上跑，
 即 CI 的职责）。窗口层代码在无 GUI 环境下会优雅退回浏览器标签页。
 
+**CI 上验证通过**（windows-latest，`v0.1.0`）：
+
+```
+[ ok ] Install dependencies
+[ ok ] Verify the runtime dependencies the kernel needs
+[ ok ] Smoke-test the desktop shell          ← 14 项全过
+[ ok ] Generate icon
+[ ok ] Build onefile executable              ← 37.3 MB
+[ ok ] Verify the executable starts          ← 真的启动 exe，等 /api/health 200，
+                                                 再确认 /_desktop/ 返回桌面界面
+[ ok ] Upload artifact
+[ ok ] Attach to release
+```
+
+CI 抓到并修掉的两个真实问题，都值得记一笔：
+
+1. **无控制台构建启动即崩**。`console=False` 的 exe 在 Windows 上没有附加
+   控制台，`sys.stdout` / `sys.stderr` 都是 `None`，而内核的 `setup_logging()`
+   会建一个写 stdout 的 rich handler —— 启动期第一次写日志就
+   `AttributeError`，进程在绑定端口之前就死了。修复见 `desktop/stdio.py`。
+   *这个 bug 只在 GUI 构建里出现，源码跑永远看不到。*
+
+2. **Windows 上缺 `greenlet`**。上游声明的是 `sqlalchemy>=2.0`，而 greenlet
+   在 SQLAlchemy 元数据里是按 `platform_machine` 标记条件安装的，
+   Windows 上没匹配上 —— 但内核的 DB 层用的是 `sqlalchemy.ext.asyncio`，
+   导入即炸。改成 `sqlalchemy[asyncio]>=2.0`。
+
 ---
 
 ## 7. 已知限制

@@ -42,12 +42,16 @@ IDE 风格的桌面界面，并且用 GitHub Actions 直接产出免安装的 `.
 
 ### 方式一：直接下 exe（推荐）
 
-到 [Releases](../../releases) 或 Actions 的 artifact 里下载
-`OpenMinisDesktop.exe`，双击运行。**不需要装 Python、Node 或任何运行时。**
+**→ [下载 OpenMinisDesktop.exe (v0.1.0)](../../releases/latest/download/OpenMinisDesktop.exe)** —— 37 MB，双击运行。
+
+**不需要装 Python、Node 或任何运行时。**
 
 > 极少数老版本 Win10 会缺 WebView2 运行时，装一次微软官方的
 > [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) 即可。
 > Win11 与较新的 Win10 已内置。
+
+也可以从 [Actions](../../actions/workflows/build-windows.yml) 手动触发一次构建，
+在运行页面下载 artifact（保留 30 天）。
 
 首次启动后进 **设置 → 模型服务**，填一个 OpenAI / Anthropic / 任意
 OpenAI 兼容网关的 API Key，就能开始对话。
