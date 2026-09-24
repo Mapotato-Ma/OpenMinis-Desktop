@@ -95,8 +95,16 @@ def _reuse_running(host: str, port: int) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A frozen windowed build starts with sys.stdout/stderr set to None; the
+    # kernel logs during startup, so this has to happen first.
+    from desktop.stdio import ensure_console_streams  # noqa: PLC0415
+
+    log_file = ensure_console_streams()
+
     args = _parse_args(argv)
     _configure_logging(args.debug)
+    if log_file is not None:
+        logger.info("no console attached — logs are in %s", log_file)
 
     desktop_dir = paths.desktop_web_dir()
     if desktop_dir is None:

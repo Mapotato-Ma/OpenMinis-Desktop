@@ -80,6 +80,7 @@ hiddenimports += [
     "desktop.app",
     "desktop.paths",
     "desktop.server_runner",
+    "desktop.stdio",
     "desktop.ui_mount",
     "desktop.window",
 ]

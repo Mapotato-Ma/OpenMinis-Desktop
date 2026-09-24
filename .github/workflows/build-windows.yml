@@ -70,28 +70,50 @@ jobs:
         shell: pwsh
         run: |
           # A GUI build has no console, so the only sane check is: launch it
-          # headless and see whether the backend answers.
+          # headless and see whether the backend answers. The app writes its
+          # startup log to %LOCALAPPDATA%\openminis\logs\desktop.log, which is
+          # what we dump when it does not come up.
+          $log = Join-Path $env:LOCALAPPDATA "openminis\logs\desktop.log"
           $p = Start-Process -FilePath "dist\OpenMinisDesktop.exe" `
                -ArgumentList "--no-window","--port","8799" -PassThru
           $ok = $false
-          foreach ($i in 1..40) {
+          foreach ($i in 1..45) {
             Start-Sleep -Seconds 2
+            if ($p.HasExited) { break }
             try {
               $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8799/api/health
               if ($r.StatusCode -eq 200) { $ok = $true; break }
             } catch { }
           }
+
           if (-not $ok) {
-            Write-Error "frozen exe never became healthy"
+            Write-Host "::group::exe did not become healthy — diagnostics"
+            Write-Host "process exited: $($p.HasExited)"
+            if ($p.HasExited) { Write-Host "exit code: $($p.ExitCode)" }
+            if (Test-Path $log) {
+              Write-Host "--- tail of $log ---"
+              Get-Content $log -Tail 80
+            } else {
+              Write-Host "no log file at $log"
+            }
+            Write-Host "::endgroup::"
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Write-Error "frozen exe never became healthy"
             exit 1
           }
+
           $ui = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:8799/_desktop/
           if ($ui.Content -notmatch 'OpenMinis Desktop') {
-            Write-Error "frozen exe served the wrong UI"
+            Write-Host "::group::wrong UI served"
+            Write-Host $ui.Content.Substring(0, [Math]::Min(600, $ui.Content.Length))
+            Write-Host "::endgroup::"
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Write-Error "frozen exe served the wrong UI"
             exit 1
           }
+
+          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:8799/api/desktop/info).Content
+          Write-Host "desktop info: $info"
           Write-Host "frozen exe is healthy and serving the desktop UI"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 
