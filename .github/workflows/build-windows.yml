@@ -86,21 +86,47 @@ jobs:
           # headless and see whether the backend answers. The app writes its
           # startup log to %LOCALAPPDATA%\openminis\logs\desktop.log, which is
           # what we dump when it does not come up.
+          #
+          # Polling is a cheap raw TCP connect with a short timeout, not an
+          # HTTP request: a refused local connect returns immediately, while
+          # Invoke-WebRequest can sit on its own timeout on every attempt and
+          # turn a failure into minutes of dead waiting.
+          $port = 8799
           $log = Join-Path $env:LOCALAPPDATA "openminis\logs\desktop.log"
           $p = Start-Process -FilePath "dist\OpenMinisDesktop.exe" `
-               -ArgumentList "--no-window","--port","8799" -PassThru
-          $ok = $false
-          foreach ($i in 1..45) {
-            Start-Sleep -Seconds 2
-            if ($p.HasExited) { break }
+               -ArgumentList "--no-window","--port","$port" -PassThru
+
+          # NB: parameter named $portToTest rather than $p — $p is the process
+          # handle and shadowing it here would be a nasty read.
+          function Test-Port([int]$portToTest) {
             try {
-              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8799/api/health
-              if ($r.StatusCode -eq 200) { $ok = $true; break }
+              $c = New-Object System.Net.Sockets.TcpClient
+              $null = $c.ConnectAsync('127.0.0.1', $portToTest).Wait(250)
+              $open = $c.Connected
+              $c.Close()
+              return $open
+            } catch { return $false }
+          }
+
+          $deadline = (Get-Date).AddSeconds(75)
+          $open = $false
+          while ((Get-Date) -lt $deadline) {
+            if ($p.HasExited) { break }   # crashed: no point waiting out the clock
+            if (Test-Port $port) { $open = $true; break }
+            Start-Sleep -Milliseconds 400
+          }
+
+          $ok = $false
+          if ($open) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/health"
+              if ($r.StatusCode -eq 200) { $ok = $true }
             } catch { }
           }
 
           if (-not $ok) {
             Write-Host "::group::exe did not become healthy — diagnostics"
+            Write-Host "port opened: $open"
             Write-Host "process exited: $($p.HasExited)"
             if ($p.HasExited) { Write-Host "exit code: $($p.ExitCode)" }
             if (Test-Path $log) {
@@ -115,7 +141,7 @@ jobs:
             exit 1
           }
 
-          $ui = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:8799/_desktop/
+          $ui = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/_desktop/"
           if ($ui.Content -notmatch 'OpenMinis Desktop') {
             Write-Host "::group::wrong UI served"
             Write-Host $ui.Content.Substring(0, [Math]::Min(600, $ui.Content.Length))
@@ -125,7 +151,7 @@ jobs:
             exit 1
           }
 
-          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:8799/api/desktop/info).Content
+          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/desktop/info").Content
           Write-Host "desktop info: $info"
           Write-Host "frozen exe is healthy and serving the desktop UI"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
