@@ -11,7 +11,10 @@ name: Build Windows desktop app
 on:
   workflow_dispatch:
   push:
+    # Tag pushes are what create a Release. Note GitHub does not evaluate
+    # `paths` for tag pushes, so `v*` tags always build.
     branches: [main]
+    tags: ['v*']
     paths:
       - 'desktop/**'
       - 'web/desktop/**'
