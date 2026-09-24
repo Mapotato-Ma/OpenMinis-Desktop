@@ -15,8 +15,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 BG = (20, 21, 23, 255)
-ACCENT = (47, 191, 113, 255)
-ACCENT_DIM = (31, 138, 81, 255)
+ACCENT = (91, 140, 255, 255)
+ACCENT_DIM = (47, 92, 196, 255)
 
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 SS = 8  # supersampling factor for smooth diagonals at small sizes

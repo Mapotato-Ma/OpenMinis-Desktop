@@ -1,7 +1,7 @@
 # OpenMinis Desktop
 
 **把 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 agent 内核搬进 Windows 桌面，
-做成一个类似 Cursor 的原生窗口应用。**
+做成一个原生窗口的桌面应用。**
 
 OpenMinis 官方客户端目前只有 iOS / Android / macOS。这个项目补上 Windows：
 同一套 agent 内核（工具调用、技能、记忆、soul、会话持久化），换成原生窗口 +
@@ -9,7 +9,7 @@ IDE 风格的桌面界面，并且用 GitHub Actions 直接产出免安装的 `.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  ◈ OpenMinis  Desktop        [workspace]      ⌘K  终端  面板   ◐  ?  │
+│  ◈ OpenMinis  Desktop        [workspace]    ⌘K 终端 面板 ◐ 设置      │
 ├──────────┬───────────────────────────────────┬───────────────────────┤
 │ ＋ 新会话 │  对话（流式 + 工具卡片）           │ 文件 / 代码 / 变更     │
 │ 过滤…     │                                   │  ├ src/                │
@@ -30,7 +30,7 @@ IDE 风格的桌面界面，并且用 GitHub Actions 直接产出免安装的 `.
 内置终端、文件树、代码查看、agent 改文件的 diff、命令面板。数据落在本机
 `%LOCALAPPDATA%\openminis`，会话与上游客户端格式一致。
 
-**不是**：Cursor 的替代品。没有 LSP、没有多文件重构、没有代码补全模型。
+**不是**：一个完整的 IDE。没有 LSP、没有多文件重构、没有代码补全模型。
 它的定位是「带一个真 shell 的 agent 工作台」，编辑能力来自 agent 本身，
 不是来自编辑器。
 
@@ -111,6 +111,8 @@ python scripts/smoke_test.py
 - **文件 diff**：`file_edit` / `file_write` 的改动在「变更」页以 LCS 行级 diff 呈现
 - **文件树 + 代码查看**：按需展开，多语言高亮
 - **内置终端**：命令经内核的 shell 工具执行，支持历史上下键
+- **内置设置页**：模型服务（多实例 + 用途绑定）、人格、技能、Agent 参数 —— 不用再跳回移动端界面
+- **主题**：跟随系统 / 浅色 / 深色三态，跟随模式下随系统实时切换
 - **命令面板**：`Ctrl+K`，会话与操作统一检索
 - **可拖动分栏**，宽度、主题、面板状态记在 `localStorage`
 
@@ -119,9 +121,11 @@ python scripts/smoke_test.py
 | 键 | 作用 |
 |---|---|
 | `Ctrl+K` | 命令面板 |
-| `Ctrl+\`` | 终端抽屉 |
+| `Ctrl+`` ` | 终端抽屉 |
 | `Ctrl+B` | 右侧面板 |
 | `Ctrl+N` | 新会话 |
+| `Ctrl+,` | 设置 |
+| `Ctrl+Shift+L` | 切换主题（跟随系统 → 浅色 → 深色） |
 | `Enter` / `Shift+Enter` | 发送 / 换行 |
 | `Esc` | 关面板 / 停止生成 |
 
@@ -160,11 +164,12 @@ python scripts/smoke_test.py
 
 已经在做 / 想做的：
 
-- [ ] 设置页（模型服务、soul、技能）直接内嵌进桌面界面，不用回退到移动端 UI
+- [x] 设置页（模型服务、人格、技能、Agent 参数）内嵌进桌面界面
+- [x] 主题三态（跟随系统 / 浅色 / 深色）
 - [ ] 多标签工作区（同时开多个会话）
 - [ ] 文件保存 / 编辑器内直接改（目前编辑能力全在 agent 侧）
-- [ ] 深色/浅色主题跟随系统
 - [ ] 会话搜索走 FTS 而不是前端过滤
+- [ ] 身份（identity）与工具开关的内嵌编辑
 - [ ] macOS / Linux 打包产物（内核已经跨平台，主要是 pywebview 与打包脚本的事）
 
 架构与实现细节见 [docs/DESKTOP.md](docs/DESKTOP.md)。

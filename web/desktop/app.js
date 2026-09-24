@@ -947,12 +947,15 @@ function initSplitters() {
 function paletteCommands() {
   const cmds = [
     { kind: 'action', label: '新建会话', run: () => newSession() },
+    { kind: 'action', label: '打开设置', run: () => openSettings() },
+    { kind: 'action', label: '设置：模型服务', run: () => openSettings('models') },
+    { kind: 'action', label: '设置：人格', run: () => openSettings('soul') },
+    { kind: 'action', label: '设置：技能', run: () => openSettings('skills') },
     { kind: 'action', label: '切换终端面板', run: () => toggleTerminal() },
     { kind: 'action', label: '切换右侧面板', run: () => toggleInspector() },
     { kind: 'action', label: '刷新文件树', run: () => loadTree() },
     { kind: 'action', label: '刷新会话列表', run: () => loadSessions() },
-    { kind: 'action', label: '切换主题（深色 / 浅色）', run: () => toggleTheme() },
-    { kind: 'action', label: '查看技能列表', run: () => showSkills() },
+    { kind: 'action', label: '切换主题（跟随系统 / 浅色 / 深色）', run: () => cycleTheme() },
     { kind: 'action', label: '查看记忆文件', run: () => showMemory() },
     { kind: 'action', label: '运行信息 / 诊断', run: () => showInfo() },
     { kind: 'action', label: '打开工作目录', run: () => openWorkspace() },
@@ -1124,14 +1127,66 @@ function openWorkspace() {
 }
 
 /* ── theme ───────────────────────────────────────────────────────────── */
-function applyTheme(name) {
-  document.documentElement.dataset.theme = name;
-  try { localStorage.setItem('om.theme', name); } catch { /* ignore */ }
+// Three modes, not two: "system" is the default and tracks the OS setting
+// live, so the app follows a machine that flips to light at sunrise without
+// the user touching anything.
+const THEME_KEY = 'om.themeMode';
+const THEME_MODES = [
+  { id: 'system', label: '跟随系统', icon: '◐' },
+  { id: 'light', label: '浅色', icon: '☀' },
+  { id: 'dark', label: '深色', icon: '☾' },
+];
+let themeMode = 'system';
+const mql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+
+function resolvedTheme() {
+  if (themeMode !== 'system') return themeMode;
+  return mql && mql.matches ? 'light' : 'dark';
 }
 
-function toggleTheme() {
-  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+function applyTheme() {
+  const resolved = resolvedTheme();
+  document.documentElement.dataset.theme = resolved;
+  const mode = THEME_MODES.find((m) => m.id === themeMode) || THEME_MODES[0];
+  $('themeIcon').textContent = mode.icon;
+  $('themeLabel').textContent = mode.label;
+  try { localStorage.setItem(THEME_KEY, themeMode); } catch { /* private mode */ }
 }
+
+function setThemeMode(mode) {
+  themeMode = THEME_MODES.some((m) => m.id === mode) ? mode : 'system';
+  applyTheme();
+}
+
+function cycleTheme() {
+  const i = THEME_MODES.findIndex((m) => m.id === themeMode);
+  setThemeMode(THEME_MODES[(i + 1) % THEME_MODES.length].id);
+  toast('主题：' + (THEME_MODES.find((m) => m.id === themeMode) || {}).label);
+}
+
+function openThemeMenu() {
+  closeThemeMenu();
+  const rect = $('btnTheme').getBoundingClientRect();
+  const menu = el('div', 'theme-menu');
+  menu.id = 'themeMenu';
+  for (const m of THEME_MODES) {
+    const b = el('button', themeMode === m.id ? 'on' : '');
+    b.appendChild(el('span', 'check', themeMode === m.id ? '✓' : ''));
+    b.appendChild(el('span', null, m.icon + '  ' + m.label));
+    b.addEventListener('click', () => { setThemeMode(m.id); closeThemeMenu(); });
+    menu.appendChild(b);
+  }
+  menu.style.top = rect.bottom + 6 + 'px';
+  menu.style.right = Math.max(8, window.innerWidth - rect.right) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeThemeMenu, { once: true }), 0);
+}
+
+function closeThemeMenu() {
+  const m = $('themeMenu');
+  if (m) m.remove();
+}
+
 
 /* ── composer autogrow ───────────────────────────────────────────────── */
 function autoGrow() {
@@ -1149,7 +1204,10 @@ function onKeydown(ev) {
   if (mod && ev.key === '`') { ev.preventDefault(); toggleTerminal(); return; }
   if (mod && ev.key.toLowerCase() === 'b') { ev.preventDefault(); toggleInspector(); return; }
   if (mod && ev.key.toLowerCase() === 'n') { ev.preventDefault(); newSession(); return; }
+  if (mod && ev.key === ',') { ev.preventDefault(); openSettings(); return; }
+  if (mod && ev.shiftKey && ev.key.toLowerCase() === 'l') { ev.preventDefault(); cycleTheme(); return; }
   if (ev.key === 'Escape') {
+    if (!$('settingsOverlay').hidden) { closeSettings(); return; }
     if (state.palette.open) { closePalette(); return; }
     if (!$('modalOverlay').hidden) { $('modalOverlay').hidden = true; return; }
     if (state.streaming) { stopTurn(); return; }
@@ -1204,9 +1262,26 @@ function wire() {
   $('termInput').addEventListener('keydown', onKeydown);
 
   $('btnInspector').addEventListener('click', () => toggleInspector());
-  $('btnTheme').addEventListener('click', toggleTheme);
-  $('btnInfo').addEventListener('click', showInfo);
-  $('btnSkills').addEventListener('click', showSkills);
+  $('btnTheme').addEventListener('click', (e) => { e.stopPropagation(); openThemeMenu(); });
+  $('btnSettings').addEventListener('click', () => openSettings());
+  $('btnSettingsClose').addEventListener('click', closeSettings);
+  document.querySelectorAll('.settings-nav-item').forEach((b) => {
+    b.addEventListener('click', () => switchSettingsPane(b.dataset.pane));
+  });
+  $('btnAddProvider').addEventListener('click', addProvider);
+  $('soulBody').addEventListener('input', updateSoulCounter);
+  $('btnSaveSoul').addEventListener('click', saveSoul);
+  $('btnReloadSoul').addEventListener('click', loadSoul);
+  $('btnResetSoul').addEventListener('click', resetSoul);
+  $('btnSaveAgent').addEventListener('click', async () => {
+    readAgentForm();
+    await saveSettings();
+  });
+  $('btnReloadAgent').addEventListener('click', async () => {
+    await loadSettings();
+    toast('已重新载入');
+  });
+  $('btnSkills').addEventListener('click', () => openSettings('skills'));
   $('btnMemory').addEventListener('click', showMemory);
   $('btnRefreshTree').addEventListener('click', () => loadTree());
   $('btnCopyCode').addEventListener('click', async () => {
@@ -1234,7 +1309,14 @@ function wire() {
 
 /* ── boot ────────────────────────────────────────────────────────────── */
 async function boot() {
-  try { applyTheme(localStorage.getItem('om.theme') || 'dark'); } catch { applyTheme('dark'); }
+  try { themeMode = localStorage.getItem(THEME_KEY) || 'system'; } catch { themeMode = 'system'; }
+  applyTheme();
+  // Track the OS live while in "system" mode.
+  if (mql) {
+    const onScheme = () => { if (themeMode === 'system') applyTheme(); };
+    if (mql.addEventListener) mql.addEventListener('change', onScheme);
+    else if (mql.addListener) mql.addListener(onScheme);
+  }
   try { if (localStorage.getItem('om.inspector') === '0') toggleInspector(false); } catch { /* ignore */ }
   try { switchTab(localStorage.getItem('om.tab') || 'files'); } catch { switchTab('files'); }
 
@@ -1251,3 +1333,439 @@ async function boot() {
 }
 
 document.addEventListener('DOMContentLoaded', boot);
+
+/* ==========================================================================
+   Settings
+   Everything the mobile UI used to be needed for — provider instances, model
+   slots, soul, skills, agent knobs — now lives inside the desktop window.
+
+   The kernel's settings API is a full-replacement PUT: whatever list you send
+   becomes the new state. Two consequences worth remembering:
+     * always send *every* provider, not just the edited one;
+     * an omitted/blank ``apiKey`` means "keep the stored secret", so we never
+       have to round-trip a key the server refuses to send us.
+   ========================================================================== */
+const settings = {
+  loaded: false,
+  data: null,       // last GET /api/settings payload
+  draft: null,      // {providers:[...], slots:{...}, agent:{...}}
+  pane: 'models',
+};
+
+function openSettings(pane) {
+  $('settingsOverlay').hidden = false;
+  if (pane) switchSettingsPane(pane);
+  loadSettings();
+}
+
+function closeSettings() {
+  $('settingsOverlay').hidden = true;
+}
+
+function switchSettingsPane(name) {
+  settings.pane = name;
+  document.querySelectorAll('.settings-nav-item').forEach((b) => {
+    b.classList.toggle('active', b.dataset.pane === name);
+  });
+  document.querySelectorAll('.settings-pane').forEach((p) => {
+    p.classList.toggle('active', p.dataset.pane === name);
+  });
+  if (name === 'soul' && !settings.soulLoaded) loadSoul();
+  if (name === 'skills' && !settings.skillsLoaded) loadSkills();
+  if (name === 'about') loadAbout();
+}
+
+async function loadSettings() {
+  try {
+    const data = await api('/settings');
+    settings.data = data;
+    settings.draft = {
+      providers: (data.providers || []).map((p) => ({
+        id: p.id, type: p.type, label: p.label || '', baseUrl: p.baseUrl || '',
+        model: p.model || '', hasKey: !!p.hasKey, engine: p.engine,
+      })),
+      slots: {},
+      agent: Object.assign({}, data.agent || {}),
+    };
+    for (const s of data.modelSlots || []) {
+      settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
+    }
+    settings.loaded = true;
+    renderProviders();
+    renderSlots();
+    renderAgentForm();
+  } catch (e) {
+    toast('设置加载失败: ' + e.message, 'err');
+  }
+}
+
+function providerTypeMeta(type) {
+  return ((settings.data && settings.data.providerTypes) || []).find((t) => t.type === type) || {};
+}
+
+/* ── provider instances ──────────────────────────────────────────────── */
+function renderProviders() {
+  const box = $('providerList');
+  box.innerHTML = '';
+  const list = settings.draft.providers;
+  if (!list.length) {
+    box.appendChild(el('div', 'empty-note', '还没有配置任何服务商。'));
+    return;
+  }
+  const activeId = settings.data && settings.data.activeProviderId;
+
+  list.forEach((p, idx) => {
+    const meta = providerTypeMeta(p.type);
+    const card = el('div', 'provider-card' + (p.id === activeId ? ' active' : ''));
+
+    const head = el('div', 'provider-head');
+    head.appendChild(el('span', 'provider-title', p.label || meta.label || p.type));
+    head.appendChild(el('span', 'tag', meta.label || p.type));
+    if (meta.engine) head.appendChild(el('span', 'tag ok', '引擎就绪'));
+    else head.appendChild(el('span', 'tag warn', '引擎未移植'));
+    if (p.id === activeId) head.appendChild(el('span', 'tag ok', '当前对话'));
+    head.appendChild(el('span', 'spacer-x'));
+    const del = el('button', 'btn ghost', '删除');
+    del.addEventListener('click', () => removeProvider(idx));
+    head.appendChild(del);
+    card.appendChild(head);
+
+    const row1 = el('div', 'field-row');
+    row1.appendChild(textField('显示名称', p.label, (v) => { p.label = v; }, 'My Gateway'));
+    row1.appendChild(textField('Base URL', p.baseUrl, (v) => { p.baseUrl = v; }, meta.engine === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'));
+    card.appendChild(row1);
+
+    const row2 = el('div', 'field-row');
+    row2.appendChild(selectField('类型', p.type,
+      ((settings.data && settings.data.providerTypes) || []).map((t) => [t.type, t.label + (t.engine ? '' : '（引擎未移植）')]),
+      (v) => { p.type = v; renderProviders(); }));
+    const keyField = passwordField(
+      p.hasKey ? 'API Key（已保存，留空则不变）' : 'API Key',
+      (v) => { p.newKey = v; },
+    );
+    row2.appendChild(keyField);
+    card.appendChild(row2);
+
+    card.appendChild(textField('模型 ID', p.model, (v) => { p.model = v; }, meta.defaultModel || 'gpt-4o-mini'));
+
+    box.appendChild(card);
+  });
+}
+
+function textField(label, value, onChange, placeholder) {
+  const wrap = el('div', 'field');
+  wrap.appendChild(el('label', 'field-label', label));
+  const inp = el('input');
+  inp.type = 'text';
+  inp.value = value || '';
+  inp.placeholder = placeholder || '';
+  inp.addEventListener('input', () => onChange(inp.value.trim()));
+  wrap.appendChild(inp);
+  return wrap;
+}
+
+function passwordField(label, onChange) {
+  const wrap = el('div', 'field');
+  wrap.appendChild(el('label', 'field-label', label));
+  const inp = el('input');
+  inp.type = 'password';
+  inp.autocomplete = 'off';
+  inp.placeholder = 'sk-…';
+  inp.addEventListener('input', () => onChange(inp.value));
+  wrap.appendChild(inp);
+  return wrap;
+}
+
+function selectField(label, value, options, onChange) {
+  const wrap = el('div', 'field');
+  wrap.appendChild(el('label', 'field-label', label));
+  const sel = el('select');
+  for (const [val, text] of options) {
+    const o = el('option', null, text);
+    o.value = val;
+    if (val === value) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener('change', () => onChange(sel.value));
+  wrap.appendChild(sel);
+  return wrap;
+}
+
+function newProviderId(type) {
+  const base = String(type || 'provider').toLowerCase().replace(/[^a-z0-9]/g, '') || 'provider';
+  let id = base;
+  let n = 1;
+  const taken = new Set(settings.draft.providers.map((p) => p.id));
+  while (taken.has(id)) id = base + '-' + (++n);
+  return id.slice(0, 63);
+}
+
+function addProvider() {
+  const types = (settings.data && settings.data.providerTypes) || [];
+  const type = (types.find((t) => t.engine) || types[0] || {}).type || 'openAI';
+  const meta = providerTypeMeta(type);
+  settings.draft.providers.push({
+    id: newProviderId(type), type, label: meta.label || type,
+    baseUrl: '', model: meta.defaultModel || '', hasKey: false,
+  });
+  renderProviders();
+}
+
+function removeProvider(idx) {
+  const p = settings.draft.providers[idx];
+  if (!p) return;
+  if (!confirm(`删除服务商「${p.label || p.type}」？`)) return;
+  settings.draft.providers.splice(idx, 1);
+  // Drop any slot pointing at the instance we just removed, otherwise the
+  // server rejects the whole save with "指向未配置的厂商".
+  for (const slot of Object.keys(settings.draft.slots)) {
+    if (settings.draft.slots[slot].instanceId === p.id) {
+      settings.draft.slots[slot] = { instanceId: '', model: '' };
+    }
+  }
+  renderProviders();
+  renderSlots();
+}
+
+/* ── model slots ─────────────────────────────────────────────────────── */
+function renderSlots() {
+  const box = $('slotList');
+  box.innerHTML = '';
+  const slots = (settings.data && settings.data.modelSlots) || [];
+  if (!slots.length) {
+    box.appendChild(el('div', 'empty-note', '没有可绑定的用途。'));
+    return;
+  }
+  const providers = settings.draft.providers;
+  for (const s of slots) {
+    const cur = settings.draft.slots[s.slot] || { instanceId: '', model: '' };
+    const row = el('div', 'slot-row');
+    row.appendChild(el('div', 'slot-name', s.label));
+
+    const sel = el('select');
+    const none = el('option', null, '（未配置）');
+    none.value = '';
+    sel.appendChild(none);
+    for (const p of providers) {
+      const o = el('option', null, p.label || providerTypeMeta(p.type).label || p.type);
+      o.value = p.id;
+      if (p.id === cur.instanceId) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => {
+      cur.instanceId = sel.value;
+      const p = providers.find((x) => x.id === sel.value);
+      cur.model = p ? (p.model || providerTypeMeta(p.type).defaultModel || '') : '';
+      renderSlots();
+    });
+    row.appendChild(sel);
+
+    const inp = el('input');
+    inp.type = 'text';
+    inp.placeholder = '模型 ID';
+    inp.value = cur.model || '';
+    inp.disabled = !cur.instanceId;
+    inp.addEventListener('input', () => { cur.model = inp.value.trim(); });
+    row.appendChild(inp);
+    box.appendChild(row);
+  }
+}
+
+/* ── save (full-replacement PUT) ─────────────────────────────────────── */
+async function saveSettings({ silent } = {}) {
+  const d = settings.draft;
+  const providers = d.providers.map((p) => {
+    const out = {
+      id: p.id, type: p.type, label: p.label || '',
+      baseUrl: p.baseUrl || '', model: p.model || '',
+    };
+    // Only send a key when the user typed one; blank means "keep the secret".
+    if (p.newKey) out.apiKey = p.newKey;
+    return out;
+  });
+  const modelSlots = {};
+  for (const [slot, v] of Object.entries(d.slots)) {
+    if (v.instanceId && v.model) modelSlots[slot] = { instanceId: v.instanceId, model: v.model };
+    else modelSlots[slot] = null;
+  }
+  const payload = { providers, modelSlots };
+  if (d.agent) payload.agent = d.agent;
+
+  try {
+    const data = await api('/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    settings.data = data;
+    settings.draft.providers = (data.providers || []).map((p) => ({
+      id: p.id, type: p.type, label: p.label || '', baseUrl: p.baseUrl || '',
+      model: p.model || '', hasKey: !!p.hasKey, engine: p.engine,
+    }));
+    for (const s of data.modelSlots || []) {
+      settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
+    }
+    renderProviders();
+    renderSlots();
+    renderAgentForm();
+    if (!silent) toast('已保存');
+    return true;
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'err');
+    return false;
+  }
+}
+
+/* ── agent knobs ─────────────────────────────────────────────────────── */
+function renderAgentForm() {
+  const a = settings.draft.agent || {};
+  $('agentMaxTools').value = a.maxToolSteps != null ? a.maxToolSteps : '';
+  $('agentMaxMemory').value = a.maxMemoryRounds != null ? a.maxMemoryRounds : '';
+  $('agentDeepThinking').checked = !!a.deepThinking;
+  $('agentSubagent').checked = !!a.subagentEnabled;
+}
+
+function readAgentForm() {
+  const a = settings.draft.agent || (settings.draft.agent = {});
+  const tools = parseInt($('agentMaxTools').value, 10);
+  const mem = parseInt($('agentMaxMemory').value, 10);
+  if (!Number.isNaN(tools)) a.maxToolSteps = tools;
+  if (!Number.isNaN(mem)) a.maxMemoryRounds = mem;
+  a.deepThinking = $('agentDeepThinking').checked;
+  a.subagentEnabled = $('agentSubagent').checked;
+}
+
+/* ── soul ────────────────────────────────────────────────────────────── */
+async function loadSoul() {
+  try {
+    const d = await api('/system/soul');
+    const m = d.metadata || {};
+    $('soulName').value = m.name || '';
+    $('soulEmoji').value = m.emoji || '';
+    $('soulStyle').value = m.style || '';
+    $('soulLang').value = m.lang || 'auto';
+    $('soulBody').value = d.body || '';
+    settings.soulLoaded = true;
+    settings.soulLimit = d.limit || null;
+    updateSoulCounter();
+  } catch (e) {
+    toast('人格加载失败: ' + e.message, 'err');
+  }
+}
+
+function updateSoulCounter() {
+  const n = $('soulBody').value.length;
+  const lim = settings.soulLimit;
+  let text = n + ' 字符';
+  if (lim && (lim.cap || lim.limit)) {
+    const cap = lim.cap || lim.limit;
+    text += ` / 上限 ${cap}` + (n > cap ? '（超出）' : '');
+  }
+  $('soulCounter').textContent = text;
+}
+
+async function saveSoul() {
+  const payload = {
+    metadata: {
+      name: $('soulName').value.trim() || 'Minis',
+      emoji: $('soulEmoji').value.trim(),
+      icon: '',
+      style: $('soulStyle').value.trim(),
+      lang: $('soulLang').value,
+    },
+    body: $('soulBody').value,
+  };
+  try {
+    const d = await api('/system/soul', { method: 'PUT', body: JSON.stringify(payload) });
+    settings.soulLimit = d.limit || settings.soulLimit;
+    updateSoulCounter();
+    toast('人格已保存');
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'err');
+  }
+}
+
+async function resetSoul() {
+  if (!confirm('恢复默认人格？当前内容会被覆盖。')) return;
+  try {
+    await api('/system/soul/restore-default', { method: 'POST', body: JSON.stringify({}) });
+    await loadSoul();
+    toast('已恢复默认');
+  } catch (e) {
+    toast('恢复失败: ' + e.message, 'err');
+  }
+}
+
+/* ── skills ──────────────────────────────────────────────────────────── */
+async function loadSkills() {
+  const box = $('skillsList');
+  box.innerHTML = '';
+  box.appendChild(el('div', 'empty-note', '加载中…'));
+  try {
+    const d = await api('/skills');
+    const list = (d && d.skills) || [];
+    settings.skillsLoaded = true;
+    $('skillsSub').textContent = `共 ${list.length} 个。内置技能由系统生成，不可删除。`;
+    box.innerHTML = '';
+    if (!list.length) {
+      box.appendChild(el('div', 'empty-note', '还没有安装技能。'));
+      return;
+    }
+    for (const s of list) {
+      const row = el('div', 'list-row');
+      const main = el('div', 'list-main');
+      const title = el('div', 'list-title');
+      title.textContent = s.name;
+      if (s.source) title.appendChild(el('span', 'tag', s.source));
+      if (s.active) title.appendChild(el('span', 'tag ok', '已启用'));
+      main.appendChild(title);
+      main.appendChild(el('div', 'list-desc', s.description || ''));
+      if (s.env && s.env.length) {
+        main.appendChild(el('div', 'list-desc', '需要环境变量: ' + s.env.join(', ')));
+      }
+      row.appendChild(main);
+
+      const actions = el('div', 'list-actions');
+      if (!s.generated) {
+        const b = el('button', 'btn' + (s.active ? '' : ' primary'), s.active ? '停用' : '启用');
+        b.addEventListener('click', () => toggleSkill(s.name, !s.active, b));
+        actions.appendChild(b);
+      }
+      row.appendChild(actions);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = '';
+    box.appendChild(el('div', 'empty-note', '技能加载失败: ' + e.message));
+  }
+}
+
+async function toggleSkill(name, activate, btn) {
+  btn.disabled = true;
+  try {
+    await api(`/skills/${encodeURIComponent(name)}/${activate ? 'activate' : 'deactivate'}`, {
+      method: 'POST', body: JSON.stringify({}),
+    });
+    await loadSkills();
+  } catch (e) {
+    toast('操作失败: ' + e.message, 'err');
+    btn.disabled = false;
+  }
+}
+
+/* ── about ───────────────────────────────────────────────────────────── */
+async function loadAbout() {
+  const box = $('aboutList');
+  box.innerHTML = '';
+  const rows = [];
+  try {
+    state.info = await api('/desktop/info');
+    for (const [k, v] of Object.entries(state.info)) rows.push([k, v == null ? '—' : String(v)]);
+  } catch (e) { rows.push(['desktop/info', '读取失败: ' + e.message]); }
+  try {
+    const h = await api('/health');
+    for (const [k, v] of Object.entries(h)) rows.push(['health.' + k, String(v)]);
+  } catch { /* offline is fine */ }
+  for (const [k, v] of rows) {
+    const r = el('div', 'kv');
+    r.appendChild(el('span', 'kv-k', k));
+    r.appendChild(el('span', 'kv-v', v));
+    box.appendChild(r);
+  }
+}

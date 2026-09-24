@@ -28,8 +28,10 @@
       <button class="tb-btn" id="btnPalette" title="命令面板 (Ctrl+K)">⌘K</button>
       <button class="tb-btn" id="btnTerm" title="终端 (Ctrl+`)">终端</button>
       <button class="tb-btn" id="btnInspector" title="切换右侧面板 (Ctrl+B)">面板</button>
-      <button class="tb-btn" id="btnTheme" title="切换主题">◐</button>
-      <button class="tb-btn" id="btnInfo" title="关于 / 诊断">?</button>
+      <button class="tb-btn theme-btn" id="btnTheme" title="主题 (Ctrl+Shift+L)">
+        <span class="th-ic" id="themeIcon">◐</span><span id="themeLabel">跟随系统</span>
+      </button>
+      <button class="tb-btn" id="btnSettings" title="设置 (Ctrl+,)">⚙ 设置</button>
     </div>
   </header>
 
@@ -187,6 +189,155 @@
       <button class="icon-btn" id="modalClose">✕</button>
     </div>
     <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- ── settings ───────────────────────────────────────────────────── -->
+<div class="settings-overlay" id="settingsOverlay" hidden>
+  <div class="settings-head">
+    <h1>设置</h1>
+    <button class="btn ghost" id="btnSettingsClose">✕ 关闭 (Esc)</button>
+  </div>
+  <div class="settings-main">
+    <nav class="settings-nav" id="settingsNav">
+      <button class="settings-nav-item active" data-pane="models"><span class="ic">⚙</span>模型服务</button>
+      <button class="settings-nav-item" data-pane="soul"><span class="ic">◈</span>人格</button>
+      <button class="settings-nav-item" data-pane="skills"><span class="ic">⚡</span>技能</button>
+      <button class="settings-nav-item" data-pane="agent"><span class="ic">🎛</span>Agent</button>
+      <button class="settings-nav-item" data-pane="about"><span class="ic">ℹ</span>关于</button>
+    </nav>
+
+    <div class="settings-body">
+      <!-- 模型服务 -->
+      <section class="settings-pane active" data-pane="models">
+        <h2>模型服务</h2>
+        <p class="pane-sub">
+          配置一个或多个服务商实例。密钥保存在本机
+          <code>%LOCALAPPDATA%\openminis</code>，不会上传到任何地方。
+        </p>
+
+        <div class="settings-block">
+          <h3>已配置的服务商</h3>
+          <p class="block-sub">多个实例可以共用同一个类型 —— 例如两个不同的 OpenAI 兼容网关。</p>
+          <div id="providerList"></div>
+          <div class="btn-row">
+            <button class="btn primary" id="btnAddProvider">＋ 添加服务商</button>
+          </div>
+        </div>
+
+        <div class="settings-block">
+          <h3>用途绑定</h3>
+          <p class="block-sub">每个用途挑一个「实例 + 模型」。没配的用途对应的工具会不可用。</p>
+          <div id="slotList"></div>
+        </div>
+      </section>
+
+      <!-- 人格 -->
+      <section class="settings-pane" data-pane="soul">
+        <h2>人格</h2>
+        <p class="pane-sub">
+          这段内容会作为系统提示的一部分注入每次对话。写得越具体，风格越稳定。
+        </p>
+        <div class="settings-block">
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="soulName">名字</label>
+              <input type="text" id="soulName" placeholder="Minis">
+            </div>
+            <div class="field">
+              <label class="field-label" for="soulEmoji">表情</label>
+              <input type="text" id="soulEmoji" placeholder="✨" maxlength="4">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="soulStyle">风格</label>
+              <input type="text" id="soulStyle" placeholder="简洁、直接、不说客套话">
+            </div>
+            <div class="field">
+              <label class="field-label" for="soulLang">语言</label>
+              <select id="soulLang">
+                <option value="auto">跟随用户</option>
+                <option value="zh-Hans">中文</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="soulBody">正文</label>
+            <textarea id="soulBody" spellcheck="false" placeholder="**别表演，直接干活。**"></textarea>
+            <div class="field-hint" id="soulCounter"></div>
+          </div>
+          <div class="btn-row">
+            <button class="btn primary" id="btnSaveSoul">保存</button>
+            <button class="btn" id="btnReloadSoul">重新载入</button>
+            <button class="btn danger" id="btnResetSoul">恢复默认</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 技能 -->
+      <section class="settings-pane" data-pane="skills">
+        <h2>技能</h2>
+        <p class="pane-sub">
+          技能是给 agent 的可复用指令集。启用的技能会出现在它的工具清单里。
+        </p>
+        <div class="settings-block">
+          <h3>已安装</h3>
+          <p class="block-sub" id="skillsSub">加载中…</p>
+          <div id="skillsList"></div>
+        </div>
+      </section>
+
+      <!-- Agent -->
+      <section class="settings-pane" data-pane="agent">
+        <h2>Agent</h2>
+        <p class="pane-sub">对话循环的参数。改动会立刻影响下一轮，不影响已有会话。</p>
+        <div class="settings-block">
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="agentMaxTools">单轮最大工具调用次数</label>
+              <input type="number" id="agentMaxTools" min="1" max="200">
+            </div>
+            <div class="field">
+              <label class="field-label" for="agentMaxMemory">记忆轮数</label>
+              <input type="number" id="agentMaxMemory" min="0" max="200">
+            </div>
+          </div>
+          <label class="check-row">
+            <input type="checkbox" id="agentDeepThinking"> <span>深度思考</span>
+            <span class="hint">推理模型会先思考再回答，更慢但更准</span>
+          </label>
+          <label class="check-row">
+            <input type="checkbox" id="agentSubagent"> <span>允许子代理</span>
+            <span class="hint">把大任务拆给子代理并行做</span>
+          </label>
+          <div class="btn-row">
+            <button class="btn primary" id="btnSaveAgent">保存</button>
+            <button class="btn" id="btnReloadAgent">重新载入</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 关于 -->
+      <section class="settings-pane" data-pane="about">
+        <h2>关于</h2>
+        <p class="pane-sub">运行环境与诊断信息。</p>
+        <div class="settings-block">
+          <h3>环境</h3>
+          <div id="aboutList"><div class="empty-note">加载中…</div></div>
+        </div>
+        <div class="settings-block">
+          <h3>快捷键</h3>
+          <div class="kv"><span class="kv-k">Ctrl+K</span><span class="kv-v">命令面板</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+`</span><span class="kv-v">终端</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+B</span><span class="kv-v">右侧面板</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+N</span><span class="kv-v">新会话</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+,</span><span class="kv-v">设置</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+Shift+L</span><span class="kv-v">切换主题</span></div>
+        </div>
+      </section>
+    </div>
   </div>
 </div>
 
