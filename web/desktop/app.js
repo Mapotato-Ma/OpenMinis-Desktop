@@ -951,6 +951,7 @@ function paletteCommands() {
     { kind: 'action', label: '设置：模型服务', run: () => openSettings('models') },
     { kind: 'action', label: '设置：人格', run: () => openSettings('soul') },
     { kind: 'action', label: '设置：技能', run: () => openSettings('skills') },
+    { kind: 'action', label: '设置：身份与工具', run: () => openSettings('identity') },
     { kind: 'action', label: '切换终端面板', run: () => toggleTerminal() },
     { kind: 'action', label: '切换右侧面板', run: () => toggleInspector() },
     { kind: 'action', label: '刷新文件树', run: () => loadTree() },
@@ -1269,6 +1270,20 @@ function wire() {
     b.addEventListener('click', () => switchSettingsPane(b.dataset.pane));
   });
   $('btnAddProvider').addEventListener('click', addProvider);
+  $('btnIdentityActivate').addEventListener('click', () => {
+    settings.identity.activeId = settings.identity.selected;
+    renderIdentities();
+    renderIdentityTools();
+    toast('已设为当前身份，记得保存');
+  });
+  $('btnToolsAll').addEventListener('click', () => setAllTools('all'));
+  $('btnToolsNone').addEventListener('click', () => setAllTools('none'));
+  $('btnToolsRecommended').addEventListener('click', () => setAllTools('recommended'));
+  $('btnSaveIdentity').addEventListener('click', () => saveSettings());
+  $('btnReloadIdentity').addEventListener('click', async () => {
+    await loadSettings();
+    toast('已重新载入');
+  });
   $('soulBody').addEventListener('input', updateSoulCounter);
   $('btnSaveSoul').addEventListener('click', saveSoul);
   $('btnReloadSoul').addEventListener('click', loadSoul);
@@ -1352,10 +1367,12 @@ const settings = {
   pane: 'models',
 };
 
-function openSettings(pane) {
+async function openSettings(pane) {
   $('settingsOverlay').hidden = false;
+  // Load before switching panes: the identity pane renders straight from the
+  // draft, so switching first would touch a half-built state.
+  if (!settings.loaded) await loadSettings();
   if (pane) switchSettingsPane(pane);
-  loadSettings();
 }
 
 function closeSettings() {
@@ -1371,6 +1388,7 @@ function switchSettingsPane(name) {
     p.classList.toggle('active', p.dataset.pane === name);
   });
   if (name === 'soul' && !settings.soulLoaded) loadSoul();
+  if (name === 'identity' && settings.identity) { renderIdentities(); renderIdentityTools(); }
   if (name === 'skills' && !settings.skillsLoaded) loadSkills();
   if (name === 'about') loadAbout();
 }
@@ -1391,12 +1409,209 @@ async function loadSettings() {
       settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
     }
     settings.loaded = true;
+    buildIdentityDraft(data);
     renderProviders();
     renderSlots();
     renderAgentForm();
+    renderIdentities();
+    renderIdentityTools();
   } catch (e) {
     toast('设置加载失败: ' + e.message, 'err');
   }
+}
+
+/* ── identities & tool toggles ───────────────────────────────────────── */
+// The kernel models tool permissions as `enabledTools`:
+//   null  -> no override, fall back to the identity's recommendedTools
+//   [...] -> explicit override, and an EMPTY list means "no tools at all"
+// There is no API to clear an override again, so "restore recommended" writes
+// the recommended list explicitly — same effective behaviour, just stored as
+// an override.
+function buildIdentityDraft(data) {
+  const prev = settings.identity || {};
+  const tools = {};
+  for (const i of data.identities || []) {
+    // Keep unsaved edits when reloading for an unrelated reason.
+    tools[i.id] = prev.tools && prev.tools[i.id] && prev.dirty && prev.dirty.has(i.id)
+      ? prev.tools[i.id]
+      : (i.enabledTools || []);
+  }
+  const selected = (prev.selected && (data.identities || []).some((i) => i.id === prev.selected))
+    ? prev.selected
+    : ((data.identities || [])[0] || {}).id || null;
+  settings.identity = {
+    activeId: data.activeIdentityId || 'assistant',
+    selected,
+    tools,
+    dirty: (prev.dirty instanceof Set) ? prev.dirty : new Set(),
+  };
+}
+
+function identityById(id) {
+  return ((settings.data && settings.data.identities) || []).find((i) => i.id === id) || null;
+}
+
+function renderIdentities() {
+  const box = $('identityList');
+  if (!box || !settings.identity) return;
+  box.innerHTML = '';
+  const list = (settings.data && settings.data.identities) || [];
+  if (!list.length) {
+    box.appendChild(el('div', 'empty-note', '没有可用身份。'));
+    return;
+  }
+  const st = settings.identity;
+  for (const i of list) {
+    const row = el('div', 'identity-row' + (i.id === st.activeId ? ' active' : '')
+      + (i.id === st.selected ? ' selected' : ''));
+    row.appendChild(el('div', 'identity-radio'));
+    row.appendChild(el('span', 'identity-emoji', i.emoji || '🤖'));
+    const main = el('div', 'identity-main');
+    const name = el('div', 'identity-name');
+    name.appendChild(el('span', null, i.name || i.id));
+    if (i.id === st.activeId) name.appendChild(el('span', 'tag ok', '当前'));
+    if (!i.builtin) name.appendChild(el('span', 'tag', '自定义'));
+    if (st.dirty && st.dirty.has(i.id)) name.appendChild(el('span', 'tag warn', '未保存'));
+    main.appendChild(name);
+    if (i.description) main.appendChild(el('div', 'identity-desc', i.description));
+    row.appendChild(main);
+
+    const enabled = (st.tools[i.id] || []).length;
+    row.appendChild(el('div', 'identity-count', `${enabled}/${toolCatalog().length}`));
+
+    row.addEventListener('click', () => {
+      st.selected = i.id;
+      renderIdentities();
+      renderIdentityTools();
+    });
+    box.appendChild(row);
+  }
+}
+
+function toolCatalog() {
+  return (settings.data && settings.data.toolCatalog) || [];
+}
+
+// Tools whose checkbox is a lie. The kernel force-adds skill_use and send to
+// every identity's tool list (they are capability switches, not role tools),
+// and subagent_delegate is driven by the Agent pane's subagent toggle. Showing
+// them as freely toggleable would be dishonest, so they render locked with the
+// reason attached.
+const LOCKED_TOOLS = {
+  skill_use: '内核强制启用',
+  send: '内核强制启用',
+  subagent_delegate: '由 Agent 面板控制',
+};
+const lockedIds = () => Object.keys(LOCKED_TOOLS);
+const freeTools = () => toolCatalog().filter((t) => !LOCKED_TOOLS[t.id]);
+
+function renderIdentityTools() {
+  const box = $('identityToolList');
+  if (!box || !settings.identity) return;
+  const st = settings.identity;
+  const ident = identityById(st.selected);
+  box.innerHTML = '';
+
+  if (!ident) {
+    $('identityDetailSub').textContent = '选择上面的一个身份。';
+    $('identityToolActions').hidden = true;
+    return;
+  }
+  const enabled = new Set(st.tools[ident.id] || []);
+  const isActive = ident.id === st.activeId;
+
+  $('identityDetailTitle').textContent = `${ident.emoji || ''} ${ident.name || ident.id}`;
+  $('identityDetailSub').textContent = isActive
+    ? '这是当前生效的身份。工具改动会影响下一轮对话。'
+    : '这不是当前身份 —— 改它只影响以后切换到它的时候。';
+  $('identityToolActions').hidden = false;
+  $('btnIdentityActivate').hidden = isActive;
+  const free = freeTools();
+  const freeOn = free.filter((t) => enabled.has(t.id)).length;
+  $('identityToolCount').textContent =
+    `${freeOn} / ${free.length} 可选工具已启用（另有 ${lockedIds().length} 个不可关闭）`;
+
+  if (ident.persona) {
+    const p = el('div', 'identity-persona', ident.persona);
+    box.appendChild(p);
+  }
+
+  // group by category, preserving catalog order
+  const cats = new Map();
+  for (const t of toolCatalog()) {
+    const c = t.category || '其他';
+    if (!cats.has(c)) cats.set(c, []);
+    cats.get(c).push(t);
+  }
+
+  for (const [cat, tools] of cats) {
+    const wrap = el('div', 'tool-cat');
+    wrap.appendChild(el('div', 'tool-cat-head', `${cat} · ${tools.length}`));
+    const grid = el('div', 'tool-grid');
+    for (const t of tools) {
+      const lockedReason = LOCKED_TOOLS[t.id];
+      const on = lockedReason ? true : enabled.has(t.id);
+      const item = el('label', 'tool-item' + (on ? ' on' : '') + (lockedReason ? ' locked' : ''));
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = on;
+      cb.disabled = !!lockedReason;
+      cb.title = lockedReason || '';
+      cb.addEventListener('change', () => {
+        const cur = new Set(st.tools[ident.id] || []);
+        if (cb.checked) cur.add(t.id); else cur.delete(t.id);
+        st.tools[ident.id] = [...cur];
+        markToolsDirty(ident.id);
+        renderIdentityTools();
+        renderIdentities();
+      });
+      item.appendChild(cb);
+      const main = el('div', 'tool-item-main');
+      const nm = el('div', 'tool-item-name');
+      nm.appendChild(el('span', null, t.name || t.id));
+      nm.appendChild(el('span', 'tool-item-id', t.id));
+      if (lockedReason) nm.appendChild(el('span', 'tag', lockedReason));
+      main.appendChild(nm);
+      if (t.description) main.appendChild(el('div', 'tool-item-desc', t.description));
+      item.appendChild(main);
+      grid.appendChild(item);
+    }
+    wrap.appendChild(grid);
+    box.appendChild(wrap);
+  }
+}
+
+// What the server currently holds for this identity. Used to decide whether a
+// draft is genuinely dirty — clicking "restore recommended" on an untouched
+// identity should NOT light up "unsaved", and should not produce a write.
+function savedTools(id) {
+  const i = identityById(id);
+  return (i && i.enabledTools) || [];
+}
+
+function sameToolSet(a, b) {
+  if (a.length !== b.length) return false;
+  const s = new Set(b);
+  return a.every((x) => s.has(x));
+}
+
+function markToolsDirty(id) {
+  const st = settings.identity;
+  if (sameToolSet(st.tools[id] || [], savedTools(id))) st.dirty.delete(id);
+  else st.dirty.add(id);
+}
+
+function setAllTools(mode) {
+  const st = settings.identity;
+  const ident = identityById(st.selected);
+  if (!ident) return;
+  const all = toolCatalog().map((t) => t.id);
+  if (mode === 'all') st.tools[ident.id] = all;
+  else if (mode === 'none') st.tools[ident.id] = lockedIds();  // kernel re-adds these anyway
+  else st.tools[ident.id] = [...(ident.recommendedTools || [])];
+  markToolsDirty(ident.id);
+  renderIdentityTools();
+  renderIdentities();
 }
 
 function providerTypeMeta(type) {
@@ -1591,6 +1806,19 @@ async function saveSettings({ silent } = {}) {
   const payload = { providers, modelSlots };
   if (d.agent) payload.agent = d.agent;
 
+  // Identities: `activeIdentityId` is a separate top-level key, and
+  // `identityEdits` upserts tool lists. Only send identities the user actually
+  // touched — writing an override that merely repeats the recommended list is
+  // harmless but makes the stored state diverge from "no override".
+  const idst = settings.identity;
+  if (idst) {
+    if (idst.activeId) payload.activeIdentityId = idst.activeId;
+    const edits = [...idst.dirty]
+      .filter((id) => identityById(id))
+      .map((id) => ({ id, enabledTools: idst.tools[id] || [] }));
+    if (edits.length) payload.identityEdits = edits;
+  }
+
   try {
     const data = await api('/settings', { method: 'PUT', body: JSON.stringify(payload) });
     settings.data = data;
@@ -1601,9 +1829,13 @@ async function saveSettings({ silent } = {}) {
     for (const s of data.modelSlots || []) {
       settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
     }
+    if (settings.identity) settings.identity.dirty = new Set();
+    buildIdentityDraft(data);
     renderProviders();
     renderSlots();
     renderAgentForm();
+    renderIdentities();
+    renderIdentityTools();
     if (!silent) toast('已保存');
     return true;
   } catch (e) {

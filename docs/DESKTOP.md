@@ -141,6 +141,28 @@ _insert_front(app, Route("/_desktop/window-bootstrap.js", _bootstrap))
 人格走 `/api/system/soul`，PUT 的 body 是 `{metadata:{name,emoji,icon,style,lang}, body}`。
 服务端在写入时会做长度上限与提示注入检查，超限直接 400 并把原因回传。
 
+身份与工具走 `identityEdits` + `activeIdentityId`，这里有个必须理解的语义：
+
+```
+enabledTools: null   -> 没有覆盖，回落到该身份的 recommendedTools
+enabledTools: [...]  -> 显式覆盖，而空数组意味着「一个工具都不给」
+```
+
+API **没有清除覆盖的入口**，所以「恢复推荐」是显式把推荐列表写回去 ——
+生效行为一样，只是存储上变成了一次覆盖。前端因此只把真正改动的身份放进
+`identityEdits`，并且拿草稿和「服务端当前值」比对来判定是否算未保存，
+避免点一下「恢复推荐」就亮出「未保存」。
+
+还有三个工具的复选框是**不能关的**，界面上如实标了原因：
+
+| 工具 | 为什么 |
+|---|---|
+| `skill_use` | 内核在 `chat_service` 里无条件补进工具列表（能力开关，不是角色工具） |
+| `send` | 同上 —— 否则「有产物但发不出去」 |
+| `subagent_delegate` | 由 Agent 面板的子代理开关控制，不归身份管 |
+
+所以「全不选」保留这三个，否则界面会声称 0 个工具，而 agent 手里其实还有三个。
+
 ### 主题
 
 三态而不是两态：`system` / `light` / `dark`。默认 `system`，

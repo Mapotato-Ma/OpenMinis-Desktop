@@ -202,6 +202,7 @@
     <nav class="settings-nav" id="settingsNav">
       <button class="settings-nav-item active" data-pane="models"><span class="ic">⚙</span>模型服务</button>
       <button class="settings-nav-item" data-pane="soul"><span class="ic">◈</span>人格</button>
+      <button class="settings-nav-item" data-pane="identity"><span class="ic">🎭</span>身份与工具</button>
       <button class="settings-nav-item" data-pane="skills"><span class="ic">⚡</span>技能</button>
       <button class="settings-nav-item" data-pane="agent"><span class="ic">🎛</span>Agent</button>
       <button class="settings-nav-item" data-pane="about"><span class="ic">ℹ</span>关于</button>
@@ -273,6 +274,39 @@
             <button class="btn" id="btnReloadSoul">重新载入</button>
             <button class="btn danger" id="btnResetSoul">恢复默认</button>
           </div>
+        </div>
+      </section>
+
+      <!-- 身份与工具 -->
+      <section class="settings-pane" data-pane="identity">
+        <h2>身份与工具</h2>
+        <p class="pane-sub">
+          身份决定 agent 的角色设定和它能用哪些工具。生效的是**当前身份**那一行。
+        </p>
+
+        <div class="settings-block">
+          <h3>当前身份</h3>
+          <p class="block-sub">点一行把它设为当前身份，下面就会展开它的工具清单。</p>
+          <div id="identityList"></div>
+        </div>
+
+        <div class="settings-block" id="identityDetailBlock">
+          <h3 id="identityDetailTitle">工具</h3>
+          <p class="block-sub" id="identityDetailSub">选择上面的一个身份。</p>
+          <div class="tool-actions" id="identityToolActions" hidden>
+            <button class="btn" id="btnIdentityActivate">设为当前身份</button>
+            <button class="btn" id="btnToolsAll">全选</button>
+            <button class="btn" id="btnToolsNone">全不选</button>
+            <button class="btn" id="btnToolsRecommended">恢复推荐</button>
+            <span class="spacer-x"></span>
+            <span class="tool-count" id="identityToolCount"></span>
+          </div>
+          <div id="identityToolList"></div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn primary" id="btnSaveIdentity">保存</button>
+          <button class="btn" id="btnReloadIdentity">重新载入</button>
         </div>
       </section>
 

@@ -967,3 +967,152 @@ kbd {
 .theme-menu button:hover { background: var(--bg-hover); }
 .theme-menu button.on { color: var(--accent); font-weight: 620; }
 .theme-menu .check { width: 13px; font-size: 11px; }
+
+/* ==========================================================================
+   Settings → identities & tool toggles
+   ========================================================================== */
+.identity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-raised);
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.identity-row:hover { border-color: var(--border-strong); }
+.identity-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.identity-radio {
+  flex: 0 0 auto;
+  width: 14px; height: 14px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  position: relative;
+}
+.identity-row.active .identity-radio { border-color: var(--accent); }
+.identity-row.active .identity-radio::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.identity-row.selected { border-color: var(--accent-dim); }
+.identity-emoji { flex: 0 0 auto; font-size: 17px; line-height: 1.2; }
+.identity-main { flex: 1 1 auto; min-width: 0; }
+.identity-name {
+  font-size: 13px;
+  font-weight: 620;
+  color: var(--fg-strong);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.identity-desc {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  margin-top: 3px;
+  line-height: 1.55;
+}
+.identity-persona {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  margin-top: 5px;
+  line-height: 1.6;
+  padding-left: 9px;
+  border-left: 2px solid var(--border-strong);
+  white-space: pre-wrap;
+}
+.identity-count {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  color: var(--fg-faint);
+  padding-top: 3px;
+}
+
+.tool-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 13px;
+  flex-wrap: wrap;
+}
+.tool-count {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--fg-faint);
+}
+
+.tool-cat { margin-bottom: 13px; }
+.tool-cat:last-child { margin-bottom: 0; }
+.tool-cat-head {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-bottom: 6px;
+}
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 4px;
+}
+.tool-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+}
+.tool-item:hover { background: var(--bg-hover); }
+.tool-item.on { border-color: var(--border); background: var(--bg-raised); }
+.tool-item input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  accent-color: var(--accent);
+  width: 13px; height: 13px;
+}
+.tool-item-main { min-width: 0; }
+.tool-item-name {
+  font-size: 12px;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-item.on .tool-item-name { color: var(--fg-strong); font-weight: 560; }
+.tool-item-id {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+.tool-item.locked {
+  cursor: default;
+  background: var(--bg-panel);
+  border-color: var(--border);
+}
+.tool-item.locked:hover { background: var(--bg-panel); }
+.tool-item.locked input { opacity: .55; cursor: default; }
+.tool-item.locked .tool-item-name { color: var(--fg-muted); }
+.tool-item-desc {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  line-height: 1.5;
+  margin-top: 2px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
