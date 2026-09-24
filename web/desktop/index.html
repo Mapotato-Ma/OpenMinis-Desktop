@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenMinis Desktop</title>
+<link rel="stylesheet" href="./style.css">
+<script src="./window-bootstrap.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── title bar ───────────────────────────────────────────────── -->
+  <header class="titlebar">
+    <div class="tb-group tb-left">
+      <span class="logo" aria-hidden="true">◈</span>
+      <span class="brand">OpenMinis</span>
+      <span class="badge">Desktop</span>
+    </div>
+
+    <div class="tb-group tb-center">
+      <button class="chip" id="wsChip" title="工作目录 — 点击在文件管理器中打开">
+        <span class="chip-dot"></span><span id="wsPath">workspace</span>
+      </button>
+    </div>
+
+    <div class="tb-group tb-right">
+      <button class="tb-btn" id="btnPalette" title="命令面板 (Ctrl+K)">⌘K</button>
+      <button class="tb-btn" id="btnTerm" title="终端 (Ctrl+`)">终端</button>
+      <button class="tb-btn" id="btnInspector" title="切换右侧面板 (Ctrl+B)">面板</button>
+      <button class="tb-btn" id="btnTheme" title="切换主题">◐</button>
+      <button class="tb-btn" id="btnInfo" title="关于 / 诊断">?</button>
+    </div>
+  </header>
+
+  <!-- ── main body ───────────────────────────────────────────────── -->
+  <div class="body" id="body">
+
+    <!-- sessions rail -->
+    <aside class="rail" id="rail">
+      <div class="rail-head">
+        <button class="new-session" id="btnNewSession"><span>＋</span> 新会话</button>
+        <button class="icon-btn" id="btnReloadSessions" title="刷新">⟳</button>
+      </div>
+      <div class="rail-search">
+        <input id="sessionFilter" type="search" placeholder="过滤会话…" autocomplete="off">
+      </div>
+      <div class="session-list" id="sessionList"></div>
+      <div class="rail-foot">
+        <button class="rail-foot-btn" id="btnSkills" title="技能">⚡ 技能</button>
+        <button class="rail-foot-btn" id="btnMemory" title="记忆">🧠 记忆</button>
+      </div>
+    </aside>
+
+    <div class="splitter" id="splitRail" title="拖动调整宽度"></div>
+
+    <!-- chat -->
+    <main class="chat" id="chatPane">
+      <div class="chat-head">
+        <div class="chat-title" id="chatTitle">未选择会话</div>
+        <div class="chat-meta">
+          <span class="meta-item" id="metaModel">—</span>
+          <button class="icon-btn" id="btnStop" title="停止生成" hidden>■ 停止</button>
+        </div>
+      </div>
+
+      <div class="chat-scroll" id="messages">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-logo">◈</div>
+          <h2>OpenMinis Desktop</h2>
+          <p>本机 AI Agent，带一个真正的 shell。</p>
+          <div class="hint-grid">
+            <div class="hint"><kbd>Ctrl</kbd><kbd>K</kbd><span>命令面板</span></div>
+            <div class="hint"><kbd>Ctrl</kbd><kbd>`</kbd><span>终端</span></div>
+            <div class="hint"><kbd>Ctrl</kbd><kbd>B</kbd><span>右侧面板</span></div>
+            <div class="hint"><kbd>Enter</kbd><span>发送</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="描述你的任务…  (Enter 发送 / Shift+Enter 换行)"></textarea>
+          <div class="composer-actions">
+            <span class="composer-hint" id="composerHint"></span>
+            <button class="send-btn" id="btnSend" title="发送 (Enter)">↑</button>
+          </div>
+        </div>
+        <div class="composer-foot">
+          <label class="mini-toggle" title="允许 agent 执行 shell 命令">
+            <input type="checkbox" id="optAutoApprove" checked> <span>自动执行工具</span>
+          </label>
+          <span class="sep">·</span>
+          <span id="tokenUsage">—</span>
+        </div>
+      </div>
+    </main>
+
+    <div class="splitter" id="splitInspector" title="拖动调整宽度"></div>
+
+    <!-- inspector -->
+    <aside class="inspector" id="inspector">
+      <div class="tabs" id="inspectorTabs">
+        <button class="tab active" data-tab="files">文件</button>
+        <button class="tab" data-tab="code">代码</button>
+        <button class="tab" data-tab="diff">变更</button>
+        <button class="tab" data-tab="info">信息</button>
+      </div>
+
+      <div class="tab-panel active" data-panel="files">
+        <div class="panel-head">
+          <span class="panel-title">工作目录</span>
+          <button class="icon-btn" id="btnRefreshTree" title="刷新">⟳</button>
+        </div>
+        <div class="tree" id="fileTree"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="code">
+        <div class="panel-head">
+          <span class="panel-title" id="codePath">未打开文件</span>
+          <span class="panel-actions">
+            <button class="icon-btn" id="btnCopyCode" title="复制">⧉</button>
+            <button class="icon-btn" id="btnCloseCode" title="关闭">✕</button>
+          </span>
+        </div>
+        <div class="code-wrap" id="codeView">
+          <div class="placeholder">在左侧文件树中选择一个文件</div>
+        </div>
+      </div>
+
+      <div class="tab-panel" data-panel="diff">
+        <div class="panel-head">
+          <span class="panel-title" id="diffPath">本会话的文件变更</span>
+        </div>
+        <div class="code-wrap" id="diffView">
+          <div class="placeholder">Agent 编辑文件后，这里显示 diff</div>
+        </div>
+      </div>
+
+      <div class="tab-panel" data-panel="info">
+        <div class="panel-head"><span class="panel-title">运行信息</span></div>
+        <div class="info-list" id="infoList"><div class="placeholder">加载中…</div></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ── terminal drawer ─────────────────────────────────────────── -->
+  <div class="terminal" id="terminal" hidden>
+    <div class="term-head">
+      <span class="panel-title">终端</span>
+      <span class="term-shell" id="termShell">shell</span>
+      <span class="spacer"></span>
+      <button class="icon-btn" id="btnClearTerm" title="清空">清空</button>
+      <button class="icon-btn" id="btnHideTerm" title="收起 (Ctrl+`)">✕</button>
+    </div>
+    <div class="term-body" id="termBody"></div>
+    <div class="term-input-row">
+      <span class="term-prompt" id="termPrompt">$</span>
+      <input id="termInput" type="text" placeholder="输入命令，Enter 执行" autocomplete="off" spellcheck="false">
+    </div>
+  </div>
+
+  <!-- ── status bar ──────────────────────────────────────────────── -->
+  <footer class="statusbar">
+    <span class="status-item" id="statusWs"><span class="dot offline"></span> 未连接</span>
+    <span class="status-item" id="statusSession">—</span>
+    <span class="status-item" id="statusTurn"></span>
+    <span class="spacer"></span>
+    <span class="status-item" id="statusPlatform"></span>
+    <span class="status-item" id="statusVersion"></span>
+  </footer>
+</div>
+
+<!-- ── command palette ───────────────────────────────────────────── -->
+<div class="palette-overlay" id="paletteOverlay" hidden>
+  <div class="palette">
+    <input id="paletteInput" type="text" placeholder="输入命令或搜索会话…" autocomplete="off" spellcheck="false">
+    <div class="palette-list" id="paletteList"></div>
+  </div>
+</div>
+
+<!-- ── modal (skills / memory / info) ────────────────────────────── -->
+<div class="modal-overlay" id="modalOverlay" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <span id="modalTitle">标题</span>
+      <button class="icon-btn" id="modalClose">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>

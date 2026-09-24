@@ -1,0 +1,402 @@
+"""Install, list and read skill bundles.
+
+The store owns ``<data_dir>/skills``: one sub-directory per skill, each with a
+``SKILL.md`` carrying YAML frontmatter (``name`` / ``description``) followed by
+the Markdown body the agent reads when it picks the skill up.
+
+Two kinds of bundles live side by side:
+
+* **builtin skills** — shipped inside the package (``skills/builtin/``) and
+  copied out on first run. Existing directories are never overwritten, so a
+  user's edits survive upgrades.
+* **the builtin-tool manifest** — a generated bundle named
+  ``builtin-tools`` that documents every tool the agent loop can call. It is
+  regenerated on every install pass because the tool set depends on config
+  (memory toggles, vision groups…).
+
+Installing from a directory or a ``.zip`` is supported for third-party skills.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import tempfile
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from ..core.context import app_context
+from ..core.logging import get_logger
+from .models import SkillEntry, ToolEntry
+
+logger = get_logger(__name__)
+
+__all__ = [
+    "SkillStore",
+    "SkillError",
+    "SKILL_FILE",
+    "BUILTIN_TOOLS_SKILL",
+    "declared_env",
+]
+
+SKILL_FILE = "SKILL.md"
+BUILTIN_TOOLS_SKILL = "builtin-tools"
+_SCRIPTS_DIR = "scripts"
+
+#: 技能清单缓存：``{技能根路径: (目录签名, [SkillEntry…])}``。
+#: 每次对话轮次都会取一次清单（拼系统提示的「可用技能」段），而解析 40 个
+#: SKILL.md 的 frontmatter 要 100–300 ms。签名用目录里每个 manifest 的
+#: mtime+size，装/删/改技能都会让签名变化，缓存自然失效。
+_LIST_CACHE: dict[str, tuple[tuple, list["SkillEntry"]]] = {}
+
+
+def invalidate_skill_cache() -> None:
+    """Drop the listing cache (skill installed / removed / rewritten)."""
+    _LIST_CACHE.clear()
+
+
+def _root_signature(root: Path) -> tuple:
+    items: list[tuple] = []
+    try:
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            try:
+                stat = (child / SKILL_FILE).stat()
+                items.append((child.name, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                items.append((child.name, 0, 0))
+    except OSError:
+        return ()
+    return tuple(items)
+
+
+class SkillError(Exception):
+    """Raised when a skill cannot be installed or removed."""
+
+
+def _bundled_dir() -> Path:
+    return Path(__file__).resolve().parent / "builtin"
+
+
+def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Return ``(frontmatter, body)`` for a ``SKILL.md`` payload.
+
+    Malformed frontmatter is ignored rather than fatal — a skill with a broken
+    header is still readable, it just gets a fallback name/description.
+    """
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    raw = text[3:end].strip()
+    body = text[end + 4 :].lstrip("\n")
+    try:
+        meta = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        logger.debug("unparseable skill frontmatter, ignoring: %.80s", raw)
+        return {}, body
+    return (meta if isinstance(meta, dict) else {}), body
+
+
+def _skill_name(meta: dict[str, Any], fallback: str) -> str:
+    name = str(meta.get("name") or "").strip()
+    return name or fallback
+
+
+#: 技能声明「我需要这些环境变量」的三个位置，按优先级排列。
+#:
+#: ``metadata.requires.env`` 是 Claude Skills 的约定（``metadata.requires.bins``
+#: 是同一套），另外兼容更随意的两种写法。声明了不等于配好了 —— 引擎不会自己
+#: 变出密钥来，但至少能据此在界面上把「缺哪一项」指出来。
+_ENV_PATHS: tuple[tuple[str, ...], ...] = (
+    ("metadata", "requires", "env"),
+    ("metadata", "env"),
+    ("requires", "env"),
+    ("env",),
+)
+
+
+def declared_env(meta: dict[str, Any]) -> tuple[str, ...]:
+    """从 SKILL.md 的 frontmatter 里读出声明的环境变量名（去重、保序）。"""
+    found: list[str] = []
+    for path in _ENV_PATHS:
+        node: Any = meta
+        for key in path:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if node is None:
+            continue
+        raw = node
+        if isinstance(raw, str):
+            raw = [part for part in re.split(r"[,\s]+", raw) if part]
+        if not isinstance(raw, (list, tuple)):
+            continue
+        for item in raw:
+            name = str(item or "").strip()
+            if name and name not in found:
+                found.append(name)
+    return tuple(found)
+
+
+#: 技能根目录的配置文件（放数据目录下）。写 ``root: <路径>`` 即可把技能库
+#: 切到任意目录 —— 相对路径相对数据目录解析。SkillStore 每次实例化都重新
+#: 读取，改完文件下次调用即生效，无需重启。
+SKILLS_CONFIG_FILE = "skills.yaml"
+
+
+def configured_skills_root() -> Path:
+    """技能根目录：``skills.yaml`` 的 ``root`` 优先，缺省回到 ``data/skills``。"""
+    data = app_context().data_dir
+    cfg = data / SKILLS_CONFIG_FILE
+    if cfg.is_file():
+        try:
+            meta = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+            raw = str((meta or {}).get("root") or "").strip()
+            if raw:
+                p = Path(raw).expanduser()
+                return p if p.is_absolute() else (data / p).resolve()
+        except Exception:  # pragma: no cover - 配置损坏不该拖垮技能加载
+            logger.debug("skills.yaml unreadable, using default root", exc_info=True)
+    return data / "skills"
+
+
+class SkillStore:
+    """Filesystem-backed registry of installed skills."""
+
+    def __init__(self, root: Path | str | None = None) -> None:
+        self.root = Path(root) if root is not None else configured_skills_root()
+
+    # -- install ---------------------------------------------------------
+    def ensure_installed(self) -> list[str]:
+        """Install bundled skills + refresh the tool manifest. Idempotent.
+
+        Returns the names of the skills that were newly installed (empty on a
+        warm start) so callers can log once instead of on every request.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        installed: list[str] = []
+        bundled = _bundled_dir()
+        if bundled.is_dir():
+            for src in sorted(p for p in bundled.iterdir() if p.is_dir()):
+                # A `.skip` marker (e.g. third-party skills dropped in by
+                # other tools) keeps a bundle out of the install set.
+                if (src / ".skip").exists():
+                    continue
+                dest = self.root / src.name
+                # Never clobber: a user-edited skill stays user-edited.
+                if not (dest / SKILL_FILE).exists():
+                    shutil.copytree(src, dest)
+                    installed.append(src.name)
+        self.write_builtin_tools()
+        return installed
+
+    def install(self, source: Path | str, *, force: bool = False) -> SkillEntry:
+        """Install a skill from a directory or a ``.zip`` archive."""
+        src = Path(str(source)).expanduser()
+        if not src.exists():
+            raise SkillError(f"路径不存在: {src}")
+        if src.is_dir():
+            return self._install_dir(src, force=force)
+        if src.suffix.lower() != ".zip":
+            raise SkillError(f"只支持目录或 .zip 技能包: {src}")
+        tmp = Path(tempfile.mkdtemp(prefix="minis-skill-"))
+        try:
+            self._extract_zip(src, tmp)
+            return self._install_dir(tmp, force=force)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _install_dir(self, staged: Path, *, force: bool) -> SkillEntry:
+        manifest = self._locate_manifest(staged)
+        meta, _ = _split_frontmatter(
+            manifest.read_text(encoding="utf-8", errors="replace")
+        )
+        name = _skill_name(meta, manifest.parent.name)
+        dest = self.root / self._safe_name(name)
+        if dest.exists() and any(dest.iterdir()):
+            if not force:
+                raise SkillError(f"技能已存在: {name}（如需覆盖请传 force=true）")
+            shutil.rmtree(dest)
+        shutil.copytree(manifest.parent, dest)
+
+        entry = self._read_entry(dest)
+        if entry is None:  # pragma: no cover - copytree just wrote the file
+            raise SkillError(f"技能安装后无法读取: {name}")
+        return entry
+
+    @staticmethod
+    def _extract_zip(src: Path, dest: Path) -> None:
+        with zipfile.ZipFile(src) as zf:
+            root = dest.resolve()
+            for member in zf.namelist():
+                # zip-slip guard: every entry must land inside ``dest``
+                target = (dest / member).resolve()
+                if root not in target.parents and target != root:
+                    raise SkillError(f"技能包含有非法路径: {member}")
+            zf.extractall(dest)
+
+    def uninstall(self, name: str) -> bool:
+        """Remove an installed skill. Generated bundles are protected."""
+        entry = self.get(name)
+        if entry is None:
+            return False
+        if entry.generated:
+            raise SkillError(f"{name} 是自动生成的,不能卸载")
+        shutil.rmtree(Path(entry.path))
+        return True
+
+    # -- builtin tool manifest ------------------------------------------
+    @staticmethod
+    def builtin_tools() -> list[ToolEntry]:
+        """Every tool the agent loop exposes, straight from the registry."""
+        from ..tools.agent_tools import AgentTools
+
+        out: list[ToolEntry] = []
+        for d in AgentTools.make_agent_tools():
+            params = {
+                pname: getattr(p, "description", "") or ""
+                for pname, p in (d.parameters or {}).items()
+            }
+            out.append(
+                ToolEntry(
+                    name=d.name,
+                    description=d.description or "",
+                    parameters=params,
+                    required=tuple(d.required or ()),
+                )
+            )
+        return out
+
+    def write_builtin_tools(self) -> SkillEntry | None:
+        """(Re)generate the ``builtin-tools`` bundle. Returns its entry."""
+        try:
+            tools = self.builtin_tools()
+        except Exception:  # pragma: no cover - never block startup over docs
+            logger.debug("builtin tool manifest skipped", exc_info=True)
+            return None
+
+        lines = [
+            "---",
+            f"name: {BUILTIN_TOOLS_SKILL}",
+            "builtin: true",
+            'description: "OpenMinis 内置工具清单。需要判断该用哪个工具、或需要组合多个工具完成任务时使用。"',
+            "---",
+            "",
+            "# OpenMinis 内置工具",
+            "",
+            "下面是当前会话可直接调用的工具。工具随配置变化（例如关闭记忆后",
+            "memory_write / memory_get 会消失），本文件每次启动都会重新生成。",
+            "",
+        ]
+        for t in tools:
+            lines.append(f"## {t.name}")
+            lines.append("")
+            lines.append(t.description.strip() or "（无描述）")
+            if t.parameters:
+                lines.append("")
+                lines.append("参数:")
+                for pname, pdesc in t.parameters.items():
+                    required = "必填" if pname in t.required else "可选"
+                    lines.append(f"- `{pname}`（{required}）: {pdesc}")
+            lines.append("")
+
+        dest = self.root / BUILTIN_TOOLS_SKILL
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / SKILL_FILE).write_text("\n".join(lines), encoding="utf-8")
+        return self._read_entry(dest)
+
+    # -- read ------------------------------------------------------------
+    def list(self) -> list[SkillEntry]:
+        """Every installed skill, with a directory-signature cache.
+
+        Parsing front matter of ~40 SKILL.md files costs 100–300 ms; the list
+        is requested on **every** chat turn (``active_skills_block``) so the
+        parse must not repeat when nothing changed. Cache key = skills root,
+        validated by a cheap signature (name + mtime + size per manifest).
+        """
+        if not self.root.is_dir():
+            return []
+        key = str(self.root)
+        signature = _root_signature(self.root)
+        cached = _LIST_CACHE.get(key)
+        if cached is not None and cached[0] == signature:
+            return list(cached[1])
+        out: list[SkillEntry] = []
+        for child in sorted(self.root.iterdir()):
+            if not child.is_dir():
+                continue
+            entry = self._read_entry(child)
+            if entry is not None:
+                out.append(entry)
+        _LIST_CACHE[key] = (signature, out)
+        return list(out)
+
+    def get(self, name: str) -> SkillEntry | None:
+        """Look up by bundle directory name *or* frontmatter name."""
+        target = self._safe_name(name)
+        direct = self.root / target
+        if (direct / SKILL_FILE).is_file():
+            return self._read_entry(direct)
+        for entry in self.list():
+            if entry.name == name:
+                return entry
+        return None
+
+    def read(self, name: str) -> str:
+        """Body of a skill's ``SKILL.md`` (frontmatter stripped)."""
+        entry = self.get(name)
+        if entry is None:
+            raise SkillError(f"技能不存在: {name}")
+        return entry.body
+
+    # -- internals -------------------------------------------------------
+    def _read_entry(self, directory: Path) -> SkillEntry | None:
+        manifest = directory / SKILL_FILE
+        if not manifest.is_file():
+            return None
+        try:
+            meta, body = _split_frontmatter(
+                manifest.read_text(encoding="utf-8", errors="replace")
+            )
+        except OSError:  # pragma: no cover - unreadable file
+            return None
+        scripts_dir = directory / _SCRIPTS_DIR
+        scripts: tuple[str, ...] = ()
+        if scripts_dir.is_dir():
+            scripts = tuple(sorted(p.name for p in scripts_dir.iterdir()))
+        return SkillEntry(
+            name=_skill_name(meta, directory.name),
+            description=str(meta.get("description") or "").strip(),
+            path=str(directory),
+            source="builtin" if meta.get("builtin") else "user",
+            generated=directory.name == BUILTIN_TOOLS_SKILL,
+            scripts=scripts,
+            env=declared_env(meta),
+            body=body,
+        )
+
+    @staticmethod
+    def _safe_name(name: str) -> str:
+        """Keep skill names usable as a single directory name."""
+        cleaned = name.strip().replace("\\", "/").split("/")[-1]
+        cleaned = cleaned.replace("..", "").strip()
+        if cleaned in {"", ".", ".."}:
+            raise SkillError(f"非法的技能名: {name!r}")
+        return cleaned
+
+    def _locate_manifest(self, staged: Path) -> Path:
+        """Accept a bundle root, or an archive that wraps it in one folder."""
+        direct = staged / SKILL_FILE
+        if direct.is_file():
+            return direct
+        for child in sorted(staged.iterdir()):
+            if child.is_dir() and (child / SKILL_FILE).is_file():
+                return child / SKILL_FILE
+        raise SkillError(f"未找到 {SKILL_FILE}: {staged}")

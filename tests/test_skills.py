@@ -1,0 +1,603 @@
+"""Skill install / list / read / uninstall (Web 技能 pane + agent bundles)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from openminis.core import context
+from openminis.settings.chat_service import identity_system_prompt
+from openminis.settings.store import SettingsStore
+from openminis.skills import SkillStore
+from openminis.skills.store import BUILTIN_TOOLS_SKILL, SkillError
+from openminis.tools.skill_use_tool import SkillUseTool
+
+
+@pytest.fixture()
+def isolated_skills(tmp_path, monkeypatch):
+    """Relocate data_dir so installs never touch the real ~/openminis."""
+    monkeypatch.setenv("MINIS_HOME", str(tmp_path))
+    context.set_app_context(context.AppContext(data_dir=tmp_path, cache_dir=tmp_path))
+    yield tmp_path
+    context._context = None  # type: ignore[attr-defined]
+
+
+def _write_skill(root: Path, name: str, description: str, body: str = "正文") -> Path:
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+    (d / "scripts").mkdir()
+    (d / "scripts" / "run.py").write_text("print(1)\n", encoding="utf-8")
+    return d
+
+
+def test_ensure_installed_seeds_builtins(isolated_skills):
+    store = SkillStore()
+    installed = store.ensure_installed()
+    assert "memory-capture" in installed
+    names = {e.name for e in store.list()}
+    assert {"memory-capture", "session-compact", BUILTIN_TOOLS_SKILL} <= names
+
+
+def test_ensure_installed_is_idempotent_and_preserves_edits(isolated_skills):
+    store = SkillStore()
+    store.ensure_installed()
+    target = store.root / "memory-capture" / "SKILL.md"
+    target.write_text("---\nname: memory-capture\ndescription: 本地改过\n---\n\n改过\n",
+                      encoding="utf-8")
+    assert store.ensure_installed() == []  # nothing re-installed
+    assert "改过" in store.read("memory-capture")
+
+
+def test_builtin_tools_manifest_lists_registry(isolated_skills):
+    store = SkillStore()
+    store.ensure_installed()
+    tools = {t.name for t in SkillStore.builtin_tools()}
+    assert {"shell_execute", "file_write", "memory_write"} <= tools
+    entry = store.get(BUILTIN_TOOLS_SKILL)
+    assert entry is not None and entry.generated
+    assert "shell_execute" in entry.body
+
+
+def test_install_from_directory(isolated_skills, tmp_path):
+    store = SkillStore()
+    src = _write_skill(tmp_path / "incoming", "demo", "演示技能")
+    entry = store.install(src)
+    assert entry.name == "demo"
+    assert entry.source == "user"
+    assert entry.scripts == ("run.py",)
+    assert "正文" in store.read("demo")
+
+
+def test_install_rejects_duplicate_without_force(isolated_skills, tmp_path):
+    store = SkillStore()
+    src = _write_skill(tmp_path / "incoming", "demo", "演示技能")
+    store.install(src)
+    with pytest.raises(SkillError):
+        store.install(src)
+    _write_skill(tmp_path / "incoming2", "demo", "演示技能 v2", body="第二版")
+    assert "第二版" in store.install(tmp_path / "incoming2", force=True).body
+
+
+def test_install_from_zip(isolated_skills, tmp_path):
+    import zipfile
+
+    bundle = _write_skill(tmp_path / "src", "zipped", "压缩包技能")
+    archive = tmp_path / "zipped.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(bundle / "SKILL.md", "zipped/SKILL.md")
+    store = SkillStore()
+    assert store.install(archive).name == "zipped"
+    assert "正文" in store.read("zipped")
+
+
+def test_install_requires_manifest(isolated_skills, tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "README.md").write_text("nope", encoding="utf-8")
+    with pytest.raises(SkillError):
+        SkillStore().install(empty)
+
+
+def test_uninstall(isolated_skills, tmp_path):
+    store = SkillStore()
+    store.ensure_installed()
+    src = _write_skill(tmp_path / "incoming", "demo", "演示技能")
+    store.install(src)
+    assert store.uninstall("demo") is True
+    assert store.get("demo") is None
+    assert store.uninstall("demo") is False
+    with pytest.raises(SkillError):  # generated bundle is protected
+        store.uninstall(BUILTIN_TOOLS_SKILL)
+
+
+def test_api_roundtrip(isolated_skills, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from openminis.server.main import app
+
+    store = SkillStore()
+    store.ensure_installed()
+    src = _write_skill(tmp_path / "incoming", "demo", "演示技能")
+    with TestClient(app) as c:
+        listed = c.get("/api/skills").json()
+        assert {s["name"] for s in listed["skills"]} >= {
+            "memory-capture",
+            BUILTIN_TOOLS_SKILL,
+        }
+        assert {"shell_execute"} <= {t["name"] for t in listed["tools"]}
+
+        r = c.post("/api/skills/install", json={"source": str(src)})
+        assert r.status_code == 200, r.text
+        assert r.json()["skill"]["name"] == "demo"
+
+        again = c.post("/api/skills/install", json={"source": str(src)})
+        assert again.status_code == 400
+
+        detail = c.get("/api/skills/demo").json()
+        assert "正文" in detail["content"]
+
+        assert c.delete("/api/skills/demo").json()["ok"] is True
+        assert c.get("/api/skills/demo").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 技能激活 = 主 agent 的技能调用范围（skill_use 只认已激活的技能）
+# ---------------------------------------------------------------------------
+def _settings(tmp_path):
+    return SettingsStore(path=tmp_path / "settings.json")
+
+
+def test_active_skills_roundtrip(isolated_skills):
+    store = _settings(isolated_skills)
+    assert store.active_skills() == []
+    store.set_skill_active("visioncustom", True)
+    assert store.active_skills() == ["visioncustom"]
+    store.set_skill_active("visioncustom", True)  # idempotent
+    assert store.active_skills() == ["visioncustom"]
+    store.set_skill_active("visioncustom", False)
+    assert store.active_skills() == []
+    assert _settings(isolated_skills).active_skills() == []  # persisted
+
+
+@pytest.mark.asyncio
+async def test_skill_use_gated_by_activation(isolated_skills, monkeypatch):
+    _write_skill(isolated_skills / "skills", "visioncustom", "识图打标",
+                 body="流程：先切图再打标")
+    store = _settings(isolated_skills)
+    monkeypatch.setattr(SettingsStore, "get", classmethod(lambda cls: store))
+
+    res = await SkillUseTool.execute('{"tool_title":"t","name":"visioncustom"}', "s1")
+    assert res.success is False
+    assert "未激活" in res.output
+
+    store.set_skill_active("visioncustom", True)
+    res = await SkillUseTool.execute('{"tool_title":"t","name":"visioncustom"}', "s1")
+    assert res.success is True
+    assert "先切图再打标" in res.output   # SKILL.md 正文
+    assert "run.py" in res.output        # 自带脚本提示
+
+
+@pytest.mark.asyncio
+async def test_skill_use_unknown_name(isolated_skills, monkeypatch):
+    store = _settings(isolated_skills)
+    monkeypatch.setattr(SettingsStore, "get", classmethod(lambda cls: store))
+    res = await SkillUseTool.execute('{"tool_title":"t","name":"nope"}', "s1")
+    assert res.success is False
+    assert "没有名为" in res.output
+
+
+def test_active_skills_enter_system_prompt(isolated_skills, monkeypatch):
+    """已激活技能只把「名字+一句话」放进 prompt（全文由 skill_use 加载）。"""
+    _write_skill(isolated_skills / "skills", "visioncustom", "识图打标")
+    store = _settings(isolated_skills)
+    monkeypatch.setattr(SettingsStore, "get", classmethod(lambda cls: store))
+
+    assert "可用技能" not in identity_system_prompt(store)
+    store.set_skill_active("visioncustom", True)
+    prompt = identity_system_prompt(store)
+    assert "可用技能" in prompt and "visioncustom" in prompt
+
+
+def test_retrieval_discipline_enters_system_prompt(isolated_skills, monkeypatch):
+    """联网检索纪律随 persona 注入：先检索、优先国内来源、不凭记忆猜国外站。"""
+    store = _settings(isolated_skills)
+    monkeypatch.setattr(SettingsStore, "get", classmethod(lambda cls: store))
+    prompt = identity_system_prompt(store)
+    assert "联网检索纪律" in prompt
+    assert "web_search" in prompt and "web_fetch" in prompt
+    assert "国内" in prompt
+
+
+def test_skills_api_activate(isolated_skills, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from openminis.server.main import app
+
+    _write_skill(isolated_skills / "skills", "visioncustom", "识图打标")
+    store = _settings(isolated_skills)
+    monkeypatch.setattr(SettingsStore, "get", classmethod(lambda cls: store))
+    with TestClient(app) as c:
+        entry = next(s for s in c.get("/api/skills").json()["skills"]
+                     if s["name"] == "visioncustom")
+        assert entry["active"] is False
+
+        r = c.post("/api/skills/visioncustom/activate")
+        assert r.status_code == 200, r.text
+        assert r.json()["active"] == ["visioncustom"]
+        assert c.get("/api/skills").json()["active"] == ["visioncustom"]
+
+        assert c.post("/api/skills/visioncustom/deactivate").json()["active"] == []
+        assert c.post("/api/skills/nope/activate").status_code == 404
+
+
+# ---------- 技能根目录 YAML 配置 + 只读放行 ----------
+
+def test_configured_skills_root_reads_yaml(isolated_skills):
+    """skills.yaml 的 root 指向哪里，技能库就在哪里（相对路径相对数据目录）。"""
+    from openminis.skills.store import configured_skills_root
+
+    custom = isolated_skills / "my-skills"
+    custom.mkdir()
+    (isolated_skills / "skills.yaml").write_text(
+        f"root: {custom.as_posix()}\n", encoding="utf-8"
+    )
+    assert configured_skills_root() == custom
+    # 相对路径也支持
+    (isolated_skills / "skills.yaml").write_text("root: alt-skills\n", encoding="utf-8")
+    assert configured_skills_root() == (isolated_skills / "alt-skills").resolve()
+    # 没配置时回默认
+    (isolated_skills / "skills.yaml").unlink()
+    assert configured_skills_root() == isolated_skills / "skills"
+
+
+def test_skill_store_uses_yaml_root(isolated_skills):
+    (isolated_skills / "skills.yaml").write_text("root: alt\n", encoding="utf-8")
+    store = SkillStore()
+    assert store.root == (isolated_skills / "alt").resolve()
+
+
+def test_readonly_roots_allows_skills_dir(isolated_skills):
+    """ls / search_files / file_read 能读技能库目录（配置在 yaml 里的根）。"""
+    from openminis.tools.path_utils import readonly_roots, resolve_workspace_path
+
+    custom = isolated_skills / "my-skills"
+    skill_dir = _write_skill(custom, "demo", "演示")
+    (isolated_skills / "skills.yaml").write_text(
+        f"root: {custom.as_posix()}\n", encoding="utf-8"
+    )
+
+    assert readonly_roots() == (custom,)
+    # 绝对路径放行
+    assert resolve_workspace_path(str(skill_dir)) == skill_dir.resolve()
+    # 相对形式（skills/demo）也放行
+    resolved = resolve_workspace_path("skills/demo")
+    assert resolved is not None and resolved.name == "demo"
+    # 白名单外依旧拒绝
+    assert resolve_workspace_path("C:/Windows") is None
+
+
+def test_file_read_can_read_skill_md(isolated_skills):
+    from openminis.tools.file_read_tool import FileReadTool
+
+    custom = isolated_skills / "my-skills"
+    skill_dir = _write_skill(custom, "demo", "演示", body="技能正文")
+    (isolated_skills / "skills.yaml").write_text(
+        f"root: {custom.as_posix()}\n", encoding="utf-8"
+    )
+    tool = FileReadTool()
+    result = tool.execute(
+        '{"path": "%s"}' % (skill_dir / "SKILL.md").as_posix(), "s1"
+    )
+    assert result.success and "技能正文" in result.output
+
+
+def test_search_files_no_type_error(isolated_skills):
+    """回归：Path.is_dir() 不接受 follow_symlinks，之前直接 TypeError。"""
+    from openminis.tools.search_files_tool import _search_names
+    import time as _time
+
+    custom = isolated_skills / "my-skills"
+    skill_dir = _write_skill(custom, "demo", "演示")
+    (custom / "sub").mkdir()
+    found, _ = _search_names(
+        custom, "SKILL.md", ignore_case=False, no_ignore=True,
+        max_results=10, deadline=_time.monotonic() + 5,
+    )
+    # 技能库在 workspace 外，_rel 只回文件名 —— 有结果就说明没再抛 TypeError
+    assert found
+
+
+def test_skills_block_lists_real_paths(isolated_skills):
+    """技能清单要带 SKILL.md 真实路径 + 失败降级提示。"""
+    from openminis.skills import SkillStore as _S
+
+    SkillStore().ensure_installed()
+    store = SettingsStore()
+    store.set_skill_active("builtin-tools", True)
+    prompt = identity_system_prompt(store)
+    assert "SKILL.md：" in prompt
+    assert "技能失败降级" in prompt
+    assert "image_gen" in prompt
+
+
+def test_chat_setup_always_enables_skill_use(isolated_skills):
+    """回归：老 settings.json 的 enabled_tools 没有 skill_use，聊天里调
+    skill_use 只会收到 Unknown tool —— 必须按能力开关补齐。"""
+    from openminis.settings.chat_service import build_chat_setup
+
+    store = SettingsStore()
+    store.apply_full({
+        "providers": [{"id": "gw", "type": "openAI", "apiKey": "k",
+                       "model": "gpt-4o", "baseUrl": ""}],
+        "activeProviderId": "gw",
+        "identity": {"toolOverrides": {"general": []}},
+    })
+    _provider, runtime, _opts, _identity, _conf = build_chat_setup(store)
+    assert "skill_use" in runtime.tools
+
+
+def test_shell_failure_output_carries_context(monkeypatch):
+    """shell 失败必须把命令+退出码+报错完整交给模型，不能只回一句干瘪文本。"""
+    import asyncio
+    import types as _types
+
+    from openminis.tools.shell_execute_tool import ShellExecuteTool
+
+    tool = ShellExecuteTool()
+
+    def _fake_execute(*a, **k):
+        async def _inner():
+            return _types.SimpleNamespace(
+                output="python: command not found", exit_code=127
+            )
+        return _inner()
+
+    tool.coordinator = _types.SimpleNamespace(execute=_fake_execute)
+    result = asyncio.run(tool.execute('{"command": "python x.py"}', "s1"))
+    assert not result.success
+    assert "python x.py" in result.output
+    assert "exit code: 127" in result.output
+    assert "分析" in result.output
+
+
+def test_system_prompt_has_failure_discipline(isolated_skills):
+    from openminis.settings.chat_service import identity_system_prompt
+
+    store = SettingsStore()
+    assert "失败处置" in identity_system_prompt(store)
+    assert "read_image" in identity_system_prompt(store)
+
+
+def test_shell_one_shot_fallback_on_dead_persistent(monkeypatch):
+    """持久 shell exit=-1 时降级为一次性 bash -c，命令必须真的执行。"""
+    import asyncio
+    import types as _types
+
+    from openminis.tools.shell_execute_tool import ShellExecuteTool
+
+    tool = ShellExecuteTool()
+
+    def _dead_execute(*a, **k):
+        async def _inner():
+            return _types.SimpleNamespace(output="", exit_code=-1)
+        return _inner()
+    tool.coordinator = _types.SimpleNamespace(
+        execute=_dead_execute, _cwd_overrides={},
+    )
+    result = asyncio.run(tool.execute('{"command": "echo fallback_ok"}', "s1"))
+    assert result.success, result.output
+    assert "fallback_ok" in result.output
+
+
+def test_shell_one_shot_fallback_on_dead_persistent(monkeypatch):
+    """持久 shell exit=-1 时降级为一次性 bash -c，命令必须真的执行。"""
+    import asyncio
+    import types as _types
+
+    from openminis.tools.shell_execute_tool import ShellExecuteTool
+
+    tool = ShellExecuteTool()
+
+    def _dead_execute(*a, **k):
+        async def _inner():
+            return _types.SimpleNamespace(output="", exit_code=-1)
+        return _inner()
+    tool.coordinator = _types.SimpleNamespace(
+        execute=_dead_execute, _cwd_overrides={},
+    )
+    result = asyncio.run(tool.execute('{"command": "echo fallback_ok"}', "s1"))
+    assert result.success, result.output
+    assert "fallback_ok" in result.output
+
+
+def test_shell_reads_env_extra(monkeypatch, tmp_path):
+    """「环境变量」页配置的 sandbox.envExtra 必须进 shell 进程环境。"""
+    import asyncio
+    import types as _types
+
+    from openminis.core import prefs as _prefs
+    from openminis.tools import shell_execute_tool as _mod
+    from openminis.tools.shell_execute_tool import ShellExecuteTool
+
+    _prefs.get_prefs().set_now("sandbox.envExtra", '{"OPENAI_API_KEY": "sk-test"}')
+    captured = {}
+
+    tool = ShellExecuteTool()
+
+    def _fake_execute(session_id, command, *, timeout, line_callback, env_vars):
+        captured["env"] = env_vars
+
+        async def _inner():
+            return _types.SimpleNamespace(output="ok", exit_code=0)
+        return _inner()
+
+    tool.coordinator = _types.SimpleNamespace(execute=_fake_execute)
+    asyncio.run(tool.execute('{"command": "python run.py"}', "s1"))
+    assert captured["env"] and captured["env"]["OPENAI_API_KEY"] == "sk-test"
+    _prefs.get_prefs().set_now("sandbox.envExtra", "{}")
+
+
+# ---------------------------------------------------------------------------
+# 技能声明的环境变量（metadata.requires.env）
+# ---------------------------------------------------------------------------
+def test_declared_env_reads_all_three_conventions():
+    from openminis.skills.store import declared_env
+
+    # Claude Skills 的写法
+    assert declared_env(
+        {"metadata": {"requires": {"env": ["MODELSCOPE_API_KEY"]}}}
+    ) == ("MODELSCOPE_API_KEY",)
+    # 短一点的两处写法也认
+    assert declared_env({"metadata": {"env": ["A", "B"]}}) == ("A", "B")
+    assert declared_env({"env": "A, B\nC"}) == ("A", "B", "C")
+    # 去重保序；没声明就是空的
+    assert declared_env({"requiredEnv": ["X"]}) == ()
+    assert declared_env({"metadata": {"requires": {"env": ["A", "A", "B"]}}}) == ("A", "B")
+
+
+def test_skill_entry_exposes_declared_env(tmp_path, monkeypatch):
+    from openminis.core import context
+    from openminis.skills import SkillStore
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MINIS_HOME", str(home))
+    context.set_app_context(context.AppContext(data_dir=home, cache_dir=home))
+
+    skill = home / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo\n"
+        "description: 演示\n"
+        "metadata:/n"
+        "  requires:/n"
+        "    env: [\"MODELSCOPE_API_KEY\"]\n"
+        "---\n\n正文\n",
+        encoding="utf-8",
+    )
+    entry = SkillStore().get("demo")
+    assert entry is not None
+    assert entry.env == ("MODELSCOPE_API_KEY",)
+
+
+# ---------------------------------------------------------------------------
+# 技能声明的环境变量（metadata.requires.env）
+# ---------------------------------------------------------------------------
+def test_declared_env_reads_all_three_conventions():
+    from openminis.skills.store import declared_env
+
+    # Claude Skills 的写法
+    assert declared_env(
+        {"metadata": {"requires": {"env": ["MODELSCOPE_API_KEY"]}}}
+    ) == ("MODELSCOPE_API_KEY",)
+    # 短一点的两处写法也认
+    assert declared_env({"metadata": {"env": ["A", "B"]}}) == ("A", "B")
+    assert declared_env({"env": "A, B\nC"}) == ("A", "B", "C")
+    # 去重保序；没声明就是空的
+    assert declared_env({"requiredEnv": ["X"]}) == ()
+    assert declared_env({"metadata": {"requires": {"env": ["A", "A", "B"]}}}) == ("A", "B")
+
+
+def test_skill_entry_exposes_declared_env(tmp_path, monkeypatch):
+    from openminis.core import context
+    from openminis.skills import SkillStore
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MINIS_HOME", str(home))
+    context.set_app_context(context.AppContext(data_dir=home, cache_dir=home))
+
+    skill = home / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo\n"
+        "description: 演示\n"
+        "metadata:\n"
+        "  requires:\n"
+        "    env: [\"MODELSCOPE_API_KEY\"]\n"
+        "---\n\n正文\n",
+        encoding="utf-8",
+    )
+    entry = SkillStore().get("demo")
+    assert entry is not None
+    assert entry.env == ("MODELSCOPE_API_KEY",)
+
+
+def test_skill_env_api_roundtrip(tmp_path, monkeypatch):
+    """技能环境变量的读写：与设置页那份是同一处存储（sandbox.envExtra）。
+
+    技能在 SKILL.md 里声明 ``metadata.requires.env``，界面据此列出「还差哪一项」；
+    值本身走沙箱那套环境变量，shell 每次执行前整份注入 —— 所以填完不用重启。
+    """
+    import asyncio
+
+    from openminis.core import context
+    from openminis.server import skills_api
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MINIS_HOME", str(home))
+    context.set_app_context(context.AppContext(data_dir=home, cache_dir=home))
+
+    skill = home / "skills" / "img"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: img\n"
+        "description: 生图\n"
+        "metadata:\n"
+        "  requires:\n"
+        "    env: [\"MODELSCOPE_API_KEY\"]\n"
+        "---\n\n正文\n",
+        encoding="utf-8",
+    )
+
+    info = asyncio.run(skills_api.skills_env())
+    assert [r["name"] for r in info["required"]] == ["MODELSCOPE_API_KEY"]
+    assert info["required"][0]["set"] is False
+    assert info["required"][0]["skills"] == ["img"]
+
+    saved = asyncio.run(
+        skills_api.skills_env_save(
+            skills_api.EnvRequest(values={"MODELSCOPE_API_KEY": "ms-abc123"})
+        )
+    )
+    assert saved["required"][0]["set"] is True
+    assert saved["values"]["MODELSCOPE_API_KEY"] == "ms-abc123"
+
+    # 空值 = 删掉该项
+    cleared = asyncio.run(
+        skills_api.skills_env_save(
+            skills_api.EnvRequest(values={"MODELSCOPE_API_KEY": ""})
+        )
+    )
+    assert cleared["required"][0]["set"] is False
+    assert "MODELSCOPE_API_KEY" not in cleared["values"]
+
+
+def test_skill_env_feeds_sandbox_shell(tmp_path, monkeypatch):
+    """填进去的值必须真的进得了沙箱命令的环境（不然填了等于没填）。"""
+    import asyncio
+
+    from openminis.core import context
+    from openminis.server import skills_api
+    from openminis.tools.shell_execute_tool import _load_env_extra
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MINIS_HOME", str(home))
+    context.set_app_context(context.AppContext(data_dir=home, cache_dir=home))
+
+    asyncio.run(
+        skills_api.skills_env_save(
+            skills_api.EnvRequest(values={"MODELSCOPE_API_KEY": "ms-xyz"})
+        )
+    )
+    assert _load_env_extra() == {"MODELSCOPE_API_KEY": "ms-xyz"}

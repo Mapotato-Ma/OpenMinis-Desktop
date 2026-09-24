@@ -1,0 +1,123 @@
+name: Build Windows desktop app
+
+# Produces a ready-to-run OpenMinisDesktop.exe without needing a Windows
+# machine locally. Two ways to get a build:
+#
+#   * Actions tab -> "Build Windows desktop app" -> Run workflow
+#     (artifact "OpenMinisDesktop-windows" appears on the run page)
+#   * push a tag:  git tag v0.1.0 && git push origin v0.1.0
+#     (a GitHub Release is created with the exe attached)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - 'web/desktop/**'
+      - 'packaging/OpenMinisDesktop.spec'
+      - 'desktop_main.py'
+      - 'pyproject.toml'
+      - '.github/workflows/build-windows.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'web/desktop/**'
+      - 'packaging/OpenMinisDesktop.spec'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          # pywebview supplies the WebView2 window; PyInstaller does the packaging.
+          pip install "pywebview>=5.0" "pyinstaller>=6.6"
+
+      - name: Smoke-test the desktop shell
+        shell: pwsh
+        run: python scripts/smoke_test.py
+
+      - name: Generate icon
+        shell: pwsh
+        run: python scripts/make_icon.py
+
+      - name: Build onefile executable
+        shell: pwsh
+        env:
+          OPENMINIS_ONEFILE: '1'
+          # Keep the console in CI: if startup fails we want the traceback in
+          # the log rather than a silent exit. Release builds flip this off.
+          OPENMINIS_CONSOLE: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+        run: python -m PyInstaller --noconfirm --clean packaging/OpenMinisDesktop.spec
+
+      - name: Verify the executable starts
+        shell: pwsh
+        run: |
+          # A GUI build has no console, so the only sane check is: launch it
+          # headless and see whether the backend answers.
+          $p = Start-Process -FilePath "dist\OpenMinisDesktop.exe" `
+               -ArgumentList "--no-window","--port","8799" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 2
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8799/api/health
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch { }
+          }
+          if (-not $ok) {
+            Write-Error "frozen exe never became healthy"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          $ui = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:8799/_desktop/
+          if ($ui.Content -notmatch 'OpenMinis Desktop') {
+            Write-Error "frozen exe served the wrong UI"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "frozen exe is healthy and serving the desktop UI"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMinisDesktop-windows
+          path: dist/OpenMinisDesktop.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/OpenMinisDesktop.exe
+          generate_release_notes: true
+          body: |
+            ## OpenMinis Desktop ${{ github.ref_name }}
+
+            Windows 桌面版（原生窗口，基于 OpenMinis 内核）。
+
+            下载 `OpenMinisDesktop.exe` 双击运行即可，无需安装 Python 或 Node。
+            首次启动会在 `%LOCALAPPDATA%\openminis` 建数据目录，然后在设置里
+            配置模型服务（OpenAI / Anthropic / 任意 OpenAI 兼容网关）。
+
+            - 快捷键：`Ctrl+K` 命令面板、`Ctrl+\`` 终端、`Ctrl+B` 右侧面板、`Ctrl+N` 新会话
+            - 首次运行若提示缺少 WebView2，装一次微软的
+              [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 较老版本可能需要）
