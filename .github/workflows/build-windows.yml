@@ -21,12 +21,18 @@ on:
       - 'packaging/OpenMinisDesktop.spec'
       - 'desktop_main.py'
       - 'pyproject.toml'
+      # The suite that step 6 runs lives here. Without this, a fix to the tests
+      # could not itself be verified by CI — which is how a Windows-only
+      # UnicodeEncodeError in the test output went unnoticed until it was the
+      # product code that was fine and the test that crashed.
+      - 'scripts/**'
       - '.github/workflows/build-windows.yml'
   pull_request:
     paths:
       - 'desktop/**'
       - 'web/desktop/**'
       - 'packaging/OpenMinisDesktop.spec'
+      - 'scripts/**'
 
 permissions:
   contents: write
