@@ -31,14 +31,26 @@ for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# Point the kernel at a throwaway profile *before* anything imports it. Some
-# assertions below describe a fresh install ("no provider is configured yet"),
-# and a developer machine running this will usually have a real profile with
-# providers and sessions in it — reading that would make the suite pass or fail
-# depending on whose laptop it ran on.
+# Two environment fixes, both only observable on some platforms — which is
+# exactly why this file runs in CI on windows-latest as well as locally.
+#
+# 1. Isolation. Some assertions below describe a fresh install ("no provider is
+#    configured yet"), and a developer machine will usually have a real profile
+#    with providers and sessions in it. MINIS_HOME is the kernel's own override
+#    (see core/context.py) and wins on every platform; XDG_DATA_HOME is kept as
+#    a belt-and-braces for code paths that read it directly.
+# 2. Output encoding. Windows consoles default to cp1252, and a check detail
+#    containing Chinese made print() raise UnicodeEncodeError — turning a
+#    passing assertion into a crashed run. Force UTF-8 and degrade rather than
+#    die on glyphs the terminal cannot render.
 _SMOKE_HOME = Path(tempfile.mkdtemp(prefix="openminis-smoke-"))
-os.environ["XDG_DATA_HOME"] = str(_SMOKE_HOME)      # Linux / macOS
-os.environ["LOCALAPPDATA"] = str(_SMOKE_HOME)       # Windows wins here
+os.environ["MINIS_HOME"] = str(_SMOKE_HOME)
+os.environ["XDG_DATA_HOME"] = str(_SMOKE_HOME)
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):  # pragma: no cover — not a TextIOWrapper
+        pass
 
 from desktop.paths import desktop_web_dir  # noqa: E402
 from desktop.server_runner import start_server  # noqa: E402
