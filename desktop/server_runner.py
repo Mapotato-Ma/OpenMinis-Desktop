@@ -107,12 +107,18 @@ def build_app(*, desktop_dir: Path | None = None, ui_active: bool = False):
     """
     from openminis.server.main import app  # noqa: PLC0415
 
-    from .ui_mount import attach_desktop_api, attach_desktop_ui, attach_window_bootstrap
+    from .ui_mount import (
+        attach_desktop_api,
+        attach_desktop_ui,
+        attach_provider_probe,
+        attach_window_bootstrap,
+    )
 
     if desktop_dir is not None and ui_active:
         attach_desktop_ui(app, desktop_dir)
     attach_window_bootstrap(app)
     attach_desktop_api(app, desktop_dir=desktop_dir, ui_active=ui_active)
+    attach_provider_probe(app)
     return app
 
 

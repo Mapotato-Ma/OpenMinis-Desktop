@@ -471,8 +471,17 @@ function handleFrame(f) {
         termLine(f.error || '命令执行失败', 'err');
         break;
       }
-      if (state.turn) { appendDelta(`\n\n> ⚠️ ${f.error}`); }
-      else toast(f.error || '未知错误', 'err');
+      if (state.turn) {
+        appendDelta(`\n\n> ⚠️ ${f.error}`);
+        // A model-provider failure is fixed in settings, not by retrying.
+        // Flag the button so the next click lands on the pane that explains it.
+        if (/模型服务|API Key|厂商|provider/i.test(String(f.error || ''))) {
+          const b = $('btnSettings');
+          if (b) { b.classList.add('needs-attention'); b.title = '模型服务还没配好 —— 点这里去修'; }
+        }
+      } else {
+        toast(f.error || '未知错误', 'err');
+      }
       endTurn();
       break;
     case 'pong':
@@ -1208,7 +1217,7 @@ function onKeydown(ev) {
   if (mod && ev.key === ',') { ev.preventDefault(); openSettings(); return; }
   if (mod && ev.shiftKey && ev.key.toLowerCase() === 'l') { ev.preventDefault(); cycleTheme(); return; }
   if (ev.key === 'Escape') {
-    if (!$('settingsOverlay').hidden) { closeSettings(); return; }
+    if (!$('settingsOverlay').hidden) { confirmCloseSettings(); return; }
     if (state.palette.open) { closePalette(); return; }
     if (!$('modalOverlay').hidden) { $('modalOverlay').hidden = true; return; }
     if (state.streaming) { stopTurn(); return; }
@@ -1265,11 +1274,18 @@ function wire() {
   $('btnInspector').addEventListener('click', () => toggleInspector());
   $('btnTheme').addEventListener('click', (e) => { e.stopPropagation(); openThemeMenu(); });
   $('btnSettings').addEventListener('click', () => openSettings());
-  $('btnSettingsClose').addEventListener('click', closeSettings);
+  $('btnSettingsClose').addEventListener('click', confirmCloseSettings);
   document.querySelectorAll('.settings-nav-item').forEach((b) => {
     b.addEventListener('click', () => switchSettingsPane(b.dataset.pane));
   });
   $('btnAddProvider').addEventListener('click', addProvider);
+  $('btnSaveModels').addEventListener('click', () => saveSettings());
+  $('btnReloadModels').addEventListener('click', async () => {
+    await loadSettings();
+    toast('已重新载入');
+  });
+  // Same save as every pane's own button — one draft, one commit path.
+  $('btnSettingsSave').addEventListener('click', () => saveSettings());
   $('btnIdentityActivate').addEventListener('click', () => {
     settings.identity.activeId = settings.identity.selected;
     renderIdentities();
@@ -1365,6 +1381,8 @@ const settings = {
   data: null,       // last GET /api/settings payload
   draft: null,      // {providers:[...], slots:{...}, agent:{...}}
   pane: 'models',
+  dirty: new Set(), // areas with uncommitted edits: 'models' | 'agent' | 'identity'
+  probe: {},        // providerId -> last 测试连接 / 拉取模型列表 outcome
 };
 
 async function openSettings(pane) {
@@ -1409,12 +1427,15 @@ async function loadSettings() {
       settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
     }
     settings.loaded = true;
+    settings.probe = {};
     buildIdentityDraft(data);
     renderProviders();
     renderSlots();
     renderAgentForm();
     renderIdentities();
     renderIdentityTools();
+    renderModelsHealth();
+    clearDirty();
   } catch (e) {
     toast('设置加载失败: ' + e.message, 'err');
   }
@@ -1597,6 +1618,7 @@ function sameToolSet(a, b) {
 
 function markToolsDirty(id) {
   const st = settings.identity;
+  markDirty('identity');
   if (sameToolSet(st.tools[id] || [], savedTools(id))) st.dirty.delete(id);
   else st.dirty.add(id);
 }
@@ -1619,15 +1641,189 @@ function providerTypeMeta(type) {
 }
 
 /* ── provider instances ──────────────────────────────────────────────── */
+/* ── unsaved-change tracking ─────────────────────────────────────────── */
+// Every pane edits one shared draft; nothing reaches the server until
+// saveSettings() runs. Tracking dirtiness centrally is what lets the header
+// pill tell the truth regardless of which pane the edit came from — the bug
+// this replaced was a page that edited state and offered no way to commit it.
+function markDirty(area) {
+  if (area) settings.dirty.add(area);
+  updateDirtyUI();
+}
+
+function clearDirty() {
+  settings.dirty.clear();
+  if (settings.identity) settings.identity.dirty.clear();
+  updateDirtyUI();
+}
+
+function updateDirtyUI() {
+  const n = settings.dirty.size;
+  const pill = $('settingsDirty');
+  const btn = $('btnSettingsSave');
+  if (pill) pill.hidden = n === 0;
+  if (btn) btn.hidden = n === 0;
+}
+
+/* ── "will a chat turn actually work?" banner ────────────────────────── */
+// The kernel raises "还没有配置模型服务" when ``activeProviderId`` is empty, and
+// that field is written from the **chat slot** — so an unset chat slot is the
+// single most common way to end up with a configured-looking settings page and
+// a chat that refuses to run.
+function draftChatBinding() {
+  const chat = (settings.draft.slots && settings.draft.slots.chat) || { instanceId: '', model: '' };
+  const p = (settings.draft.providers || []).find((x) => x.id === chat.instanceId) || null;
+  return { chat, provider: p };
+}
+
+function setChatProvider(pid) {
+  const p = (settings.draft.providers || []).find((x) => x.id === pid);
+  if (!p) return;
+  const meta = providerTypeMeta(p.type);
+  settings.draft.slots.chat = {
+    instanceId: p.id,
+    model: p.model || meta.defaultModel || '',
+  };
+  markDirty('models');
+  renderSlots();
+  renderProviders();
+  renderModelsHealth();
+}
+
+function renderModelsHealth() {
+  const box = $('modelsHealth');
+  if (!box) return;
+  const { provider: p } = draftChatBinding();
+  const provs = settings.draft.providers || [];
+  box.hidden = false;
+  box.className = 'notice';
+  box.innerHTML = '';
+
+  const ic = el('span', 'ic');
+  const main = el('div', 'notice-main');
+
+  if (!p) {
+    box.classList.add('warn');
+    ic.textContent = '⚠';
+    main.appendChild(el('div', 'notice-title', '会话还不能用：没有指定「当前对话」用哪个服务商'));
+    main.appendChild(el('div', 'notice-sub',
+      '真正生效的是「用途绑定 → 对话」那一行。它空着的话，发消息只会得到「还没有配置模型服务」。'));
+    if (provs.length) {
+      const fix = el('button', 'btn', '把第一个服务商设为当前对话');
+      fix.addEventListener('click', () => setChatProvider(provs[0].id));
+      main.appendChild(fix);
+    } else {
+      main.appendChild(el('div', 'notice-sub', '先点下面的「＋ 添加服务商」。'));
+    }
+  } else {
+    const missing = [];
+    if (!p.model) missing.push('模型 ID');
+    if (!p.hasKey && !p.newKey) missing.push('API Key');
+    if (missing.length) {
+      box.classList.add('warn');
+      ic.textContent = '⚠';
+      main.appendChild(el('div', 'notice-title',
+        `当前对话服务商「${p.label || p.id}」还缺：${missing.join(' / ')}`));
+      main.appendChild(el('div', 'notice-sub', '补上并保存后，点「测试连接」确认真的能通。'));
+    } else {
+      box.classList.add('ok');
+      ic.textContent = '✓';
+      main.appendChild(el('div', 'notice-title', `当前对话：${p.label || p.id} / ${p.model}`));
+      main.appendChild(el('div', 'notice-sub',
+        '已经指定了。建议点「测试连接」发一次真实请求 —— 它会验证地址、密钥和模型 ID。'));
+    }
+  }
+  box.appendChild(ic);
+  box.appendChild(main);
+}
+
+/* ── provider probe state ────────────────────────────────────────────── */
+// Kept outside the DOM so a re-render (which saveSettings triggers) does not
+// wipe the result the user is looking at.
+function setProbe(pid, value) {
+  settings.probe = settings.probe || {};
+  settings.probe[pid] = value;
+  renderProviders();
+}
+
+function probeResultNode(r) {
+  const box = el('div', 'test-result' + (r.busy ? '' : r.ok ? ' ok' : ' err'));
+  if (r.busy) {
+    box.textContent = '测试中…（会真的发一次最小请求，约 1–30 秒）';
+    return box;
+  }
+  box.appendChild(el('div', null, (r.ok ? '✓ ' : '✗ ') + (r.text || '')));
+  if (r.hint) box.appendChild(el('div', 'test-hint', '→ ' + r.hint));
+  if (r.raw) box.appendChild(el('div', 'test-raw', r.raw));
+  return box;
+}
+
+async function testProvider(pid) {
+  setProbe(pid, { busy: true });
+  // The probe reads the *stored* config, so persist first — otherwise the
+  // button would test the old values while the form shows the new ones.
+  const saved = await saveSettings({ silent: true });
+  if (!saved) {
+    setProbe(pid, { ok: false, text: '设置没有保存成功，无法测试', hint: '先修好保存报的错再试。' });
+    return;
+  }
+  try {
+    const r = await api('/desktop/test-provider', { method: 'POST', body: JSON.stringify({ id: pid }) });
+    if (r.ok) {
+      const reply = (r.reply || '').replace(/\s+/g, ' ').trim();
+      setProbe(pid, {
+        ok: true,
+        text: `连接成功，模型「${r.model || '(未填)'}」正常回应（${r.ms} ms）`,
+        hint: reply ? `模型回了一句：${reply}` : '对话链路已经通了，可以回会话发消息了。',
+      });
+    } else {
+      setProbe(pid, {
+        ok: false,
+        text: r.error || '调用失败',
+        hint: r.hint || (r.stage === 'setup' ? '这是配置本身的问题，不是网络。' : ''),
+      });
+    }
+  } catch (e) {
+    setProbe(pid, { ok: false, text: '测试请求失败: ' + e.message });
+  }
+}
+
+async function fetchModels(pid) {
+  setProbe(pid, { busy: true });
+  const saved = await saveSettings({ silent: true });
+  if (!saved) {
+    setProbe(pid, { ok: false, text: '设置没有保存成功，无法拉取', hint: '先修好保存报的错再试。' });
+    return;
+  }
+  try {
+    const r = await api('/settings/fetch-models', { method: 'POST', body: JSON.stringify({ id: pid }) });
+    const models = r.models || [];
+    const shown = models.slice(0, 12).join('、');
+    setProbe(pid, {
+      ok: true,
+      text: `拉到 ${models.length} 个模型（来源 ${r.source || '远端'}），已存为该实例的候选`,
+      hint: shown + (models.length > 12 ? ' …' : ''),
+    });
+  } catch (e) {
+    setProbe(pid, { ok: false, text: '拉取失败: ' + e.message,
+      hint: '这一步只探测 Base URL 的 /models。若它失败但「测试连接」成功，说明该服务商不提供模型列表，可以忽略。' });
+  }
+}
+
+/* ── provider cards ──────────────────────────────────────────────────── */
 function renderProviders() {
   const box = $('providerList');
+  if (!box) return;
   box.innerHTML = '';
   const list = settings.draft.providers;
   if (!list.length) {
     box.appendChild(el('div', 'empty-note', '还没有配置任何服务商。'));
     return;
   }
-  const activeId = settings.data && settings.data.activeProviderId;
+  // Read the live draft, not the server value: the "当前对话" badge should move
+  // the instant the user rebinds the chat slot.
+  const { chat } = draftChatBinding();
+  const activeId = chat.instanceId || (settings.data && settings.data.activeProviderId);
 
   list.forEach((p, idx) => {
     const meta = providerTypeMeta(p.type);
@@ -1646,22 +1842,69 @@ function renderProviders() {
     card.appendChild(head);
 
     const row1 = el('div', 'field-row');
-    row1.appendChild(textField('显示名称', p.label, (v) => { p.label = v; }, 'My Gateway'));
-    row1.appendChild(textField('Base URL', p.baseUrl, (v) => { p.baseUrl = v; }, meta.engine === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'));
+    row1.appendChild(textField('显示名称', p.label, (v) => { p.label = v; markDirty('models'); }, 'My Gateway'));
+    row1.appendChild(textField('Base URL', p.baseUrl, (v) => { p.baseUrl = v; markDirty('models'); },
+      meta.engine === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'));
     card.appendChild(row1);
 
     const row2 = el('div', 'field-row');
     row2.appendChild(selectField('类型', p.type,
       ((settings.data && settings.data.providerTypes) || []).map((t) => [t.type, t.label + (t.engine ? '' : '（引擎未移植）')]),
-      (v) => { p.type = v; renderProviders(); }));
+      (v) => { p.type = v; markDirty('models'); renderProviders(); }));
     const keyField = passwordField(
       p.hasKey ? 'API Key（已保存，留空则不变）' : 'API Key',
-      (v) => { p.newKey = v; },
+      (v) => { p.newKey = v; markDirty('models'); renderModelsHealth(); },
     );
     row2.appendChild(keyField);
     card.appendChild(row2);
 
-    card.appendChild(textField('模型 ID', p.model, (v) => { p.model = v; }, meta.defaultModel || 'gpt-4o-mini'));
+    card.appendChild(textField('模型 ID', p.model, (v) => {
+      p.model = v;
+      markDirty('models');
+      // Keep the chat slot's model in step with the instance it points at.
+      const c = settings.draft.slots.chat;
+      if (c && c.instanceId === p.id) c.model = v;
+      renderModelsHealth();
+    }, meta.defaultModel || 'gpt-4o-mini'));
+
+    const actions = el('div', 'provider-actions');
+    if (p.id !== activeId) {
+      const act = el('button', 'btn', '设为当前对话');
+      act.addEventListener('click', () => setChatProvider(p.id));
+      actions.appendChild(act);
+    } else {
+      // Editing a purpose slot needs a bound instance first, so auto-bind the
+      // non-chat slots too — otherwise a fresh install has 7 unbound rows and
+      // tools like vision silently stay off.
+      const auto = el('button', 'btn', '其余用途自动绑定');
+      auto.title = '把还空着的用途槽位（识图 / 生图 / …）都绑到这个实例';
+      auto.addEventListener('click', () => {
+        let n = 0;
+        for (const s of Object.keys(settings.draft.slots)) {
+          if (s === 'chat') continue;
+          const v = settings.draft.slots[s];
+          if (v && v.instanceId) continue;
+          settings.draft.slots[s] = { instanceId: p.id, model: p.model || '' };
+          n += 1;
+        }
+        markDirty('models');
+        renderSlots();
+        renderModelsHealth();
+        toast(n ? `已绑定 ${n} 个用途槽位` : '所有用途都已绑定');
+      });
+      actions.appendChild(auto);
+    }
+    const test = el('button', 'btn', '测试连接');
+    test.title = '先保存，再真的发一次最小请求';
+    test.addEventListener('click', () => testProvider(p.id));
+    actions.appendChild(test);
+    const fetchBtn = el('button', 'btn ghost', '拉取模型列表');
+    fetchBtn.addEventListener('click', () => fetchModels(p.id));
+    actions.appendChild(fetchBtn);
+    card.appendChild(actions);
+
+    const probe = (settings.probe || {})[p.id];
+    if (probe) card.appendChild(probeResultNode(probe));
 
     box.appendChild(card);
   });
@@ -1719,11 +1962,23 @@ function addProvider() {
   const types = (settings.data && settings.data.providerTypes) || [];
   const type = (types.find((t) => t.engine) || types[0] || {}).type || 'openAI';
   const meta = providerTypeMeta(type);
-  settings.draft.providers.push({
+  const created = {
     id: newProviderId(type), type, label: meta.label || type,
     baseUrl: '', model: meta.defaultModel || '', hasKey: false,
-  });
+  };
+  settings.draft.providers.push(created);
+  // Adding the only provider must also make it the active one. Otherwise the
+  // card looks configured while `activeProviderId` stays empty and every chat
+  // turn dies with "还没有配置模型服务" — this was the single most confusing
+  // dead end in the UI.
+  const chat = settings.draft.slots.chat;
+  if (!chat || !chat.instanceId) {
+    settings.draft.slots.chat = { instanceId: created.id, model: created.model };
+  }
+  markDirty('models');
   renderProviders();
+  renderSlots();
+  renderModelsHealth();
 }
 
 function removeProvider(idx) {
@@ -1738,8 +1993,11 @@ function removeProvider(idx) {
       settings.draft.slots[slot] = { instanceId: '', model: '' };
     }
   }
+  delete (settings.probe || {})[p.id];
+  markDirty('models');
   renderProviders();
   renderSlots();
+  renderModelsHealth();
 }
 
 /* ── model slots ─────────────────────────────────────────────────────── */
@@ -1771,7 +2029,12 @@ function renderSlots() {
       cur.instanceId = sel.value;
       const p = providers.find((x) => x.id === sel.value);
       cur.model = p ? (p.model || providerTypeMeta(p.type).defaultModel || '') : '';
+      markDirty('models');
       renderSlots();
+      // The chat slot decides which card wears the "当前对话" badge, so that
+      // badge has to follow a rebind immediately rather than after a save.
+      renderProviders();
+      renderModelsHealth();
     });
     row.appendChild(sel);
 
@@ -1780,7 +2043,7 @@ function renderSlots() {
     inp.placeholder = '模型 ID';
     inp.value = cur.model || '';
     inp.disabled = !cur.instanceId;
-    inp.addEventListener('input', () => { cur.model = inp.value.trim(); });
+    inp.addEventListener('input', () => { cur.model = inp.value.trim(); markDirty('models'); renderModelsHealth(); });
     row.appendChild(inp);
     box.appendChild(row);
   }
@@ -1829,13 +2092,15 @@ async function saveSettings({ silent } = {}) {
     for (const s of data.modelSlots || []) {
       settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
     }
-    if (settings.identity) settings.identity.dirty = new Set();
     buildIdentityDraft(data);
+    if (settings.identity) settings.identity.dirty = new Set();
+    clearDirty();
     renderProviders();
     renderSlots();
     renderAgentForm();
     renderIdentities();
     renderIdentityTools();
+    renderModelsHealth();
     if (!silent) toast('已保存');
     return true;
   } catch (e) {
@@ -1851,6 +2116,22 @@ function renderAgentForm() {
   $('agentMaxMemory').value = a.maxMemoryRounds != null ? a.maxMemoryRounds : '';
   $('agentDeepThinking').checked = !!a.deepThinking;
   $('agentSubagent').checked = !!a.subagentEnabled;
+  // These inputs previously had no listeners — editing them changed nothing
+  // visible until you happened to press save, which is how "did it save?"
+  // became a guessing game.
+  for (const id of ['agentMaxTools', 'agentMaxMemory', 'agentDeepThinking', 'agentSubagent']) {
+    const node = $(id);
+    if (!node || node.dataset.dirtyHook) continue;
+    node.dataset.dirtyHook = '1';
+    node.addEventListener('input', () => markDirty('agent'));
+    node.addEventListener('change', () => markDirty('agent'));
+  }
+}
+
+function confirmCloseSettings() {
+  if (settings.dirty.size && !confirm('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）')) return;
+  if (settings.dirty.size) loadSettings();
+  closeSettings();
 }
 
 function readAgentForm() {

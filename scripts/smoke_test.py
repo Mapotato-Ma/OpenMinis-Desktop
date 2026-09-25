@@ -18,7 +18,10 @@ layer is pywebview's problem, not ours.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -27,6 +30,15 @@ ROOT = Path(__file__).resolve().parent.parent
 for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+# Point the kernel at a throwaway profile *before* anything imports it. Some
+# assertions below describe a fresh install ("no provider is configured yet"),
+# and a developer machine running this will usually have a real profile with
+# providers and sessions in it — reading that would make the suite pass or fail
+# depending on whose laptop it ran on.
+_SMOKE_HOME = Path(tempfile.mkdtemp(prefix="openminis-smoke-"))
+os.environ["XDG_DATA_HOME"] = str(_SMOKE_HOME)      # Linux / macOS
+os.environ["LOCALAPPDATA"] = str(_SMOKE_HOME)       # Windows wins here
 
 from desktop.paths import desktop_web_dir  # noqa: E402
 from desktop.server_runner import start_server  # noqa: E402
@@ -112,8 +124,45 @@ def main() -> int:
         # is a supported flag and web/dist ships in the bundle.
         status, _body, _ = get(f"{base}/_desktop/window-bootstrap.js")
         check("window bootstrap served", status == 200, f"status={status}")
+
+        status, body, _ = get(f"{base}/api/desktop/chat-readiness")
+        ready = json.loads(body or b"{}")
+        check("GET /api/desktop/chat-readiness -> 200", status == 200, f"status={status}")
+        # A fresh profile has no active provider, so this must report *not*
+        # ready — that is exactly the state the settings pane has to explain.
+        check(
+            "readiness reports not-ready with no provider configured",
+            ready.get("ready") is False and ready.get("reason") == "no_active_provider",
+            str(ready),
+        )
+
+        req = urllib.request.Request(
+            f"{base}/api/desktop/test-provider", data=b'{"id":"nope"}', method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            probe = json.loads(resp.read() or b"{}")
+        # A probe must never 500: unknown instance is a normal answer.
+        check(
+            "POST /api/desktop/test-provider answers for an unknown id",
+            resp.status == 200 and probe.get("ok") is False,
+            str(probe)[:80],
+        )
+
+        req = urllib.request.Request(
+            f"{base}/api/desktop/test-provider", data=b"not json", method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                bad = (resp.status, json.loads(resp.read() or b"{}"))
+        except urllib.error.HTTPError as e:  # 400 is the expected shape
+            bad = (e.code, json.loads(e.read() or b"{}"))
+        check("test-provider rejects a malformed body with 400",
+              bad[0] == 400 and bad[1].get("ok") is False, str(bad)[:80])
     finally:
         server.shutdown()
+        shutil.rmtree(_SMOKE_HOME, ignore_errors=True)
 
     print()
     if FAILURES:

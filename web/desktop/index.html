@@ -196,6 +196,9 @@
 <div class="settings-overlay" id="settingsOverlay" hidden>
   <div class="settings-head">
     <h1>设置</h1>
+    <span class="dirty-pill" id="settingsDirty" hidden>● 有未保存的改动</span>
+    <span class="spacer-x"></span>
+    <button class="btn primary" id="btnSettingsSave" hidden>保存</button>
     <button class="btn ghost" id="btnSettingsClose">✕ 关闭 (Esc)</button>
   </div>
   <div class="settings-main">
@@ -217,6 +220,8 @@
           <code>%LOCALAPPDATA%\openminis</code>，不会上传到任何地方。
         </p>
 
+        <div class="notice" id="modelsHealth" hidden></div>
+
         <div class="settings-block">
           <h3>已配置的服务商</h3>
           <p class="block-sub">多个实例可以共用同一个类型 —— 例如两个不同的 OpenAI 兼容网关。</p>
@@ -230,6 +235,13 @@
           <h3>用途绑定</h3>
           <p class="block-sub">每个用途挑一个「实例 + 模型」。没配的用途对应的工具会不可用。</p>
           <div id="slotList"></div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn primary" id="btnSaveModels">保存</button>
+          <button class="btn" id="btnReloadModels">重新载入</button>
+          <span class="spacer-x"></span>
+          <span class="tool-count" id="modelsHint"></span>
         </div>
       </section>
 

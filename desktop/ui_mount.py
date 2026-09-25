@@ -27,7 +27,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.1.0"
+DESKTOP_UI_VERSION = "0.1.1"
 
 
 def _insert_front(app: FastAPI, route: Any) -> None:
@@ -103,6 +103,43 @@ def attach_desktop_api(app: FastAPI, *, desktop_dir: Path | None, ui_active: boo
     _insert_front(
         app,
         Route("/api/desktop/info", _info, methods=["GET"], include_in_schema=False),
+    )
+
+
+def attach_provider_probe(app: FastAPI) -> None:
+    """``/api/desktop/test-provider`` — does this provider actually answer?
+
+    ``POST /api/settings/fetch-models`` already exists upstream, but it only
+    probes ``GET /models``: it can be green while the configured *model id* is
+    wrong. This sends a real minimal completion so the button reports what the
+    chat will actually experience. Both routes read the **stored** config, so
+    the UI saves before testing.
+    """
+
+    async def _test_provider(request: Any) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 — malformed body is a client error
+            return JSONResponse({"ok": False, "error": "请求体不是合法 JSON"}, status_code=400)
+        pid = str((payload or {}).get("id") or "").strip()
+        if not pid:
+            return JSONResponse({"ok": False, "error": "缺少 id"}, status_code=400)
+        from .provider_probe import probe_provider  # noqa: PLC0415
+
+        return JSONResponse(await probe_provider(pid))
+
+    async def _readiness(request: Any) -> JSONResponse:  # noqa: ARG001
+        from .provider_probe import chat_readiness  # noqa: PLC0415
+
+        return JSONResponse(await chat_readiness())
+
+    _insert_front(
+        app,
+        Route("/api/desktop/test-provider", _test_provider, methods=["POST"], include_in_schema=False),
+    )
+    _insert_front(
+        app,
+        Route("/api/desktop/chat-readiness", _readiness, methods=["GET"], include_in_schema=False),
     )
 
 
