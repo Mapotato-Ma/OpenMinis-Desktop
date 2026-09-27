@@ -13,7 +13,9 @@ name: Verify
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # 所有分支都跑（不写 branches 过滤）：特性分支上的红是**信号**，
+    # 而且没有 token 时也能从 Actions API 读到失败在哪一步。
+    # 打包/release 仍然只由 build-windows.yml 的 tag 推送触发。
     paths:
       - 'src/**'
       - 'tests/**'
@@ -62,17 +64,10 @@ jobs:
           pip install -e .
           npm --prefix web ci
 
-      # 第一阶段：先让它跑起来、看到 Windows 上的真实基线。
-      # 已知本机（Alpine/aarch64）有 13 项红的，其中一部分是平台差异、
-      # 一部分是真 bug（见 .scratch/verify-loop/）。基线绿了之后删掉
-      # continue-on-error —— 那之前它是**信号**，不是门禁。
+      # 直接当门禁，不做「先 informational」那一套：没有 token 时，
+      # continue-on-error 会把失败步骤的 conclusion 也报成 success，
+      # 于是从 Actions API 根本看不出红不红 —— 那这条流水线就白跑了。
+      # 特性分支上红是信号，不影响打包（release 只由 tag 触发）。
       - name: Run the check suite
         shell: pwsh
-        continue-on-error: true
         run: python scripts/check.py --fast
-
-      - name: Show what failed
-        if: failure()
-        shell: pwsh
-        run: |
-          Write-Host "check suite failed — see .scratch/verify-loop/ for the known baseline"
