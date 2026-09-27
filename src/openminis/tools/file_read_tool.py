@@ -261,6 +261,17 @@ def _resolve_session_host_path(session_id: str, path: str) -> Path | None:
         resolved_abs = raw_path.resolve()
         if resolved_abs == ws_resolved or ws_resolved in resolved_abs.parents:
             return resolved_abs
+        # PORT-FIX(上游 bug): 只读根（技能库）里的绝对路径同样要原样接受。
+        # 原写法在 POSIX 上会继续往下走 ``lstrip("/")``，把它拼成
+        # ``<workspace>/<sid>/tmp/…``，于是「技能目录里的 SKILL.md 读不到」；
+        # Windows 上因为盘符在 pathlib 里会替换掉左操作数，看不出问题。
+        # 与 path_utils.resolve_workspace_path 的同名修复是同一件事。
+        from .path_utils import readonly_roots
+
+        for extra in readonly_roots():
+            er = extra.resolve()
+            if resolved_abs == er or er in resolved_abs.parents:
+                return resolved_abs
 
     candidate = candidate.lstrip("/") or ""
 

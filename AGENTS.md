@@ -8,7 +8,7 @@ OpenMinis Desktop：把 OpenMinis 内核装进一个 Windows 原生窗口（pywe
 - **`src/` 原则上是从上游移植的内核，一行都不改。** 壳层要加的东西一律加在 `desktop/`。
   这条是项目存在的理由（上游更新能直接 merge），破了它整个项目就没意义了。
   例外只有一个：**上游自身的 bug**，走「三件套」——代码里 `# PORT-FIX:` 标记 + `NOTICE.md`
-  的偏离表记一行 + `python scripts/check.py` 跑绿。目前只有两处（见 NOTICE.md）。
+  的偏离表记一行 + `python scripts/check.py` 跑绿。目前有六处（见 NOTICE.md）。
 - 壳层通过 `desktop/ui_mount.py` 在**运行时**把路由插到内核实例上，不改内核文件。
 - 界面在 `web/desktop/`（无框架、无构建步骤）；`web/src` + `web/dist` 是上游移动端 UI。
 - 密钥、token 一律不进仓库、不进日志。

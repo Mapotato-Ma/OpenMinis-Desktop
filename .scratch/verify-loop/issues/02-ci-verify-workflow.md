@@ -22,6 +22,21 @@ Type: task
 第一次落地时 `continue-on-error: true`（见 ticket 05）：先拿到 Windows 上的真实基线，
 基线绿了再删掉那一行。**那之前它是信号，不是门禁。**
 
-## 待验证
+## 结果（已验证）
 
-需要一次推送才能在 Windows runner 上看到结果 —— 本机没有 GitHub 凭据。
+第一次运行就红了 —— 但红在**接线**上，不是测试上，两处都修了：
+
+1. 只装了 `-e .`，而 pytest 在 `[dev]` 里 → `No module named pytest`。
+2. `subprocess` 不带 shell 跑 `npm` 时只认 `.exe`，而它是 `npm.cmd` 垫片
+   → `WinError 2`。`check.py` 里加 `resolve_argv()` 按 PATHEXT 解析。
+
+第二次运行（`4e03bd7`）拿到了真实基线：
+
+```
+1 failed, 757 passed in 50.22s
+✓ PASS  1.8s  前端回归检查 (npm run check:ws)     ← 这个脚本第一次真的跑起来
+```
+
+Windows 上唯一那一项红属于 ticket 04（用例的时钟赛跑），已修。
+所以这条流水线现在是**可用的门禁**，不再需要 `continue-on-error`。
+

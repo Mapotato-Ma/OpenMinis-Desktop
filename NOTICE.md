@@ -20,20 +20,20 @@
 
 ## 与上游的偏离（PORT-FIX）
 
-`src/` 下的代码原则上一行不改（这样上游更新能直接 merge）。目前只有两处例外，
-两处都是**上游自身的 bug**，都在注释里打了 `# PORT-FIX:` 标记：
+`src/` 与 `tests/` 原则上一行不改（这样上游更新能直接 merge）。目前的例外都是
+**上游自身的 bug**，都在注释里打了 `# PORT-FIX:` 标记：
 
 | 文件 | 偏离内容 | 为什么 |
 |---|---|---|
-| `src/openminis/tools/search_files_tool.py`（`os_walk()`） | 用 `entry.is_symlink()` + `is_dir()` / `is_file()` 取代 `entry.is_dir(follow_symlinks=False)` | `Path.is_dir(follow_symlinks=…)` 是 **Python 3.13** 才有的参数；本仓声明 `>=3.11`、打包用 **3.12**，原写法在 3.12 上抛 `TypeError`，「搜索文件」工具静默失效 |
+| `src/openminis/tools/search_files_tool.py`（`os_walk()`） | 用 `entry.is_symlink()` + `is_dir()`/`is_file()` 取代 `is_dir(follow_symlinks=False)` | `Path.is_dir(follow_symlinks=…)` 是 **Python 3.13** 才有的参数；本仓声明 `>=3.11`、打包用 **3.12** → 打出的包里「搜索文件」工具静默失效 |
 | `src/openminis/tools/path_utils.py`（`_sep_pattern()`） | 保留路径的**前导分隔符** | 原来 `prefix.strip("\\/")` 把前导分隔符剥掉，正则匹配不到它，而替换值是绝对路径 → POSIX 上多出一个前导斜杠（`//var/minis/workspace/…`）。`//host/path` 在 markdown 里是 protocol-relative URL |
+| `src/openminis/tools/path_utils.py`（`resolve_workspace_path()`） | POSIX 上按 Windows 的实际语义处理绝对路径：只读根里的放行、其它一律拒绝 | 原来 `lstrip("/")` 把绝对路径变成相对路径再拼进工作区根 → 「技能库里的绝对路径永远找不到」。Windows 因为盘符在 `pathlib` 里会替换掉左操作数而看不出问题 |
+| `src/openminis/tools/file_read_tool.py`（`_resolve_session_host_path()`） | 同上：只读根里的绝对路径原样接受 | 与上一条是同一件事的另一处。不改的话模型读不到技能目录里的 `SKILL.md` |
+| `tests/test_plugins.py`（`test_bridge_does_not_top_up_when_nothing_was_delivered`） | 把夹具文件的 mtime 钉到过去 | 原用例依赖「刚写的文件早于随后取的 `time.time()`」，而 Windows 的 `time.time()` 只有约 15.6ms 时钟粒度、文件时间戳更细 → 旧图被当成新增补发。**这是用例的时钟赛跑，不是产品 bug**（产品侧那个 ≤1 tick 的窗口可以忽略） |
+| `tests/test_plugin_process.py`（两项） | 加 `skipif(os.name != "nt")` | 两项断言的是 Windows 专有行为：`.cmd/.bat` 需要 `cmd.exe` 套壳、盘符下的 node 候选目录。在 POSIX 上它们不可能成立 |
 
-两处都已在本仓 `tests/` 对应的用例上验证（`tests/test_firstagent_tools.py`、
-`tests/test_sandbox_paths.py` 等 9 项从红转绿）。
-
-上游修好之后，删掉这两处改动即可回到「一行未改」的状态 —— 判据是
-`curl` 一份上游 `main` 的对应文件，确认 `follow_symlinks` 与 `strip("\\/")`
-都已经不在。
+上游修好之后删掉这些改动即可回到「一行未改」——判据是 `curl` 一份上游 `main`
+的对应文件，确认问题已经不在。
 
 ## 本项目的原创部分
 
@@ -72,7 +72,7 @@ README.md                       本文档重写为桌面版说明
 `src/openminis/**` 默认一行不改。桌面路由是通过 `desktop/ui_mount.py` 在运行时
 插入到 FastAPI 路由表前端的，这样上游更新可以直接 merge。
 
-目前有**两处**例外（都是上游自身的 bug，见上面「与上游的偏离」一节），
+目前有**六处**例外（都是上游自身的问题，见上面「与上游的偏离」一节），
 一旦上游修好就可以删掉。规矩是：任何对 `src/` 的改动都必须
 
 1. 在代码里打 `# PORT-FIX:` 标记并写清原因，

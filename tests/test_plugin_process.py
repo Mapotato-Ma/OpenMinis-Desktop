@@ -65,6 +65,7 @@ def test_extra_bin_dirs_accepts_list_and_text():
     assert extra_bin_dirs({"runtimePath": 42}) == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="断言的是 Windows 盘符下的候选目录（ProgramFiles/Scoop/Chocolatey）")
 def test_candidate_bin_dirs_covers_common_installs():
     """候选目录要覆盖常见的 node 装法 —— 漏找的代价是用户对着报错发呆。"""
     joined = " ".join(str(p).lower() for p in candidate_bin_dirs())
@@ -113,6 +114,7 @@ def test_child_env_puts_exe_dir_on_path(data_dir, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason=".cmd/.bat 要靠 cmd.exe 套一层 shell，POSIX 上不存在")
 async def test_process_runner_launches_batch_script(data_dir, tmp_path):
     """``.cmd`` / ``.bat`` 不能直接 CreateProcess，得套一层 shell（npm 就是这种）。"""
     root = store.plugins_dir() / "cmdplug"

@@ -265,7 +265,29 @@ def resolve_workspace_path(path: str | None) -> Path | None:
         if candidate.startswith(prefix + "/"):
             candidate = candidate[len(prefix) + 1 :]
             break
-    candidate = candidate.replace("\\", "/").lstrip("/")
+    candidate = candidate.replace("\\", "/")
+
+    # PORT-FIX(上游 bug): 下面那句 lstrip("/") 会把**绝对路径**变成相对路径，
+    # 再被拼到工作区根下面 —— 于是 POSIX 上「技能库里的绝对路径永远找不到」。
+    # Windows 之所以看不出问题，是因为盘符在 pathlib 里会把左操作数整个替换掉。
+    # 这里只在 POSIX 上补齐 Windows 的实际语义（Windows 分支一行不动）：
+    #   · 只读根（技能库等）里的绝对路径 → 放行
+    #   · 其它绝对路径（含 Windows 盘符 / UNC）→ 拒绝
+    # 见 NOTICE.md「与上游的偏离」。
+    if os.name != "nt" and (candidate.startswith("/") or re.match(r"[A-Za-z]:/", candidate)):
+        if re.match(r"[A-Za-z]:/", candidate) or candidate.startswith("//"):
+            # 盘符 / UNC：本机解析不了，也没有道理映射进工作区
+            logger.warning("workspace tool rejected foreign absolute path: %s", path)
+            return None
+        resolved_abs = Path(candidate).resolve()
+        for extra in readonly_roots():
+            er = extra.resolve()
+            if resolved_abs == er or er in resolved_abs.parents:
+                return resolved_abs
+        logger.warning("workspace tool rejected path outside root: %s", path)
+        return None
+
+    candidate = candidate.lstrip("/")
 
     resolved = (root / candidate).resolve() if candidate else root
     if resolved != root and root not in resolved.parents:

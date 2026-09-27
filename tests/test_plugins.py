@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
 import time
 import zipfile
@@ -1484,7 +1485,15 @@ async def test_bridge_does_not_top_up_when_nothing_was_delivered(data_dir):
     bridge = ConversationBridge(plugin_id="p", adapter=adapter)
     out_dir = context.app_context().external_files_dir / "image" / "modelscope"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "old.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+    stale = out_dir / "old.jpg"
+    stale.write_bytes(b"\xff\xd8\xff\xe0")
+    # PORT-FIX: 把 mtime 钉到过去，别和时钟粒度赛跑。
+    # 原写法依赖「刚写的文件一定早于随后取的 time.time()」，而 Windows 上
+    # time.time() 只有约 15.6ms 的时钟粒度、文件时间戳却更细 —— 于是这张旧图
+    # 被当成「本轮新增」补发出去（正是这个用例要防的行为）。
+    # 钉住 mtime 之后，断言与平台时钟精度无关。见 NOTICE.md「与上游的偏离」。
+    past = time.time() - 60
+    os.utime(stale, (past, past))
 
     msg = IncomingMessage(scope="c2c", peer_id="u", sender_id="u", text="在吗")
     await bridge._deliver_new_images(msg, time.time(), set())
