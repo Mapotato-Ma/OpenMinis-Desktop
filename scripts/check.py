@@ -60,11 +60,12 @@ STEPS = [
     ),
     Step(
         name="frontend",
-        label="前端回归检查 (npm run check:ws)",
-        cmd=["npm", "run", "check:ws"],
+        label="前端检查 (npm run check)",
+        cmd=["npm", "run", "check"],
         cwd=ROOT / "web",
         needs="node",
         timeout=600,
+        hint="需要 node + web/node_modules：cd web && npm ci",
     ),
     Step(
         name="smoke",
