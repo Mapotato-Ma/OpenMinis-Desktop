@@ -1,8 +1,8 @@
 # 03 · 两个真实 bug（第一次跑测试才露出来）
 
-Status: open
+Status: resolved
 Type: task
-**决策门**：两处都在 `src/`（移植内核），而项目规矩是「src/ 一行不改」。要不要破例，见文末。
+**决策**：用户批准「最小修复 + `# PORT-FIX:` 标记 + 在 `NOTICE.md` 记一行」。
 
 第一次把 pytest 跑起来，13 项红的里面有 2 类是真 bug，不是环境差异。
 
@@ -61,7 +61,30 @@ return r"[\\/]+".join(parts)
 
 ---
 
-## 决策门
+## 决策门（已过）
+
+用户批准：**最小修复 + `# PORT-FIX:` 标记 + 在 `NOTICE.md` 的偏离表记一行**。
+理由是这两个都是**上游自身的 bug**（已核对
+`littlhub/PythonOpenMinis/main` 上两处原样存在），而 3a 会让当前发出的包功能失效，
+等上游修不现实。上游修好后删掉这两处改动即可回到「一行未改」。
+
+## 结果
+
+两处都已修，并验证：
+
+```
+$ pytest tests/test_firstagent_tools.py tests/test_sandbox_paths.py \
+         tests/test_plugins.py tests/test_delivery_guard.py \
+         tests/test_skills.py tests/test_plugin_process.py
+4 failed, 142 passed        ← 修之前这一批是 13 failed
+```
+
+**13 项红 → 4 项**，清掉的全是这两处的连带影响（比预估的 7 项还多 2 项：
+`test_channel_media_fallback` 与 `test_send_warns_when_an_older_image_is_delivered`
+也是同一个前导斜杠问题，先前按失败输出把它们归到了"另一类"）。
+
+剩下的 4 项全是测试自身的前提问题，见 ticket 04。
+
 
 `AGENTS.md` 的第一条硬规矩是「src/ 一行不改」，理由是上游更新能直接 merge。
 这两处都是**上游自身的 bug**（不是移植引入的），所以更漂亮的做法是提给上游。

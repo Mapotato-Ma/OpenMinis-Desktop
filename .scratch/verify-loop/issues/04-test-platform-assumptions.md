@@ -1,22 +1,22 @@
-# 04 · 测试自身的平台前提（6 项红的属于这类）
+# 04 · 测试自身的平台前提（剩下 4 项红的属于这类）
 
 Status: open
 Type: task
 
-13 项红里的分类（已逐项看过失败输出，不是猜的）：
+13 项红里，**9 项已经在 ticket 03 修掉**（两处真 bug 的连带影响）。
+剩下这 4 项，是本工单要处理的 —— 全部是测试自己的前提问题：
 
-| 类别 | 数量 | 归属 |
-|---|---|---|
-| `//var/minis/…` 前导斜杠 | **5** | 同一个真 bug → ticket 03b |
-| 集成路径里完全没脱敏 | **2** | 见下面 4d，待定 |
-| Windows 专用测试没 skipif | 1 | 4a |
-| 依赖机器状态 | 2 | 4c |
-| 平台分支期望写死一侧 | 1 | 4b（与 4a 同文件）|
-| Python 3.13 专属 API | 2 | 真 bug → ticket 03a |
+| 测试 | 症状 |
+|---|---|
+| `test_plugin_process.py::test_process_runner_launches_batch_script` | `FileNotFoundError: 'cmd.exe'`（4a） |
+| `test_plugin_process.py::test_candidate_bin_dirs_covers_common_installs` | 期望值写死了平台（4b） |
+| `test_skills.py::test_readonly_roots_allows_skills_dir` | 依赖机器上的目录布局（4c） |
+| `test_skills.py::test_file_read_can_read_skill_md` | 同上（4c） |
 
-共计 13。**只有 6 项属于"测试自身的前提问题"**，其余 7 项是真 bug。
-
-修完 03 之后应该把这一批也清掉 —— 目标只有一个：**让"红"重新只代表"坏了"**。
+**注意**：这四项在 Windows 上未必红（4a 就是 Windows 专用的），所以它们是
+「让同一个套件在任何平台上都只因为真 bug 变红」这件事的一部分，不是产品问题。
+动手之前先在 CI 上看一眼真实基线（ticket 02 那条流水线），别把 Windows 上本来就绿的
+东西改出问题来。
 
 ## 4a · Windows 专用测试没加 skipif（1 项）
 

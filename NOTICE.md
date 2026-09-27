@@ -16,7 +16,24 @@
 `src/`、`web/dist/`、`tests/`、`PORTING.md`、`PORTING_MAP.md`、`trace.md`、
 `app.py`、`run.bat`、`stop.bat`、`setup.bat`、`tui.bat`、`build.bat`、
 `pyproject.toml`、`uv.lock`、`LICENSE` 均原样来自 `littlhub/PythonOpenMinis`，
-未作修改。
+**除下面「与上游的偏离」一节列出的两处外**未作修改。
+
+## 与上游的偏离（PORT-FIX）
+
+`src/` 下的代码原则上一行不改（这样上游更新能直接 merge）。目前只有两处例外，
+两处都是**上游自身的 bug**，都在注释里打了 `# PORT-FIX:` 标记：
+
+| 文件 | 偏离内容 | 为什么 |
+|---|---|---|
+| `src/openminis/tools/search_files_tool.py`（`os_walk()`） | 用 `entry.is_symlink()` + `is_dir()` / `is_file()` 取代 `entry.is_dir(follow_symlinks=False)` | `Path.is_dir(follow_symlinks=…)` 是 **Python 3.13** 才有的参数；本仓声明 `>=3.11`、打包用 **3.12**，原写法在 3.12 上抛 `TypeError`，「搜索文件」工具静默失效 |
+| `src/openminis/tools/path_utils.py`（`_sep_pattern()`） | 保留路径的**前导分隔符** | 原来 `prefix.strip("\\/")` 把前导分隔符剥掉，正则匹配不到它，而替换值是绝对路径 → POSIX 上多出一个前导斜杠（`//var/minis/workspace/…`）。`//host/path` 在 markdown 里是 protocol-relative URL |
+
+两处都已在本仓 `tests/` 对应的用例上验证（`tests/test_firstagent_tools.py`、
+`tests/test_sandbox_paths.py` 等 9 项从红转绿）。
+
+上游修好之后，删掉这两处改动即可回到「一行未改」的状态 —— 判据是
+`curl` 一份上游 `main` 的对应文件，确认 `follow_symlinks` 与 `strip("\\/")`
+都已经不在。
 
 ## 本项目的原创部分
 
@@ -50,10 +67,19 @@ docs/DESKTOP.md                 架构说明
 README.md                       本文档重写为桌面版说明
 ```
 
-## 上游内核没有被修改
+## 上游内核基本没有被修改
 
-`src/openminis/**` 一行未改。桌面路由是通过 `desktop/ui_mount.py` 在运行时
-插入到 FastAPI 路由表前端的。这样上游更新可以直接 merge。
+`src/openminis/**` 默认一行不改。桌面路由是通过 `desktop/ui_mount.py` 在运行时
+插入到 FastAPI 路由表前端的，这样上游更新可以直接 merge。
+
+目前有**两处**例外（都是上游自身的 bug，见上面「与上游的偏离」一节），
+一旦上游修好就可以删掉。规矩是：任何对 `src/` 的改动都必须
+
+1. 在代码里打 `# PORT-FIX:` 标记并写清原因，
+2. 在本 NOTICE 的偏离表里记一行，
+3. 改完把相关测试跑绿（`python scripts/check.py`）。
+
+没有这三样，就不算改完 —— 隐形的分叉是最贵的那种。
 
 ## GPL-3.0 的义务
 

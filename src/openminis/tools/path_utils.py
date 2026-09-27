@@ -99,9 +99,19 @@ _PATH_TAIL = r"((?:[\\/]+[^\s)\]\"'`,;：:]*)?)"
 
 
 def _sep_pattern(prefix: str) -> str:
-    """一段路径 → 「两种分隔符都认」的正则片段（Windows 上 \\ 与 / 混着来）。"""
+    """一段路径 → 「两种分隔符都认」的正则片段（Windows 上 \\ 与 / 混着来）。
+
+    PORT-FIX(上游 bug): 原来 `prefix.strip("\\/")` 把首尾分隔符一起剥掉，正则于是
+    从第一个路径段开始匹配，文本里那个前导 "/" 留在原地；而替换值是**绝对路径**，
+    结果就多出一个前导斜杠 —— POSIX 上必现（`/var/minis/workspace` 变成
+    `//var/minis/workspace`），Windows 因为盘符开头不受影响。
+    `//host/path` 在 markdown 里是 protocol-relative URL，图会指向错误的地方。
+    这里显式保留前导分隔符。见 NOTICE.md「与上游的偏离」。
+    """
+    has_leading_sep = bool(re.match(r"[\\/]", prefix))
     parts = [re.escape(p) for p in re.split(r"[\\/]+", prefix.strip("\\/")) if p]
-    return r"[\\/]+".join(parts)
+    body = r"[\\/]+".join(parts)
+    return r"[\\/]" + body if has_leading_sep else body
 
 
 def _sandbox_rules() -> list[tuple[re.Pattern[str], str]]:

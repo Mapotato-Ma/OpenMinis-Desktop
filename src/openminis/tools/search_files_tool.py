@@ -175,9 +175,16 @@ def os_walk(base: Path):
             filenames: list[str] = []
             for entry in current.iterdir():
                 try:
-                    if entry.is_dir(follow_symlinks=False):
+                    # PORT-FIX: Path.is_dir/is_file(follow_symlinks=...) 是 Python 3.13
+                    # 才有的参数。本仓声明 requires-python >=3.11、打包用的是 3.12，
+                    # 原来的写法在这两个版本上直接抛 TypeError —— 工具把异常文本当结果
+                    # 回给模型，于是「搜索文件」在发出去的包里静默失效。
+                    # 显式跳过符号链接，语义与原来完全一致（符号链接两个列表都不进）。
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir():
                         dirnames.append(entry.name)
-                    elif entry.is_file(follow_symlinks=False):
+                    elif entry.is_file():
                         filenames.append(entry.name)
                 except OSError:
                     continue
