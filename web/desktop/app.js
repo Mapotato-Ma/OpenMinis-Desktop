@@ -1287,9 +1287,12 @@ function wire() {
   // Same save as every pane's own button — one draft, one commit path.
   $('btnSettingsSave').addEventListener('click', () => saveSettings());
   $('btnIdentityActivate').addEventListener('click', () => {
-    settings.identity.activeId = settings.identity.selected;
+    const ident = sview().identities.find((i) => i.selected);
+    if (!ident) return;
+    dispatch({ type: 'identity/setActive', id: ident.id });
     renderIdentities();
     renderIdentityTools();
+    updateDirtyUI();
     toast('已设为当前身份，记得保存');
   });
   $('btnToolsAll').addEventListener('click', () => setAllTools('all'));
@@ -1379,11 +1382,30 @@ document.addEventListener('DOMContentLoaded', boot);
 const settings = {
   loaded: false,
   data: null,       // last GET /api/settings payload
-  draft: null,      // {providers:[...], slots:{...}, agent:{...}}
+  model: null,      // SettingsModel 的状态（草稿 + baseline）。规则都在那个模块里。
   pane: 'models',
-  dirty: new Set(), // areas with uncommitted edits: 'models' | 'agent' | 'identity'
   probe: {},        // providerId -> last 测试连接 / 拉取模型列表 outcome
 };
+
+/* ── 设置状态怎么走 ────────────────────────────────────────────────────
+   状态与规则住在 web/desktop/settings-model.js（纯函数，有 node 测试）；
+   这里只做两件事：把动作派发过去、把新状态投影给渲染函数。
+   「有没有未保存的改动」是**派生**的（草稿 vs 服务端值），不再手工记账 ——
+   记账那套正是「点了某个按钮就莫名亮出未保存」的来源。
+   ─────────────────────────────────────────────────────────────────────── */
+function dispatch(action) {
+  settings.model = SettingsModel.reduce(settings.model, action);
+}
+
+/** 渲染层读的投影：providers / slots / identities / agent / chat / toolCatalog。 */
+function sview() {
+  return SettingsModel.view(settings.model);
+}
+
+/** 脏判定：{models, agent, identity, identities:[id], any} */
+function sdirty() {
+  return SettingsModel.toPayload(settings.model).dirty;
+}
 
 async function openSettings(pane) {
   $('settingsOverlay').hidden = false;
@@ -1406,36 +1428,31 @@ function switchSettingsPane(name) {
     p.classList.toggle('active', p.dataset.pane === name);
   });
   if (name === 'soul' && !settings.soulLoaded) loadSoul();
-  if (name === 'identity' && settings.identity) { renderIdentities(); renderIdentityTools(); }
+  if (name === 'identity' && settings.model) { renderIdentities(); renderIdentityTools(); }
   if (name === 'skills' && !settings.skillsLoaded) loadSkills();
   if (name === 'about') loadAbout();
+}
+
+/** 设置页所有面板的重画 —— 只有这一处知道「一次改动要重画哪几块」。 */
+function renderSettings() {
+  renderProviders();
+  renderSlots();
+  renderAgentForm();
+  renderIdentities();
+  renderIdentityTools();
+  renderModelsHealth();
+  updateDirtyUI();
 }
 
 async function loadSettings() {
   try {
     const data = await api('/settings');
     settings.data = data;
-    settings.draft = {
-      providers: (data.providers || []).map((p) => ({
-        id: p.id, type: p.type, label: p.label || '', baseUrl: p.baseUrl || '',
-        model: p.model || '', hasKey: !!p.hasKey, engine: p.engine,
-      })),
-      slots: {},
-      agent: Object.assign({}, data.agent || {}),
-    };
-    for (const s of data.modelSlots || []) {
-      settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
-    }
+    // prev = 上一次的草稿：重新载入不该把用户没保存的编辑抹掉
+    settings.model = SettingsModel.load(data, settings.model);
     settings.loaded = true;
     settings.probe = {};
-    buildIdentityDraft(data);
-    renderProviders();
-    renderSlots();
-    renderAgentForm();
-    renderIdentities();
-    renderIdentityTools();
-    renderModelsHealth();
-    clearDirty();
+    renderSettings();
     fillDataRoot();
   } catch (e) {
     toast('设置加载失败: ' + e.message, 'err');
@@ -1449,25 +1466,9 @@ async function loadSettings() {
 // There is no API to clear an override again, so "restore recommended" writes
 // the recommended list explicitly — same effective behaviour, just stored as
 // an override.
-function buildIdentityDraft(data) {
-  const prev = settings.identity || {};
-  const tools = {};
-  for (const i of data.identities || []) {
-    // Keep unsaved edits when reloading for an unrelated reason.
-    tools[i.id] = prev.tools && prev.tools[i.id] && prev.dirty && prev.dirty.has(i.id)
-      ? prev.tools[i.id]
-      : (i.enabledTools || []);
-  }
-  const selected = (prev.selected && (data.identities || []).some((i) => i.id === prev.selected))
-    ? prev.selected
-    : ((data.identities || [])[0] || {}).id || null;
-  settings.identity = {
-    activeId: data.activeIdentityId || 'assistant',
-    selected,
-    tools,
-    dirty: (prev.dirty instanceof Set) ? prev.dirty : new Set(),
-  };
-}
+//
+// 这些语义现在由 SettingsModel 承担（含「恢复推荐是无操作、不该亮未保存」）。
+// 这里只保留服务端那份**元数据**的查表：persona / recommendedTools / 名字。
 
 function identityById(id) {
   return ((settings.data && settings.data.identities) || []).find((i) => i.id === id) || null;
@@ -1475,34 +1476,34 @@ function identityById(id) {
 
 function renderIdentities() {
   const box = $('identityList');
-  if (!box || !settings.identity) return;
+  if (!box || !settings.model) return;
   box.innerHTML = '';
-  const list = (settings.data && settings.data.identities) || [];
-  if (!list.length) {
+  const v = sview();
+  if (!v.identities.length) {
     box.appendChild(el('div', 'empty-note', '没有可用身份。'));
     return;
   }
-  const st = settings.identity;
-  for (const i of list) {
-    const row = el('div', 'identity-row' + (i.id === st.activeId ? ' active' : '')
-      + (i.id === st.selected ? ' selected' : ''));
+  const dirtyIds = sdirty().identities;
+  const total = v.toolCatalog.length;
+  for (const i of v.identities) {
+    const row = el('div', 'identity-row' + (i.active ? ' active' : '')
+      + (i.selected ? ' selected' : ''));
     row.appendChild(el('div', 'identity-radio'));
     row.appendChild(el('span', 'identity-emoji', i.emoji || '🤖'));
     const main = el('div', 'identity-main');
     const name = el('div', 'identity-name');
     name.appendChild(el('span', null, i.name || i.id));
-    if (i.id === st.activeId) name.appendChild(el('span', 'tag ok', '当前'));
+    if (i.active) name.appendChild(el('span', 'tag ok', '当前'));
     if (!i.builtin) name.appendChild(el('span', 'tag', '自定义'));
-    if (st.dirty && st.dirty.has(i.id)) name.appendChild(el('span', 'tag warn', '未保存'));
+    if (dirtyIds.includes(i.id)) name.appendChild(el('span', 'tag warn', '未保存'));
     main.appendChild(name);
     if (i.description) main.appendChild(el('div', 'identity-desc', i.description));
     row.appendChild(main);
 
-    const enabled = (st.tools[i.id] || []).length;
-    row.appendChild(el('div', 'identity-count', `${enabled}/${toolCatalog().length}`));
+    row.appendChild(el('div', 'identity-count', `${i.tools.length}/${total}`));
 
     row.addEventListener('click', () => {
-      st.selected = i.id;
+      dispatch({ type: 'identity/select', id: i.id });
       renderIdentities();
       renderIdentityTools();
     });
@@ -1510,28 +1511,23 @@ function renderIdentities() {
   }
 }
 
-function toolCatalog() {
-  return (settings.data && settings.data.toolCatalog) || [];
-}
-
 // Tools whose checkbox is a lie. The kernel force-adds skill_use and send to
 // every identity's tool list (they are capability switches, not role tools),
 // and subagent_delegate is driven by the Agent pane's subagent toggle. Showing
 // them as freely toggleable would be dishonest, so they render locked with the
-// reason attached.
+// reason attached. （哪些 id 是锁定的由 SettingsModel 说了算，这里只管文案。）
 const LOCKED_TOOLS = {
   skill_use: '内核强制启用',
   send: '内核强制启用',
   subagent_delegate: '由 Agent 面板控制',
 };
-const lockedIds = () => Object.keys(LOCKED_TOOLS);
-const freeTools = () => toolCatalog().filter((t) => !LOCKED_TOOLS[t.id]);
 
 function renderIdentityTools() {
   const box = $('identityToolList');
-  if (!box || !settings.identity) return;
-  const st = settings.identity;
-  const ident = identityById(st.selected);
+  if (!box || !settings.model) return;
+  const v = sview();
+  const ident = v.identities.find((i) => i.selected) || null;
+  const meta = ident ? identityById(ident.id) : null;
   box.innerHTML = '';
 
   if (!ident) {
@@ -1539,28 +1535,28 @@ function renderIdentityTools() {
     $('identityToolActions').hidden = true;
     return;
   }
-  const enabled = new Set(st.tools[ident.id] || []);
-  const isActive = ident.id === st.activeId;
+  const enabled = new Set(ident.tools);
+  const locked = new Set(v.lockedToolIds);
 
   $('identityDetailTitle').textContent = `${ident.emoji || ''} ${ident.name || ident.id}`;
-  $('identityDetailSub').textContent = isActive
+  $('identityDetailSub').textContent = ident.active
     ? '这是当前生效的身份。工具改动会影响下一轮对话。'
     : '这不是当前身份 —— 改它只影响以后切换到它的时候。';
   $('identityToolActions').hidden = false;
-  $('btnIdentityActivate').hidden = isActive;
-  const free = freeTools();
+  $('btnIdentityActivate').hidden = ident.active;
+  const free = v.toolCatalog.filter((t) => !locked.has(t.id));
   const freeOn = free.filter((t) => enabled.has(t.id)).length;
   $('identityToolCount').textContent =
-    `${freeOn} / ${free.length} 可选工具已启用（另有 ${lockedIds().length} 个不可关闭）`;
+    `${freeOn} / ${free.length} 可选工具已启用（另有 ${locked.size} 个不可关闭）`;
 
-  if (ident.persona) {
-    const p = el('div', 'identity-persona', ident.persona);
+  if (meta && meta.persona) {
+    const p = el('div', 'identity-persona', meta.persona);
     box.appendChild(p);
   }
 
   // group by category, preserving catalog order
   const cats = new Map();
-  for (const t of toolCatalog()) {
+  for (const t of v.toolCatalog) {
     const c = t.category || '其他';
     if (!cats.has(c)) cats.set(c, []);
     cats.get(c).push(t);
@@ -1580,12 +1576,13 @@ function renderIdentityTools() {
       cb.disabled = !!lockedReason;
       cb.title = lockedReason || '';
       cb.addEventListener('change', () => {
-        const cur = new Set(st.tools[ident.id] || []);
+        const cur = new Set(enabled);
         if (cb.checked) cur.add(t.id); else cur.delete(t.id);
-        st.tools[ident.id] = [...cur];
-        markToolsDirty(ident.id);
+        // 锁定工具由模块补回列表里（与内核行为一致），界面不会谎称"一个都不给"
+        dispatch({ type: 'identity/setTools', id: ident.id, tools: [...cur] });
         renderIdentityTools();
         renderIdentities();
+        updateDirtyUI();
       });
       item.appendChild(cb);
       const main = el('div', 'tool-item-main');
@@ -1603,38 +1600,14 @@ function renderIdentityTools() {
   }
 }
 
-// What the server currently holds for this identity. Used to decide whether a
-// draft is genuinely dirty — clicking "restore recommended" on an untouched
-// identity should NOT light up "unsaved", and should not produce a write.
-function savedTools(id) {
-  const i = identityById(id);
-  return (i && i.enabledTools) || [];
-}
-
-function sameToolSet(a, b) {
-  if (a.length !== b.length) return false;
-  const s = new Set(b);
-  return a.every((x) => s.has(x));
-}
-
-function markToolsDirty(id) {
-  const st = settings.identity;
-  markDirty('identity');
-  if (sameToolSet(st.tools[id] || [], savedTools(id))) st.dirty.delete(id);
-  else st.dirty.add(id);
-}
-
 function setAllTools(mode) {
-  const st = settings.identity;
-  const ident = identityById(st.selected);
+  const v = sview();
+  const ident = v.identities.find((i) => i.selected);
   if (!ident) return;
-  const all = toolCatalog().map((t) => t.id);
-  if (mode === 'all') st.tools[ident.id] = all;
-  else if (mode === 'none') st.tools[ident.id] = lockedIds();  // kernel re-adds these anyway
-  else st.tools[ident.id] = [...(ident.recommendedTools || [])];
-  markToolsDirty(ident.id);
+  dispatch({ type: 'identity/setAllTools', id: ident.id, mode });
   renderIdentityTools();
   renderIdentities();
+  updateDirtyUI();
 }
 
 function providerTypeMeta(type) {
@@ -1643,19 +1616,15 @@ function providerTypeMeta(type) {
 
 /* ── provider instances ──────────────────────────────────────────────── */
 /* ── unsaved-change tracking ─────────────────────────────────────────── */
-// Every pane edits one shared draft; nothing reaches the server until
-// saveSettings() runs. Tracking dirtiness centrally is what lets the header
-// pill tell the truth regardless of which pane the edit came from — the bug
-// this replaced was a page that edited state and offered no way to commit it.
-function markDirty(area) {
-  if (area) settings.dirty.add(area);
-  updateDirtyUI();
-}
-
-function clearDirty() {
-  settings.dirty.clear();
-  if (settings.identity) settings.identity.dirty.clear();
-  updateDirtyUI();
+// 没有 markDirty/clearDirty 了：脏是**派生**的（草稿 vs 服务端值，
+// 见 SettingsModel.toPayload().dirty）。这一改的直接收益是「恢复推荐」这类
+// 无操作不再亮出「未保存」—— 旧的记账写法正是它亮错的原因。
+function updateDirtyUI() {
+  const d = sdirty();
+  const pill = $('settingsDirty');
+  const btn = $('btnSettingsSave');
+  if (pill) pill.hidden = !d.any;
+  if (btn) btn.hidden = !d.any;
 }
 
 // The settings page tells the user where their API keys live, so it had better
@@ -1671,13 +1640,6 @@ async function fillDataRoot() {
   } catch { /* the placeholder text is fine */ }
 }
 
-function updateDirtyUI() {
-  const n = settings.dirty.size;
-  const pill = $('settingsDirty');
-  const btn = $('btnSettingsSave');
-  if (pill) pill.hidden = n === 0;
-  if (btn) btn.hidden = n === 0;
-}
 
 /* ── "will a chat turn actually work?" banner ────────────────────────── */
 // The kernel raises "还没有配置模型服务" when ``activeProviderId`` is empty, and
@@ -1685,30 +1647,26 @@ function updateDirtyUI() {
 // single most common way to end up with a configured-looking settings page and
 // a chat that refuses to run.
 function draftChatBinding() {
-  const chat = (settings.draft.slots && settings.draft.slots.chat) || { instanceId: '', model: '' };
-  const p = (settings.draft.providers || []).find((x) => x.id === chat.instanceId) || null;
-  return { chat, provider: p };
+  const v = sview();
+  return { chat: v.chat, provider: v.chatProvider };
 }
 
 function setChatProvider(pid) {
-  const p = (settings.draft.providers || []).find((x) => x.id === pid);
+  const p = sview().providers.find((x) => x.id === pid);
   if (!p) return;
-  const meta = providerTypeMeta(p.type);
-  settings.draft.slots.chat = {
-    instanceId: p.id,
-    model: p.model || meta.defaultModel || '',
-  };
-  markDirty('models');
+  dispatch({ type: 'slot/set', slot: 'chat', instanceId: p.id });
   renderSlots();
   renderProviders();
   renderModelsHealth();
+  updateDirtyUI();
 }
 
 function renderModelsHealth() {
   const box = $('modelsHealth');
   if (!box) return;
   const { provider: p } = draftChatBinding();
-  const provs = settings.draft.providers || [];
+  const provs = sview().providers;
+  const pendingKeys = new Set(sview().newKeys);
   box.hidden = false;
   box.className = 'notice';
   box.innerHTML = '';
@@ -1732,7 +1690,7 @@ function renderModelsHealth() {
   } else {
     const missing = [];
     if (!p.model) missing.push('模型 ID');
-    if (!p.hasKey && !p.newKey) missing.push('API Key');
+    if (!p.hasKey && !pendingKeys.has(p.id)) missing.push('API Key');
     if (missing.length) {
       box.classList.add('warn');
       ic.textContent = '⚠';
@@ -1829,17 +1787,18 @@ function renderProviders() {
   const box = $('providerList');
   if (!box) return;
   box.innerHTML = '';
-  const list = settings.draft.providers;
+  const v = sview();
+  const list = v.providers;
   if (!list.length) {
     box.appendChild(el('div', 'empty-note', '还没有配置任何服务商。'));
     return;
   }
+  const pendingKeys = new Set(v.newKeys);
   // Read the live draft, not the server value: the "当前对话" badge should move
   // the instant the user rebinds the chat slot.
-  const { chat } = draftChatBinding();
-  const activeId = chat.instanceId || (settings.data && settings.data.activeProviderId);
+  const activeId = v.chat.instanceId || (settings.data && settings.data.activeProviderId);
 
-  list.forEach((p, idx) => {
+  list.forEach((p) => {
     const meta = providerTypeMeta(p.type);
     const card = el('div', 'provider-card' + (p.id === activeId ? ' active' : ''));
 
@@ -1851,34 +1810,45 @@ function renderProviders() {
     if (p.id === activeId) head.appendChild(el('span', 'tag ok', '当前对话'));
     head.appendChild(el('span', 'spacer-x'));
     const del = el('button', 'btn ghost', '删除');
-    del.addEventListener('click', () => removeProvider(idx));
+    del.addEventListener('click', () => removeProvider(p.id));
     head.appendChild(del);
     card.appendChild(head);
 
+    // 文本输入：只更新状态 + 脏标记，**不重画卡片**（重画会把光标踢出去）。
+    const patch = (fields) => {
+      dispatch({ type: 'provider/patch', id: p.id, patch: fields });
+      updateDirtyUI();
+    };
+
     const row1 = el('div', 'field-row');
-    row1.appendChild(textField('显示名称', p.label, (v) => { p.label = v; markDirty('models'); }, 'My Gateway'));
-    row1.appendChild(textField('Base URL', p.baseUrl, (v) => { p.baseUrl = v; markDirty('models'); },
+    row1.appendChild(textField('显示名称', p.label, (val) => patch({ label: val }), 'My Gateway'));
+    row1.appendChild(textField('Base URL', p.baseUrl, (val) => patch({ baseUrl: val }),
       meta.engine === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'));
     card.appendChild(row1);
 
     const row2 = el('div', 'field-row');
     row2.appendChild(selectField('类型', p.type,
       ((settings.data && settings.data.providerTypes) || []).map((t) => [t.type, t.label + (t.engine ? '' : '（引擎未移植）')]),
-      (v) => { p.type = v; markDirty('models'); renderProviders(); }));
+      (val) => { patch({ type: val }); renderProviders(); renderModelsHealth(); }));
     const keyField = passwordField(
-      p.hasKey ? 'API Key（已保存，留空则不变）' : 'API Key',
-      (v) => { p.newKey = v; markDirty('models'); renderModelsHealth(); },
+      p.hasKey && !pendingKeys.has(p.id) ? 'API Key（已保存，留空则不变）' : 'API Key',
+      (val) => {
+        // 空串 = 保持已存的密文（模块负责这条规则），所以这里不需要额外判断
+        dispatch({ type: 'provider/setKey', id: p.id, key: val });
+        updateDirtyUI();
+        renderModelsHealth();
+      },
     );
     row2.appendChild(keyField);
     card.appendChild(row2);
 
-    card.appendChild(textField('模型 ID', p.model, (v) => {
-      p.model = v;
-      markDirty('models');
+    card.appendChild(textField('模型 ID', p.model, (val) => {
+      patch({ model: val });
       // Keep the chat slot's model in step with the instance it points at.
-      const c = settings.draft.slots.chat;
-      if (c && c.instanceId === p.id) c.model = v;
-      renderModelsHealth();
+      if (v.chat.instanceId === p.id) {
+        dispatch({ type: 'slot/set', slot: 'chat', instanceId: p.id, model: val });
+        renderModelsHealth();
+      }
     }, meta.defaultModel || 'gpt-4o-mini'));
 
     const actions = el('div', 'provider-actions');
@@ -1894,16 +1864,14 @@ function renderProviders() {
       auto.title = '把还空着的用途槽位（识图 / 生图 / …）都绑到这个实例';
       auto.addEventListener('click', () => {
         let n = 0;
-        for (const s of Object.keys(settings.draft.slots)) {
-          if (s === 'chat') continue;
-          const v = settings.draft.slots[s];
-          if (v && v.instanceId) continue;
-          settings.draft.slots[s] = { instanceId: p.id, model: p.model || '' };
+        for (const slot of v.slots) {
+          if (slot.slot === 'chat' || slot.instanceId) continue;
+          dispatch({ type: 'slot/set', slot: slot.slot, instanceId: p.id, model: p.model || '' });
           n += 1;
         }
-        markDirty('models');
         renderSlots();
         renderModelsHealth();
+        updateDirtyUI();
         toast(n ? `已绑定 ${n} 个用途槽位` : '所有用途都已绑定');
       });
       actions.appendChild(auto);
@@ -1967,7 +1935,7 @@ function newProviderId(type) {
   const base = String(type || 'provider').toLowerCase().replace(/[^a-z0-9]/g, '') || 'provider';
   let id = base;
   let n = 1;
-  const taken = new Set(settings.draft.providers.map((p) => p.id));
+  const taken = new Set(sview().providers.map((p) => p.id));
   while (taken.has(id)) id = base + '-' + (++n);
   return id.slice(0, 63);
 }
@@ -1976,56 +1944,41 @@ function addProvider() {
   const types = (settings.data && settings.data.providerTypes) || [];
   const type = (types.find((t) => t.engine) || types[0] || {}).type || 'openAI';
   const meta = providerTypeMeta(type);
-  const created = {
-    id: newProviderId(type), type, label: meta.label || type,
-    baseUrl: '', model: meta.defaultModel || '', hasKey: false,
-  };
-  settings.draft.providers.push(created);
-  // Adding the only provider must also make it the active one. Otherwise the
-  // card looks configured while `activeProviderId` stays empty and every chat
-  // turn dies with "还没有配置模型服务" — this was the single most confusing
-  // dead end in the UI.
-  const chat = settings.draft.slots.chat;
-  if (!chat || !chat.instanceId) {
-    settings.draft.slots.chat = { instanceId: created.id, model: created.model };
-  }
-  markDirty('models');
+  // 「加了服务商」和「对话能跑」在内核里是两件事 —— 模块负责把前者接到后者上
+  // （对话槽空着就自动设为当前）。这条曾经是最让人困惑的死胡同。
+  dispatch({ type: 'provider/add', id: newProviderId(type), provider: { type, baseUrl: '' }, meta });
   renderProviders();
   renderSlots();
   renderModelsHealth();
+  updateDirtyUI();
 }
 
-function removeProvider(idx) {
-  const p = settings.draft.providers[idx];
+function removeProvider(id) {
+  const p = sview().providers.find((x) => x.id === id);
   if (!p) return;
   if (!confirm(`删除服务商「${p.label || p.type}」？`)) return;
-  settings.draft.providers.splice(idx, 1);
-  // Drop any slot pointing at the instance we just removed, otherwise the
-  // server rejects the whole save with "指向未配置的厂商".
-  for (const slot of Object.keys(settings.draft.slots)) {
-    if (settings.draft.slots[slot].instanceId === p.id) {
-      settings.draft.slots[slot] = { instanceId: '', model: '' };
-    }
-  }
+  // 模块同时会清掉指向它的槽位 —— 漏了这一步服务端会以「指向未配置的厂商」
+  // 整单拒绝保存。
+  dispatch({ type: 'provider/remove', id });
   delete (settings.probe || {})[p.id];
-  markDirty('models');
   renderProviders();
   renderSlots();
   renderModelsHealth();
+  updateDirtyUI();
 }
 
 /* ── model slots ─────────────────────────────────────────────────────── */
 function renderSlots() {
   const box = $('slotList');
   box.innerHTML = '';
-  const slots = (settings.data && settings.data.modelSlots) || [];
+  const v = sview();
+  const slots = v.slots;
   if (!slots.length) {
     box.appendChild(el('div', 'empty-note', '没有可绑定的用途。'));
     return;
   }
-  const providers = settings.draft.providers;
+  const providers = v.providers;
   for (const s of slots) {
-    const cur = settings.draft.slots[s.slot] || { instanceId: '', model: '' };
     const row = el('div', 'slot-row');
     row.appendChild(el('div', 'slot-name', s.label));
 
@@ -2036,28 +1989,31 @@ function renderSlots() {
     for (const p of providers) {
       const o = el('option', null, p.label || providerTypeMeta(p.type).label || p.type);
       o.value = p.id;
-      if (p.id === cur.instanceId) o.selected = true;
+      if (p.id === s.instanceId) o.selected = true;
       sel.appendChild(o);
     }
     sel.addEventListener('change', () => {
-      cur.instanceId = sel.value;
-      const p = providers.find((x) => x.id === sel.value);
-      cur.model = p ? (p.model || providerTypeMeta(p.type).defaultModel || '') : '';
-      markDirty('models');
+      // 不传 model：模块按该实例的模型 / 类型默认值回落
+      dispatch({ type: 'slot/set', slot: s.slot, instanceId: sel.value });
       renderSlots();
       // The chat slot decides which card wears the "当前对话" badge, so that
       // badge has to follow a rebind immediately rather than after a save.
       renderProviders();
       renderModelsHealth();
+      updateDirtyUI();
     });
     row.appendChild(sel);
 
     const inp = el('input');
     inp.type = 'text';
     inp.placeholder = '模型 ID';
-    inp.value = cur.model || '';
-    inp.disabled = !cur.instanceId;
-    inp.addEventListener('input', () => { cur.model = inp.value.trim(); markDirty('models'); renderModelsHealth(); });
+    inp.value = s.model || '';
+    inp.disabled = !s.instanceId;
+    inp.addEventListener('input', () => {
+      dispatch({ type: 'slot/set', slot: s.slot, instanceId: s.instanceId, model: inp.value.trim() });
+      updateDirtyUI();
+      renderModelsHealth();
+    });
     row.appendChild(inp);
     box.appendChild(row);
   }
@@ -2065,56 +2021,17 @@ function renderSlots() {
 
 /* ── save (full-replacement PUT) ─────────────────────────────────────── */
 async function saveSettings({ silent } = {}) {
-  const d = settings.draft;
-  const providers = d.providers.map((p) => {
-    const out = {
-      id: p.id, type: p.type, label: p.label || '',
-      baseUrl: p.baseUrl || '', model: p.model || '',
-    };
-    // Only send a key when the user typed one; blank means "keep the secret".
-    if (p.newKey) out.apiKey = p.newKey;
-    return out;
-  });
-  const modelSlots = {};
-  for (const [slot, v] of Object.entries(d.slots)) {
-    if (v.instanceId && v.model) modelSlots[slot] = { instanceId: v.instanceId, model: v.model };
-    else modelSlots[slot] = null;
-  }
-  const payload = { providers, modelSlots };
-  if (d.agent) payload.agent = d.agent;
-
-  // Identities: `activeIdentityId` is a separate top-level key, and
-  // `identityEdits` upserts tool lists. Only send identities the user actually
-  // touched — writing an override that merely repeats the recommended list is
-  // harmless but makes the stored state diverge from "no override".
-  const idst = settings.identity;
-  if (idst) {
-    if (idst.activeId) payload.activeIdentityId = idst.activeId;
-    const edits = [...idst.dirty]
-      .filter((id) => identityById(id))
-      .map((id) => ({ id, enabledTools: idst.tools[id] || [] }));
-    if (edits.length) payload.identityEdits = edits;
-  }
+  // 载荷由模块组装 —— 「密钥留空=不变」「槽位要么完整要么 null」「只发真的改过
+  // 的身份」这些规则都在那边，并有 node 测试盯着。
+  const { body } = SettingsModel.toPayload(settings.model);
 
   try {
-    const data = await api('/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    const data = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
     settings.data = data;
-    settings.draft.providers = (data.providers || []).map((p) => ({
-      id: p.id, type: p.type, label: p.label || '', baseUrl: p.baseUrl || '',
-      model: p.model || '', hasKey: !!p.hasKey, engine: p.engine,
-    }));
-    for (const s of data.modelSlots || []) {
-      settings.draft.slots[s.slot] = { instanceId: s.instanceId || '', model: s.model || '' };
-    }
-    buildIdentityDraft(data);
-    if (settings.identity) settings.identity.dirty = new Set();
-    clearDirty();
-    renderProviders();
-    renderSlots();
-    renderAgentForm();
-    renderIdentities();
-    renderIdentityTools();
-    renderModelsHealth();
+    // 服务端已接受：草稿即新的 baseline。密钥框因此清空 —— 与服务端「不把密钥
+    // 发回来」的约定一致，客户端从不需要搬运密文。
+    settings.model = SettingsModel.load(data, null);
+    renderSettings();
     if (!silent) toast('已保存');
     return true;
   } catch (e) {
@@ -2125,37 +2042,40 @@ async function saveSettings({ silent } = {}) {
 
 /* ── agent knobs ─────────────────────────────────────────────────────── */
 function renderAgentForm() {
-  const a = settings.draft.agent || {};
+  const a = sview().agent || {};
   $('agentMaxTools').value = a.maxToolSteps != null ? a.maxToolSteps : '';
   $('agentMaxMemory').value = a.maxMemoryRounds != null ? a.maxMemoryRounds : '';
   $('agentDeepThinking').checked = !!a.deepThinking;
   $('agentSubagent').checked = !!a.subagentEnabled;
   // These inputs previously had no listeners — editing them changed nothing
   // visible until you happened to press save, which is how "did it save?"
-  // became a guessing game.
+  // became a guessing game. 现在每次输入都写进状态，「未保存」是派生的。
   for (const id of ['agentMaxTools', 'agentMaxMemory', 'agentDeepThinking', 'agentSubagent']) {
     const node = $(id);
     if (!node || node.dataset.dirtyHook) continue;
     node.dataset.dirtyHook = '1';
-    node.addEventListener('input', () => markDirty('agent'));
-    node.addEventListener('change', () => markDirty('agent'));
+    node.addEventListener('input', readAgentForm);
+    node.addEventListener('change', readAgentForm);
   }
 }
 
 function confirmCloseSettings() {
-  if (settings.dirty.size && !confirm('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）')) return;
-  if (settings.dirty.size) loadSettings();
+  if (sdirty().any && !confirm('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）')) return;
+  if (sdirty().any) loadSettings();   // 丢掉草稿，回到服务端那份
   closeSettings();
 }
 
 function readAgentForm() {
-  const a = settings.draft.agent || (settings.draft.agent = {});
   const tools = parseInt($('agentMaxTools').value, 10);
   const mem = parseInt($('agentMaxMemory').value, 10);
-  if (!Number.isNaN(tools)) a.maxToolSteps = tools;
-  if (!Number.isNaN(mem)) a.maxMemoryRounds = mem;
-  a.deepThinking = $('agentDeepThinking').checked;
-  a.subagentEnabled = $('agentSubagent').checked;
+  const patch = {
+    deepThinking: $('agentDeepThinking').checked,
+    subagentEnabled: $('agentSubagent').checked,
+  };
+  if (!Number.isNaN(tools)) patch.maxToolSteps = tools;
+  if (!Number.isNaN(mem)) patch.maxMemoryRounds = mem;
+  dispatch({ type: 'agent/patch', patch });
+  updateDirtyUI();
 }
 
 /* ── soul ────────────────────────────────────────────────────────────── */

@@ -20,7 +20,8 @@ python scripts/check.py          # 一条命令：pytest + 前端检查 + 冒烟
 python scripts/check.py --fast   # 跳过冒烟测试（它要起服务）
 python scripts/smoke_test.py     # 只跑桌面壳的冒烟测试
 pytest tests/ -q                 # 只跑内核测试套件
-cd web && npm run check:ws       # 只跑前端回归脚本（需要 node）
+cd web && npm run check          # 只跑前端检查（ws 回归 + 设置状态模块的 18 项断言）
+cd web && npm run check:e2e      # 对真实内核跑一遍设置的四条规则（需先起服务）
 ```
 
 `scripts/check.py` 是唯一的验证入口：CI 跑的就是它，本地也跑它。

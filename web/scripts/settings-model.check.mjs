@@ -120,6 +120,13 @@ test('槽位选服务商时 model 自动回落到该服务商的模型', () => {
   assert.deepEqual(s.slots.compaction, { instanceId: 'p2', model: 'm-b' });
 });
 
+test('显式给空 model 就是清空，不该被回落逻辑顶回来', () => {
+  const s = M.reduce(fresh(), { type: 'slot/set', slot: 'chat', instanceId: 'p1', model: '' });
+  assert.deepEqual(s.slots.chat, { instanceId: 'p1', model: '' });
+  // 槽位不完整（有实例没模型）→ 必须发 null
+  assert.equal(M.toPayload(s).body.modelSlots.chat, null);
+});
+
 test('「恢复推荐」不该亮未保存，也不该写出覆盖', () => {
   const s = M.reduce(fresh(), { type: 'identity/setAllTools', id: 'assistant', mode: 'recommended' });
   const { body, dirty } = M.toPayload(s);
