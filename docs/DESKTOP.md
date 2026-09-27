@@ -204,6 +204,32 @@ v0.1.0 的「模型服务」页**没有保存按钮**，于是出现了一个非
 测的和看到的是同一份东西。配套的 `GET /api/desktop/chat-readiness`
 则让界面在用户动手打第一条消息之前就能提示「这轮跑不起来，因为 X」。
 
+### 子进程不弹黑框（Windows）
+
+`console=False` 打出来的 exe 是 **GUI 子系统**进程，自己没有控制台。这种进程
+启动控制台子程序、又没带 `CREATE_NO_WINDOW` 时，Windows 会给子进程新分配一个
+控制台 —— Windows 11 把「新建控制台」交给 Windows Terminal，于是用户看到一个
+带标签栏的黑窗口。agent 每跑一条命令都要起一次 shell，所以是发一条消息弹一次。
+
+内核对 Chrome 是处理了的（`chrome_launcher.py` 带 `CREATE_NO_WINDOW`），
+跑 agent 命令的那条路径没有。`desktop/no_console.py` 在启动时补上：
+
+- 只在**进程确实没有控制台**时才打补丁；有控制台时子进程会继承它，
+  本来就不会弹窗，隐藏反而更难调试。
+- 用 OR 合并而不是覆盖 —— `chrome_launcher` 等调用方已经设过的标志要保留。
+- 覆盖范围包括 `asyncio.create_subprocess_*`：它走
+  `asyncio.windows_utils.Popen`，那个子类 `super().__init__` 到
+  `subprocess.Popen`，所以同一处补丁就够了。
+  （顺带一提，Python 3.12 已经移除了那里的类级 `SW_HIDE`，
+  所以终端抽屉和插件进程本来也会弹窗，一并修好。）
+- 逃生门：`OPENMINIS_DESKTOP_SHOW_CONSOLE=1` 可关闭该补丁。
+  需要它是因为 `CREATE_NO_WINDOW` 同时也会清掉子进程的**控制台句柄**
+  （不只是窗口），极少数依赖真实控制台的 Windows 程序会因此异常。
+
+冒烟测试会在 windows-latest 上真的验证这件事：把 `Popen.__init__` 换成一个
+记录器、装上补丁、发起调用，断言标志确实被注入（普通调用与子类调用两条路径
+都测），最后再真起一个子进程确认设了标志之后 stdio 依然正常。
+
 ### 主题
 
 三态而不是两态：`system` / `light` / `dark`。默认 `system`，

@@ -18,7 +18,7 @@ IDE 风格的桌面界面，并且用 GitHub Actions 直接产出免安装的 `.
 ├──────────┴───────────────────────────────────┴───────────────────────┤
 │  终端  $ npm run build                                                │
 ├──────────────────────────────────────────────────────────────────────┤
-│ ● 已连接   session:3f16…             win32            v0.1.1         │
+│ ● 已连接   session:3f16…             win32            v0.1.2         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -28,7 +28,7 @@ IDE 风格的桌面界面，并且用 GitHub Actions 直接产出免安装的 `.
 
 **是**：一个能真正在 Windows 上跑的桌面 agent 应用。原生窗口（WebView2），
 内置终端、文件树、代码查看、agent 改文件的 diff、命令面板。数据落在本机
-`%LOCALAPPDATA%\openminis`，会话与上游客户端格式一致。
+`%USERPROFILE%\openminis`（即 `C:\Users\<你>\openminis`），会话与上游客户端格式一致。
 
 **不是**：一个完整的 IDE。没有 LSP、没有多文件重构、没有代码补全模型。
 它的定位是「带一个真 shell 的 agent 工作台」，编辑能力来自 agent 本身，
@@ -42,7 +42,7 @@ IDE 风格的桌面界面，并且用 GitHub Actions 直接产出免安装的 `.
 
 ### 方式一：直接下 exe（推荐）
 
-**→ [下载 OpenMinisDesktop.exe (v0.1.1)](../../releases/latest/download/OpenMinisDesktop.exe)** —— 37 MB，双击运行。
+**→ [下载 OpenMinisDesktop.exe (v0.1.2)](../../releases/latest/download/OpenMinisDesktop.exe)** —— 37 MB，双击运行。
 
 **不需要装 Python、Node 或任何运行时。**
 

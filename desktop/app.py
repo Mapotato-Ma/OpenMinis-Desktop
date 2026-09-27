@@ -99,12 +99,23 @@ def main(argv: list[str] | None = None) -> int:
     # kernel logs during startup, so this has to happen first.
     from desktop.stdio import ensure_console_streams  # noqa: PLC0415
 
+    # Also before anything can spawn a child: a GUI-subsystem build has no
+    # console, and Windows would give every shell the agent runs its own
+    # console window (one black box per message).
+    from desktop.no_console import install as _install_no_console  # noqa: PLC0415
+
+    _no_console_status = _install_no_console()
+
     log_file = ensure_console_streams()
 
     args = _parse_args(argv)
     _configure_logging(args.debug)
     if log_file is not None:
         logger.info("no console attached — logs are in %s", log_file)
+    # Worth a line in the log: when this is "skipped: process has a console"
+    # the user is running a console build, and a stray child window (if any)
+    # has a different cause.
+    logger.info("child console windows: %s", _no_console_status)
 
     desktop_dir = paths.desktop_web_dir()
     if desktop_dir is None:

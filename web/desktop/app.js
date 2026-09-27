@@ -1436,6 +1436,7 @@ async function loadSettings() {
     renderIdentityTools();
     renderModelsHealth();
     clearDirty();
+    fillDataRoot();
   } catch (e) {
     toast('设置加载失败: ' + e.message, 'err');
   }
@@ -1655,6 +1656,19 @@ function clearDirty() {
   settings.dirty.clear();
   if (settings.identity) settings.identity.dirty.clear();
   updateDirtyUI();
+}
+
+// The settings page tells the user where their API keys live, so it had better
+// say the truth. It used to hardcode `%LOCALAPPDATA%\openminis`, but the kernel
+// stores data in `%USERPROFILE%\openminis` on Windows (LOCALAPPDATA only holds
+// the cache dir) — so ask the backend instead of guessing.
+async function fillDataRoot() {
+  const node = $('modelsDataRoot');
+  if (!node) return;
+  try {
+    state.info = state.info || await api('/desktop/info');
+    if (state.info && state.info.dataRoot) node.textContent = state.info.dataRoot;
+  } catch { /* the placeholder text is fine */ }
 }
 
 function updateDirtyUI() {

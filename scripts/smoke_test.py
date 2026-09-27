@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -63,6 +64,79 @@ def check(label: str, ok: bool, detail: str = "") -> None:
     print(f"[{mark}] {label}" + (f" — {detail}" if detail else ""))
     if not ok:
         FAILURES.append(label)
+
+
+def check_no_console_patch() -> None:
+    """Prove the Windows console-window fix actually injects its flag.
+
+    Runs *after* the server is shut down: it temporarily replaces
+    ``subprocess.Popen.__init__`` with a recorder, and swapping that out from
+    under a live server would be asking for trouble.
+    """
+    from desktop import no_console  # noqa: PLC0415
+
+    probes = (None, 0, 0x00000200, 0x00000008, no_console.CREATE_NO_WINDOW)
+    check(
+        "merge_flags never drops the caller's own flags",
+        all((v or 0) & no_console.merge_flags(v) == (v or 0) for v in probes),
+        ", ".join(hex(no_console.merge_flags(v)) for v in probes),
+    )
+    check(
+        "merge_flags always adds CREATE_NO_WINDOW",
+        all(no_console.merge_flags(v) & no_console.CREATE_NO_WINDOW for v in probes),
+    )
+    if sys.platform != "win32":
+        check("no-console patch is a no-op off Windows",
+              no_console.install() == "skipped: not windows", no_console.install())
+        return
+
+    # The patch must reach real Popen calls, including the subclass route
+    # asyncio takes (windows_utils.Popen calls super().__init__).
+    real_init = subprocess.Popen.__init__
+    seen: dict = {}
+
+    def recorder(self, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        seen.update(kw)
+        self.returncode = 0
+
+    class _AsyncioStyle(subprocess.Popen):
+        """Stands in for asyncio.windows_utils.Popen's calling convention."""
+
+        def __init__(self, args, stdin=None, stdout=None, stderr=None, **kw):  # noqa: ANN001
+            super().__init__(args, stdin=stdin, stdout=stdout, stderr=stderr, **kw)
+
+    try:
+        subprocess.Popen.__init__ = recorder
+        status = no_console.install(force=True)
+        subprocess.Popen(["true"])
+        direct = seen.get("creationflags", 0)
+        seen.clear()
+        _AsyncioStyle(["true"])
+        subclass = seen.get("creationflags", 0)
+    finally:
+        subprocess.Popen.__init__ = real_init
+
+    check("no-console install reports success", status == "installed", status)
+    check("Popen gets CREATE_NO_WINDOW", bool(direct & no_console.CREATE_NO_WINDOW), hex(direct))
+    check(
+        "asyncio-style subclass gets it too",
+        bool(subclass & no_console.CREATE_NO_WINDOW),
+        hex(subclass),
+    )
+
+    # And a genuine spawn with the flag set must still work — the flag hides a
+    # window, it does not break stdio.
+    real_status = no_console.install()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "print('ok')"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    out, _err = proc.communicate(timeout=60)
+    check(
+        "a real child still runs with CREATE_NO_WINDOW applied",
+        proc.returncode == 0 and b"ok" in out,
+        f"rc={proc.returncode} out={out[:40]!r} status={real_status}",
+    )
 
 
 def get(url: str, *, follow: bool = True, timeout: float = 10.0):
@@ -175,6 +249,9 @@ def main() -> int:
     finally:
         server.shutdown()
         shutil.rmtree(_SMOKE_HOME, ignore_errors=True)
+
+    # Server is down — safe to swap subprocess.Popen out from under the process.
+    check_no_console_patch()
 
     print()
     if FAILURES:

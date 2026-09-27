@@ -1,5 +1,40 @@
 # 变更日志
 
+## v0.1.2 — 发消息不再弹黑框（2026-09-27）
+
+症状：每发一条消息，就弹出一个黑框，标题是 `C:\Program Files\Git\bin\bash`。
+
+原因：`console=False` 打出来的 exe 是 **GUI 子系统**进程，本身没有控制台。
+这种进程再去启动一个控制台子程序、又不带 `CREATE_NO_WINDOW` 时，Windows 会
+给这个子进程**新分配一个控制台**；Windows 11 把「新建控制台」交给 Windows
+Terminal 处理，所以你看到的是一个带标签栏的黑窗口。
+
+而 agent 每次跑命令都要起一次 shell（`shell_execute` → `bash`），所以是一发
+消息弹一次。内核其实**知道**这件事 —— `chrome_launcher.py` 启动 Chrome 时
+是老老实实带上 `CREATE_NO_WINDOW` 的 —— 只是跑 agent 命令的那条路径漏了。
+
+### 改了什么
+
+- 新增 `desktop/no_console.py`：在进程没有控制台时，给所有子进程补上
+  `CREATE_NO_WINDOW`（用 OR，不会覆盖调用方自己设的标志）。
+  同一处补丁同时覆盖 `subprocess.run/Popen` 和
+  `asyncio.create_subprocess_*`（后者走的是
+  `asyncio.windows_utils.Popen`，它 `super().__init__` 上来）。
+  实现放在 `desktop/`，内核 `src/` 依旧一行未改。
+- 顺带发现：**Python 3.12 已经从 `asyncio.windows_utils` 里移除了类级的
+  `SW_HIDE`**，所以终端抽屉和插件进程本来也会弹窗 —— 一并修好。
+- 逃生门：如果某个 Windows 程序确实需要真实控制台句柄，
+  设 `OPENMINIS_DESKTOP_SHOW_CONSOLE=1` 即可关掉这个补丁，不用重新打包。
+- 启动日志会写明补丁状态，便于排查。
+
+### 另一处修正：密钥路径写错了
+
+设置页原文写「密钥保存在 `%LOCALAPPDATA%\openminis`」，但内核在 Windows 上
+用的是 `%USERPROFILE%\openminis`（`LOCALAPPDATA` 只放缓存目录）。
+既然这句话是在交代密钥存哪，就不该是猜的 —— 现在改成从
+`/api/desktop/info` 读真实路径显示。
+
+
 文中的日期是构建当天。下载页永远指向最新版；要对照自己装的是哪一版，看窗口标题栏右下角的版本号。
 
 ## v0.1.1 — 「配了却没生效」的修复（2026-09-25）

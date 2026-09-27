@@ -27,7 +27,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.1.1"
+DESKTOP_UI_VERSION = "0.1.2"
 
 
 def _insert_front(app: FastAPI, route: Any) -> None:
