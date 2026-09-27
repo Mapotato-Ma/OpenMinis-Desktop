@@ -1,6 +1,6 @@
 # Spec：让「改完怎么知道没弄坏」有一条命令
 
-Status: in-progress
+Status: done
 来源：架构调研候选 C2（`/var/minis/workspace/architecture-review-20260927-204044.html`）
 基线：commit `0ac4dae`
 
@@ -41,3 +41,14 @@ Status: in-progress
 - `scripts/check.py`
 - `.github/workflows/verify.yml`
 - `AGENTS.md` 的「验证」一节指向这条命令
+
+---
+
+## 结果（2026-09-27）
+
+- `scripts/check.py` 是唯一入口，本地与 CI 跑同一条命令。
+- `.github/workflows/verify.yml` 在每次分支推送时跑，Windows 上 **758 passed**，
+  前端回归检查（`ws-reconnect.check.ts`，此前从未被执行过）**2.4s 通过**。
+- 第一次跑起来的红项全部收干净：4 个产品 bug（`src/`，六处偏离记在 NOTICE.md）、
+  3 个用例前提问题。本地剩 2 项按平台 skip。
+- 下一步交给 C1：把 `web/desktop/app.js` 的设置状态抽成深模块。

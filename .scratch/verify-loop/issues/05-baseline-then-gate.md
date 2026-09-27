@@ -1,25 +1,26 @@
-# 05 · 基线绿了之后，把验证从信号变成门禁
+# 05 · 把验证从信号变成门禁 —— 已收
 
-Status: open
+Status: resolved
 Type: task
-Blocked by: 03, 04
 
-## 做什么
+原计划是「先 informational（`continue-on-error`），基线绿了再转门禁」。
+实际执行时改成了**一开始就当门禁**，理由是：
 
-`verify.yml` 里那一行 `continue-on-error: true` 删掉。
+> 没有 token 时，`continue-on-error` 会把失败步骤的 conclusion 也报成 `success`，
+> 于是从 Actions API 根本看不出红不红 —— 那条流水线就白跑了。
 
-它不是偷懒的产物，是刻意的第一步：先让流水线在 Windows 上**跑起来并看到真实基线**，
-再决定门禁。在没有基线的情况下直接开门禁，结果只会是"红的流水线被无视"，
-那比没有流水线更糟。
+门禁的表现符合预期：前两次运行红（红在接线、在用例的时钟赛跑），修完立刻绿。
 
-## 判据
+## 最终状态（两条基线都实测）
 
-- Windows 上 `python scripts/check.py --fast` 全绿（或只剩明确 skip 的步骤）
-- 顺手把 `build-windows.yml` 的 paths 也覆盖 `src/**` —— 内核改动会影响发出去的 exe，
-  只是那一步要付 40 分钟打包的代价，想清楚再动
+| 平台 | 结果 |
+|---|---|
+| Windows（CI, Python 3.12） | **758 passed**，0 failed；前端回归检查 2.4s 通过 |
+| POSIX（本地 iSH, Python 3.12） | 756 passed，**2 skipped**（Windows 专有断言） |
 
-## 注意
+## 还没做的
 
-`AGENTS.md` 里写的是「`scripts/check.py` 是唯一的验证入口」，门禁落地前这句话
-在 CI 上还不成立（CI 目前只跑 smoke）。别让文档比现实超前太多 —— 要么推进入、
-要么改文档。
+`build-windows.yml` 的 paths 仍然没覆盖 `src/**` —— 内核改动会影响发出去的 exe，
+但那一步要付 40 分钟打包的代价。现在内核改动至少有 `verify.yml` 兜着（50 秒），
+所以这件事不再紧急。真要做的话建议加 `dorny/paths-filter` 让 build 只在
+`src/**`、`desktop/**`、`packaging/**` 变更时才跑。
