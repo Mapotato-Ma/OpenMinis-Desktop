@@ -47,6 +47,7 @@ class Step:
     needs: str | None = None      # 需要的外部命令，缺了就跳过
     fast_skips: bool = False      # --fast 时跳过（要起服务的那些）
     timeout: int = 900
+    hint: str = ""                # 失败时补一句「那要去装什么」
 
 
 STEPS = [
@@ -55,6 +56,7 @@ STEPS = [
         label="内核测试套件 (pytest tests/)",
         cmd=[sys.executable, "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
         timeout=1800,
+        hint="pytest 没装：pip install -e '.[dev]'",
     ),
     Step(
         name="frontend",
@@ -80,6 +82,23 @@ def which(cmd: str) -> bool:
     return _which(cmd) is not None
 
 
+def resolve_argv(cmd: list[str]) -> list[str] | None:
+    """把命令名解析成真实可执行文件；找不到返回 ``None``。
+
+    Windows 上 ``npm`` 实际是 ``npm.cmd`` 这种批处理垫片，而
+    ``subprocess`` 不带 shell 时只认 ``.exe`` —— 直接跑 ``"npm"`` 会
+    报 ``WinError 2``（「系统找不到指定的文件」），看起来像环境缺东西，
+    其实只是垫片没被解析。``shutil.which`` 会按 PATHEXT 找到它。
+    """
+    from shutil import which as _which
+
+    head = cmd[0]
+    resolved = _which(head)
+    if resolved is None:
+        return None
+    return [resolved, *cmd[1:]]
+
+
 def rule(title: str = "") -> None:
     line = "─" * max(4, 62 - len(title))
     print(f"\n── {title} {line}" if title else "─" * 62)
@@ -88,19 +107,28 @@ def rule(title: str = "") -> None:
 def run(step: Step) -> tuple[str, float]:
     """跑一步；返回 (结果, 秒)。结果 ∈ {PASS, FAIL, SKIP}。"""
     rule(step.label)
-    print(f"$ {' '.join(step.cmd)}  (cwd={step.cwd.relative_to(ROOT) or '.'})")
+    argv = resolve_argv(step.cmd)
+    if argv is None:
+        print(f"!! 找不到命令：{step.cmd[0]} —— 装它，或用 --only 跑别的步骤")
+        if step.hint:
+            print(f"   {step.hint}")
+        return "FAIL", 0.0
+    print(f"$ {' '.join(argv)}  (cwd={step.cwd.relative_to(ROOT) or '.'})")
     started = time.monotonic()
     try:
-        proc = subprocess.run(step.cmd, cwd=step.cwd, env=CHILD_ENV, timeout=step.timeout)
+        proc = subprocess.run(argv, cwd=step.cwd, env=CHILD_ENV, timeout=step.timeout)
         code = proc.returncode
     except subprocess.TimeoutExpired:
         print(f"!! 超时（{step.timeout}s）")
         code = -1
-    except FileNotFoundError as exc:
+    except OSError as exc:
         print(f"!! 起不来：{exc}")
         code = -1
     elapsed = time.monotonic() - started
-    return ("PASS" if code == 0 else "FAIL"), elapsed
+    result = "PASS" if code == 0 else "FAIL"
+    if result == "FAIL" and step.hint:
+        print(f"   提示：{step.hint}")
+    return result, elapsed
 
 
 def main(argv: list[str] | None = None) -> int:

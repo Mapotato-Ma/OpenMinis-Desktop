@@ -61,7 +61,9 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          # [dev] 才有 pytest / pytest-asyncio —— 只装 -e . 的话
+          # `python -m pytest` 会直接说 No module named pytest
+          pip install -e ".[dev]"
           npm --prefix web ci
 
       # 直接当门禁，不做「先 informational」那一套：没有 token 时，
