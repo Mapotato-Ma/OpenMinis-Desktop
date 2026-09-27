@@ -1,0 +1,78 @@
+name: Verify
+
+# 轻量验证流水线：只跑检查，不打包。
+#
+# 为什么单独一个文件、而不是塞进 build-windows.yml：
+# 那条流水线要 40 分钟（装依赖 + PyInstaller 打包 + 真启动一次 exe），
+# 它的 paths 过滤只覆盖 desktop/ web/desktop/ scripts/ spec —— 也就是
+# **改 src/、tests/、web/src 不会触发任何检查**。把 verify 与 build 分开，
+# 检查就能在每次内核/测试/前端改动时跑，而不用每次都付打包的代价。
+#
+# 它跑的就是 `scripts/check.py` —— 本地跑的是同一条命令。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'desktop/**'
+      - 'web/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/verify.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'desktop/**'
+      - 'web/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/verify.yml'
+
+jobs:
+  check:
+    runs-on: windows-latest
+    # windows-latest 上整套 758 个测试约 3-4 分钟，加上前端检查给足余量。
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # 与 build-windows.yml 用同一个版本：验证要跑在**真正打包时用的解释器**上，
+      # 否则 3.13 开发者机器上绿的测试，到了 3.12 的 CI 上才发现用了新 API。
+      # （.python-version 写的是 3.13，这个不一致本身就是一次真实的踩坑，
+      #  见 .scratch/verify-loop/issues/03-*.md）
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          npm --prefix web ci
+
+      # 第一阶段：先让它跑起来、看到 Windows 上的真实基线。
+      # 已知本机（Alpine/aarch64）有 13 项红的，其中一部分是平台差异、
+      # 一部分是真 bug（见 .scratch/verify-loop/）。基线绿了之后删掉
+      # continue-on-error —— 那之前它是**信号**，不是门禁。
+      - name: Run the check suite
+        shell: pwsh
+        continue-on-error: true
+        run: python scripts/check.py --fast
+
+      - name: Show what failed
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host "check suite failed — see .scratch/verify-loop/ for the known baseline"
