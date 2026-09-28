@@ -172,24 +172,55 @@ def catch_all_index(app: FastAPI) -> int | None:
     return None
 
 
-def shadowed_routes(app: FastAPI, routes: list[Any] | None = None) -> list[str]:
-    """排在兜底路由**之后**的桌面路由 —— 它们永远不会被命中。
+def ordering_problems(app: FastAPI, routes: list[Any] | None = None) -> list[str]:
+    """装完之后能自查的**两条**顺序不变量（这个模块唯一会静默失败的地方）。
 
-    这是这个模块唯一的失败模式，而且是静默的：请求被兜底吞掉（返回首页 HTML
-    或 JSON 404）。所以 ``attach()`` 每次装完都自查一遍，测试里也断言是空的。
+    1. 没有路由排在内核兜底路由之后 —— 否则永远不会被命中；
+    2. 精确路径排在**会吞掉它的静态挂载**之前 —— ``Mount`` 匹配前缀下的一切，
+       而 ``/_desktop/window-bootstrap.js`` 这种「磁盘上不存在、由处理器现算」
+       的路由一旦排到 ``Mount("/_desktop", …)`` 后面，就会被静态挂载接走并 404。
+
+    第 2 条以前只写在测试里，运行时不查（独立评审指出的：清单被重排不会有任何告警）。
+    另外两处也按评审改了：`index()` 走 ``==`` 语义（依赖 Starlette 不给 Route 加
+    ``__eq__``）→ 改成按对象身份建索引；查不到（不在表里）以前被 `continue` 吞掉
+    → 现在它本身就是问题（装完却查不到，说明这次自查不可信）。
     """
+    problems: list[str] = []
+    watched = list(app.router.routes if routes is None else routes)
+
     limit = catch_all_index(app)
-    if limit is None:  # 内核哪天不留兜底路由了，那我们的路由反而都安全
-        return []
-    watched = app.router.routes if routes is None else routes
-    out: list[str] = []
-    for route in watched:
-        try:
-            if app.router.routes.index(route) > limit:
-                out.append(str(getattr(route, "path", route)))
-        except ValueError:  # 不在表里（已经装过了？）
+    if limit is None:
+        # fail loud：认不出兜底就**不能**当成「全都安全」（内核换个注册方式就静默失效）
+        problems.append(
+            f"认不出内核兜底路由（{KERNEL_CATCH_ALL_PATH}）—— 顺序自查失效，请核对内核的注册方式"
+        )
+    else:
+        pos = {id(r): i for i, r in enumerate(app.router.routes)}
+        for route in watched:
+            i = pos.get(id(route))
+            path = str(getattr(route, "path", route))
+            if i is None:
+                problems.append(f"{path} 装完却不在路由表里 —— 这次自查不可信")
+            elif i > limit:
+                problems.append(f"{path} 排在兜底路由之后，永远不会被命中")
+
+    for i, mount in enumerate(watched):
+        if not isinstance(mount, Mount):
             continue
-    return out
+        prefix = str(getattr(mount, "path", ""))
+        if not prefix:
+            continue
+        for j, other in enumerate(watched):
+            # 只查**排在挂载之后**的精确路径：那才会被 Mount 接走。
+            # （评审的原话写的是「Mount 之前没有同前缀的精确 Route」，方向反了 ——
+            #  精确路径必须排在挂载之前才可达；照原话实现会让正常路径一直告警。）
+            if j <= i or isinstance(other, Mount):
+                continue
+            path = str(getattr(other, "path", ""))
+            if path.startswith(prefix):
+                problems.append(f"精确路径 {path} 排在静态挂载 {prefix} 之后，会被它接走")
+
+    return problems
 
 
 def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) -> bool:
@@ -202,8 +233,11 @@ def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) ->
     """
     mounted = bool(ui_active) and desktop_assets_ready(desktop_dir)
     if getattr(app.state, "desktop_routes_attached", False):
+        # 幂等：第二次不改路由表，所以返回的必须是**首次**的实际结论。
+        # （独立评审指出：这里以前返回的是本次重算的值 —— 「首次资源缺失(False)、
+        #  资源就位后再调一次」会谎报 True，而表里根本没有界面挂载。）
         logger.debug("desktop routes already attached to this app — skipping")
-        return mounted
+        return bool(getattr(app.state, "desktop_ui_mounted", False))
 
     if ui_active and not mounted:
         logger.warning(
@@ -215,11 +249,9 @@ def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) ->
     for route in reversed(routes):
         app.router.routes.insert(0, route)
     app.state.desktop_routes_attached = True
+    app.state.desktop_ui_mounted = mounted
 
-    shadowed = shadowed_routes(app, routes)
-    if shadowed:
-        logger.warning(
-            "desktop routes registered after the kernel catch-all and therefore unreachable: %s",
-            ", ".join(shadowed),
-        )
+    problems = ordering_problems(app, routes)
+    if problems:
+        logger.warning("desktop route ordering problems: %s", "; ".join(problems))
     return mounted

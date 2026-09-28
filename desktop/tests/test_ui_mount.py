@@ -21,7 +21,7 @@ from desktop.ui_mount import (
     KERNEL_CATCH_ALL_PATH,
     attach,
     catch_all_index,
-    shadowed_routes,
+    ordering_problems,
 )
 
 
@@ -59,7 +59,7 @@ def test_every_desktop_route_lands_before_the_kernel_catch_all(ui_dir: Path):
     mounted = attach(app, desktop_dir=ui_dir, ui_active=True)
 
     assert mounted is True
-    assert shadowed_routes(app) == [], f"有路由排在兜底之后: {shadowed_routes(app)}"
+    assert ordering_problems(app) == [], f"顺序不变量被破坏: {ordering_problems(app)}"
     # 该有的都在
     for expected in (
         f"{DESKTOP_MOUNT_PATH}/window-bootstrap.js",
@@ -115,7 +115,7 @@ def test_missing_assets_keeps_the_apis_but_not_the_ui(tmp_path: Path):
     # 但壳层仍然能启动，并且接口照旧
     assert "/api/desktop/info" in got
     assert f"{DESKTOP_MOUNT_PATH}/window-bootstrap.js" in got
-    assert shadowed_routes(app) == []
+    assert ordering_problems(app) == []
 
 
 def test_desktop_dir_none_is_a_valid_state():
@@ -146,8 +146,9 @@ def test_shadowed_detection_catches_a_route_after_the_catch_all(ui_dir: Path):
     late = Route("/api/desktop/late", _late, methods=["GET"])
     app.router.routes.append(late)          # 手工制造「被吞掉」的场景
 
-    assert shadowed_routes(app, [late]) == ["/api/desktop/late"]
-    assert shadowed_routes(app) == ["/api/desktop/late"]
+    late_problems = ordering_problems(app, [late])
+    assert any("/api/desktop/late" in pr for pr in late_problems), late_problems
+    assert any("/api/desktop/late" in pr for pr in ordering_problems(app)), "不传清单也要能查出来"
 
 
 # ── 端到端：真起 app，走 HTTP 看谁应答 ──────────────────────────────────
@@ -182,3 +183,50 @@ def test_info_reports_what_actually_got_mounted(ui_dir: Path, tmp_path: Path):
     assert info["desktop"] is True
     assert info["uiActive"] is False, "汇报的必须是实际结果，不是调用方的愿望"
     assert info["uiMount"] is None
+
+
+# ── 契约 5：运行时的第二条顺序不变量（精确路径 vs 静态挂载） ─────────────
+def test_runtime_check_catches_a_route_ordered_after_its_mount(ui_dir: Path):
+    """这条以前只在测试里断言，运行时不查 —— 清单被重排不会有任何告警。
+
+    这里手工把顺序倒过来，验证自查能抓到（独立评审指出来的缺口）。
+    """
+    app = kernel_like_app()
+    attach(app, desktop_dir=ui_dir, ui_active=True)
+
+    boot = next(r for r in app.router.routes
+                if str(getattr(r, "path", "")).endswith("window-bootstrap.js"))
+    mount = next(r for r in app.router.routes
+                 if isinstance(r, Mount) and r.path == DESKTOP_MOUNT_PATH)
+
+    problems = ordering_problems(app, [mount, boot])
+    assert any("window-bootstrap.js" in pr and DESKTOP_MOUNT_PATH in pr for pr in problems), problems
+
+
+def test_runtime_check_fails_loud_when_the_catch_all_disappears():
+    """内核哪天换了注册方式，自查不能静默失效（fail loud，不是 fail open）。"""
+    app = FastAPI()
+
+    @app.get("/api/health")
+    async def _health():  # noqa: ANN202
+        return {"ok": True}
+
+    assert catch_all_index(app) is None
+    problems = ordering_problems(app, [])
+    assert any("认不出内核兜底路由" in pr for pr in problems), problems
+
+
+def test_second_attach_reports_the_first_result(tmp_path: Path):
+    """幂等分支返回的必须是**首次**的实际结论。
+
+    回归自一次独立评审：以前它返回本次重算的值 —— 首次「想要界面但资源缺失」
+    返回 False，资源就位后再调一次会谎报 True，而路由表里根本没有界面挂载。
+    """
+    app = kernel_like_app()
+    assert attach(app, desktop_dir=tmp_path / "nope", ui_active=True) is False
+
+    d = tmp_path / "nope"
+    d.mkdir()
+    (d / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    assert attach(app, desktop_dir=d, ui_active=True) is False, "被幂等跳过，就不该说界面挂上了"
+    assert f"{DESKTOP_MOUNT_PATH}/" not in paths(app)
