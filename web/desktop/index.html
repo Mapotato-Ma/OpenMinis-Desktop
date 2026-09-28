@@ -129,7 +129,8 @@
       <div class="file-view" id="fileView">
         <div class="file-head">
           <span class="file-name" id="fileTitle">—</span>
-          <span class="file-path" id="filePath">—</span>
+          <!-- 面包屑：目录段可点（点了在文件树里展开并定位），末段是当前文件所以不可点 -->
+          <span class="crumbs" id="fileCrumbs"></span>
           <span class="file-actions">
             <button class="icon-btn" id="btnCopyFile" title="复制全文"><wa-icon library="om" name="copy"></wa-icon></button>
             <button class="icon-btn" id="btnCloseFile" title="关闭 (Esc)"><wa-icon library="om" name="x"></wa-icon></button>
@@ -203,6 +204,7 @@
     <span class="status-item" id="statusSession">—</span>
     <span class="status-item" id="statusTurn"></span>
     <span class="spacer"></span>
+    <span class="status-item" id="statusFile"></span>
     <span class="status-item" id="statusPlatform"></span>
     <span class="status-item" id="statusVersion"></span>
   </footer>

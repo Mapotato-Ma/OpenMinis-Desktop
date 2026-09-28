@@ -878,16 +878,120 @@ function langOf(path) {
     toml: 'toml', ini: 'ini', conf: 'ini' })[ext] || 'js';
 }
 
-/** 打开一个文件：**中间区域全宽预览**（只读），左侧「代码」页签同步同一个文件。
+/* 状态栏上的语言名 —— **按扩展名单独判**，不用 langOf：
+   那个函数是给高亮器用的，认不出就回退到 'js'（实测把 .svg 标成了 JavaScript）。
+   状态栏里写错的信息比不写更糟，所以这一份认不出就老实写「文本」。 */
+const EXT_LABEL = {
+  py: 'Python', js: 'JavaScript', mjs: 'JavaScript', cjs: 'JavaScript', jsx: 'JavaScript',
+  ts: 'TypeScript', tsx: 'TypeScript', sh: 'Shell', bash: 'Shell', zsh: 'Shell',
+  go: 'Go', rs: 'Rust', c: 'C', h: 'C', cpp: 'C++', hpp: 'C++', java: 'Java',
+  kt: 'Kotlin', swift: 'Swift', rb: 'Ruby', php: 'PHP', lua: 'Lua', pl: 'Perl',
+  json: 'JSON', jsonc: 'JSON', yaml: 'YAML', yml: 'YAML', toml: 'TOML', ini: 'INI', cfg: 'INI',
+  md: 'Markdown', markdown: 'Markdown', html: 'HTML', htm: 'HTML', css: 'CSS', scss: 'SCSS',
+  svg: 'SVG', xml: 'XML', txt: '纯文本', log: '日志', csv: 'CSV', sql: 'SQL',
+  lock: '锁文件', gitignore: 'gitignore', env: '环境变量',
+};
+const EXT_SPECIAL = { dockerfile: 'Dockerfile', makefile: 'Makefile', 'cmakelists.txt': 'CMake' };
+
+function fileLabel(path) {
+  const name = String(path).split('/').pop().toLowerCase();
+  if (EXT_SPECIAL[name]) return EXT_SPECIAL[name];
+  const ext = name.includes('.') ? name.split('.').pop() : '';
+  return EXT_LABEL[ext] || '文本';
+}
+
+/** 状态栏的文件信息：语言 · 行数（截断时标 +）。关掉预览要清空 —— 否则会留着上一个文件的。 */
+function setStatusFile(path, content, truncated) {
+  const node = $('statusFile');
+  if (!node) return;
+  if (!path || !content) { node.textContent = ''; return; }
+  const lines = content.split('\n').length;
+  node.textContent = `${fileLabel(path)} · ${lines} 行${truncated ? '+' : ''}`;
+}
+
+/** 面包屑：根 › 目录… › 文件名。目录段可点（在文件树里展开并定位），
+ *  末段是当前文件，所以它是纯文本不可点（评审提醒：可点却没动作最容易被当成坏了）。 */
+function renderCrumbs(path) {
+  const host = $('fileCrumbs');
+  if (!host) return;
+  host.innerHTML = '';
+  host.title = path;
+  const parts = String(path).split('/').filter(Boolean);
+  const file = parts.pop() || path;
+  const dirs = parts;
+  const ws = workspaces.find((w) => w.id === currentWorkspace);
+  const items = [{ label: ws ? ws.name : '工作目录', path: '' }];
+  if (dirs.length > 3) {
+    // 深路径省略中间段（窄的时候只看得到末尾两级）
+    items.push({ label: '…', path: null });
+    items.push({ label: dirs[dirs.length - 2], path: dirs.slice(0, -1).join('/') });
+    items.push({ label: dirs[dirs.length - 1], path: dirs.join('/') });
+  } else {
+    let acc = '';
+    for (const d of dirs) {
+      acc = acc ? `${acc}/${d}` : d;
+      items.push({ label: d, path: acc });
+    }
+  }
+  items.forEach((it, i) => {
+    if (i) host.appendChild(el('span', 'sep', '›'));
+    if (it.path === null) { host.appendChild(el('span', 'sep', it.label)); return; }
+    const b = el('button', null, it.label);
+    b.title = it.path ? `在文件树里定位 ${it.path}` : '在文件树里回到根';
+    b.addEventListener('click', () => revealInTree(it.path));
+    host.appendChild(b);
+  });
+  host.appendChild(el('span', 'sep', '›'));
+  host.appendChild(el('span', 'last', file));
+}
+
+let revealToken = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitForRow(path, timeout = 1200) {
+  const sel = `.tree-row[data-path="${CSS.escape(path)}"]`;
+  const t0 = Date.now();
+  for (;;) {
+    const row = document.querySelector(sel);
+    if (row) return row;
+    if (Date.now() - t0 > timeout) return null;
+    await sleep(60);
+  }
+}
+
+/** 在文件树里展开并定位到一个目录（面包屑点目录段时用）。三个坑都是评审点出来的：
+ *  ① 侧栏可能收起着 —— 不先展开的话 scrollIntoView 对着隐藏元素无效；
+ *  ② 点**已经展开**的行会把它收起（树是 kids.hidden 切换）—— 所以只在折叠时才点；
+ *  ③ 连点两下要能取消上一次 —— 用 token 而不是让两个循环互相打架。 */
+async function revealInTree(dirPath) {
+  const token = ++revealToken;
+  if ($('inspector').classList.contains('hidden')) toggleInspector(true);
+  switchTab('files');
+  let acc = '';
+  for (const seg of String(dirPath || '').split('/').filter(Boolean)) {
+    acc = acc ? `${acc}/${seg}` : seg;
+    const row = await waitForRow(acc);
+    if (!row || token !== revealToken) return;
+    const kids = row.nextElementSibling;
+    if (kids && kids.classList.contains('tree-children') && kids.hidden) row.click();
+    await sleep(120);
+  }
+  const target = dirPath ? await waitForRow(dirPath, 700) : document.querySelector('#fileTree .tree-row');
+  if (!target || token !== revealToken) return;
+  target.scrollIntoView({ block: 'nearest' });
+  target.classList.add('flash');
+  setTimeout(() => target.classList.remove('flash'), 900);
+}
+
+/** 打开一个文件：**编辑器（中间）全宽预览**，只读。
  *
  * 以前点文件只会在左侧那块面板里打开 —— 面板只有几百像素宽，看代码很难受。
- * 现在中间接替对话区（`.file-open` 那个类），左边保持你正在做的浏览（不再强制切页签），
- * 但内容会一起刷，免得两边显示不同的文件。
+ * 现在编辑器接替欢迎页（`.file-open` 那个类），侧栏保持你正在浏览的面板，不抢页签。
  */
 async function openFile(path, container) {
   state.currentFile = path;
   $('fileTitle').textContent = path.split('/').pop();
-  $('filePath').textContent = shortPath(path, 96);
+  renderCrumbs(path);
 
   const center = $('fileBody');
   center.innerHTML = '<div class="placeholder">读取中…</div>';
@@ -909,9 +1013,11 @@ async function openFile(path, container) {
       }
     };
     paint(center, true);
+    setStatusFile(path, content, !!(data && data.truncated));
   } catch (e) {
     center.innerHTML = '';
     center.appendChild(el('div', 'placeholder', '读取失败: ' + e.message));
+    setStatusFile(null);   // 读失败就不要在状态栏留上一个文件的信息（评审提醒）
   }
 }
 
@@ -919,6 +1025,7 @@ async function openFile(path, container) {
 function closeFileView() {
   $('editor').classList.remove('file-open');
   $('fileBody').innerHTML = '';
+  setStatusFile(null);
 }
 
 /** 复制当前打开文件的内容（左侧页签和中间视图共用）。 */

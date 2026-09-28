@@ -450,6 +450,16 @@ kbd {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .file-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+/* 面包屑 */
+.crumbs {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 1px;
+  font-family: var(--mono); font-size: 11px; color: var(--fg-faint); overflow: hidden;
+}
+.crumbs button { font: inherit; color: var(--fg-faint); padding: 1px 4px; border-radius: 4px; white-space: nowrap; }
+.crumbs button:hover { background: var(--bg-hover); color: var(--fg); }
+.crumbs .sep { color: var(--border-strong); padding: 0 1px; }
+.crumbs .last { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-row.flash { background: var(--accent-soft); }
 
 /* ── composer ────────────────────────────────────────────────────────────
    一体式输入框：文本域和控件在**同一个**圆角容器里 —— 左边是当前模型胶囊，
