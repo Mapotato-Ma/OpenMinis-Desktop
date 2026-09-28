@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 const DESKTOP = new URL('../desktop/', import.meta.url);
@@ -42,14 +42,31 @@ test('index.html 引的脚本都存在（少一个就是 404 + 界面半死）',
   }
 });
 
-test('module 脚本只能是 vendor 进来的第三方库', () => {
+/* 我们自己的代码里唯一允许写成 module 的：它必须 import 组件库的 ESM 注册 API，
+   classic script 做不到这件事。白名单长度被钉在 1 —— 它是例外，不是新惯例。 */
+const MODULE_ALLOWLIST = ['icons.js'];
+
+test('module 脚本只能是 vendor 进来的第三方库（外加一个钉死的例外）', () => {
   // 我们自己的代码全是 classic script —— 上面那条「拼起来解析」的检查只对
   // classic 有效（module 有独立作用域，撞名规则完全不同）。
   // 把界限钉住：一旦有人给我们自己的代码加上 type="module"，那条检查就悄悄失效了。
   for (const { src, module: isModule } of scripts()) {
     if (!isModule) continue;
-    assert.ok(src.startsWith('vendor/'), `${src} 是 module，但不是 vendor 的第三方库`);
+    assert.ok(src.startsWith('vendor/') || MODULE_ALLOWLIST.includes(src),
+      `${src} 是 module，但既不是 vendor 的第三方库，也不在白名单里`);
   }
+  assert.equal(MODULE_ALLOWLIST.length, 1, '白名单里不该再多了 —— 加之前先想清楚为什么');
+});
+
+test('图标库接线没掉（本地 Lucide + 注册模块都在）', () => {
+  const html = read('index.html');
+  assert.ok(html.includes('src="./icons.js"'), 'index.html 没有再引 icons.js');
+  assert.ok(existsSync(new URL('icons.js', DESKTOP)), 'icons.js 不在磁盘上');
+  assert.ok(existsSync(new URL('vendor/lucide/', DESKTOP)), '本地图标目录不在（vendor-lucide.mjs 没跑？）');
+  const icons = readdirSync(new URL('vendor/lucide/', DESKTOP)).filter((f) => f.endsWith('.svg'));
+  assert.ok(icons.length > 20, `本地图标只有 ${icons.length} 个，像是 vendor 没跑完整`);
+  assert.match(read('icons.js'), /registerIconLibrary\('om'/,
+    'icons.js 没有注册本地图标库');
 });
 
 test('组件库接线没掉（样式表在、主题类跟着 data-theme 走）', () => {

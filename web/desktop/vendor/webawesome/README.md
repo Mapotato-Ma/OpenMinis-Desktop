@@ -5,4 +5,4 @@
 - 生成：`node web/scripts/vendor-webawesome.mjs <包根目录>` —— **不要手改这个目录**，
   要加组件就改脚本里的 ENTRIES 再重跑（它按 ES module 的 import 图取闭包）。
 - 只带了我们用到的组件与它依赖的 chunks；整包有 2366 个文件 / 17MB，这里是
-  91 个文件 / 510KB。
+  93 个文件 / 511KB。

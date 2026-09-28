@@ -269,13 +269,24 @@ function wsSend(obj) {
 setInterval(() => { if (state.wsReady) wsSend({ type: 'ping' }); }, 25000);
 
 /* ── tool card helpers ───────────────────────────────────────────────── */
+// 界面里的图标一律走这里：<wa-icon library="om" name="...">。
+// 图标本体是 vendored 的 Lucide（web/desktop/vendor/lucide，见 vendor-lucide.mjs），
+// 注册在 icons.js。尺寸跟 font-size、颜色跟 currentColor，所以深浅主题都不用管。
+function ic(name, cls) {
+  const node = document.createElement('wa-icon');
+  node.setAttribute('library', 'om');
+  node.setAttribute('name', name);
+  if (cls) node.className = cls;
+  return node;
+}
+
 const TOOL_ICON = {
-  shell_execute: '❯', file_read: '📄', file_write: '✎', file_edit: '✎',
-  ls: '🗂', search_files: '🔍', web_fetch: '🌐', web_search: '🔍',
-  browser_use: '🌐', memory_write: '🧠', memory_get: '🧠', skill_use: '⚡',
-  subagent: '👥', send: '📨', read_image: '🖼', image_gen: '🎨',
+  shell_execute: 'terminal', file_read: 'file-text', file_write: 'file-pen', file_edit: 'pen-line',
+  ls: 'folder-tree', search_files: 'search', web_fetch: 'globe', web_search: 'search',
+  browser_use: 'globe', memory_write: 'brain', memory_get: 'brain', skill_use: 'zap',
+  subagent: 'users', send: 'send', read_image: 'image', image_gen: 'palette',
 };
-const toolIcon = (n) => TOOL_ICON[n] || '⚙';
+const toolIcon = (n) => TOOL_ICON[n] || 'wrench';
 
 function toolSummary(name, input) {
   if (!input || typeof input !== 'object') return '';
@@ -289,8 +300,8 @@ function makeToolCard(name, input) {
   const card = el('div', 'tool-card');
   card.dataset.toolName = name;
   const head = el('div', 'tool-head');
-  head.appendChild(el('span', 'tool-chevron', '▶'));
-  head.appendChild(el('span', 'tool-icon', toolIcon(name)));
+  head.appendChild(ic('chevron-right', 'tool-chevron'));
+  head.appendChild(ic(toolIcon(name), 'tool-icon'));
   head.appendChild(el('span', 'tool-name', name));
   head.appendChild(el('span', 'tool-summary', toolSummary(name, input)));
   const status = el('span', 'tool-status running', '运行中…');
@@ -322,7 +333,9 @@ function makeToolCard(name, input) {
 function settleToolCard(card, ok, output, ms) {
   if (!card) return;
   card._status.className = 'tool-status ' + (ok ? 'ok' : 'err');
-  card._status.textContent = (ok ? '✓' : '✗') + (ms != null ? ` ${ms}ms` : '');
+  card._status.textContent = '';
+  card._status.appendChild(ic(ok ? 'check' : 'x'));
+  if (ms != null) card._status.appendChild(document.createTextNode(` ${ms}ms`));
   card._outSec.style.display = '';
   card._outPre.className = 'tool-pre' + (ok ? '' : ' err');
   card._outPre.textContent = output && output.length ? output : '(无输出)';
@@ -340,7 +353,7 @@ function beginTurn() {
   emptyNode().style.display = 'none';
   const root = el('div', 'msg assistant');
   const role = el('div', 'msg-role');
-  role.appendChild(el('span', 'avatar', '◈'));
+  role.appendChild(ic('sparkles', 'avatar'));
   role.appendChild(document.createTextNode('OpenMinis'));
   root.appendChild(role);
   const body = el('div', 'msg-body');
@@ -547,7 +560,8 @@ function renderSessions() {
     const item = el('div', 'session-item' + (s.id === state.sessionId ? ' active' : ''));
     item.appendChild(el('div', 's-title', s.title || '(未命名)'));
     item.appendChild(el('div', 's-time', relTime(s.updatedAt || s.createdAt)));
-    const del = el('button', 's-del', '✕');
+    const del = el('button', 's-del');
+    del.appendChild(ic('x'));
     del.title = '删除会话';
     del.addEventListener('click', (ev) => { ev.stopPropagation(); deleteSession(s.id); });
     item.appendChild(del);
@@ -630,7 +644,7 @@ function renderMessages(messages) {
     const isUser = m.role === 'user';
     const node = el('div', 'msg ' + (isUser ? 'user' : 'assistant'));
     const role = el('div', 'msg-role');
-    role.appendChild(el('span', 'avatar', isUser ? '你' : '◈'));
+    role.appendChild(isUser ? el('span', 'avatar', '你') : ic('sparkles', 'avatar'));
     role.appendChild(document.createTextNode(isUser ? '你' : 'OpenMinis'));
     node.appendChild(role);
 
@@ -733,17 +747,15 @@ function renderDiff() {
 
 /* ── file tree ───────────────────────────────────────────────────────── */
 const FILE_ICON = (name, isDir) => {
-  if (isDir) return '📁';
+  if (isDir) return 'folder';
   const ext = (name.split('.').pop() || '').toLowerCase();
-  if (['py'].includes(ext)) return '🐍';
-  if (['js', 'mjs', 'cjs'].includes(ext)) return '🟨';
-  if (['ts', 'tsx', 'jsx'].includes(ext)) return '🔷';
-  if (['json', 'yaml', 'yml', 'toml', 'ini', 'conf'].includes(ext)) return '⚙';
-  if (['md', 'txt', 'rst'].includes(ext)) return '📝';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(ext)) return '🖼';
-  if (['sh', 'bash', 'zsh', 'bat', 'ps1'].includes(ext)) return '❯';
-  if (['html', 'htm', 'css', 'scss'].includes(ext)) return '🎨';
-  return '📄';
+  if (['py', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx'].includes(ext)) return 'file-code';
+  if (['json', 'yaml', 'yml', 'toml', 'ini', 'conf'].includes(ext)) return 'braces';
+  if (['md', 'txt', 'rst'].includes(ext)) return 'file-text';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(ext)) return 'image';
+  if (['sh', 'bash', 'zsh', 'bat', 'ps1'].includes(ext)) return 'terminal';
+  if (['html', 'htm', 'css', 'scss'].includes(ext)) return 'palette';
+  return 'file';
 };
 
 async function loadTree(path = '', container = $('fileTree'), depth = 2) {
@@ -768,7 +780,7 @@ function buildTreeNodes(nodes, container) {
   for (const n of nodes) {
     const row = el('div', 'tree-row');
     row.dataset.path = n.path;
-    row.appendChild(el('span', 't-icon', FILE_ICON(n.name, n.isDir)));
+    row.appendChild(ic(FILE_ICON(n.name, n.isDir), 't-icon'));
     row.appendChild(el('span', 't-name', n.name));
     if (!n.isDir && n.size != null) row.appendChild(el('span', 't-size', fmtBytes(n.size)));
     frag.appendChild(row);
@@ -1142,9 +1154,9 @@ function openWorkspace() {
 // the user touching anything.
 const THEME_KEY = 'om.themeMode';
 const THEME_MODES = [
-  { id: 'system', label: '跟随系统', icon: '◐' },
-  { id: 'light', label: '浅色', icon: '☀' },
-  { id: 'dark', label: '深色', icon: '☾' },
+  { id: 'system', label: '跟随系统', icon: 'sun-moon' },
+  { id: 'light', label: '浅色', icon: 'sun' },
+  { id: 'dark', label: '深色', icon: 'moon' },
 ];
 let themeMode = 'system';
 const mql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
@@ -1163,7 +1175,7 @@ function applyTheme() {
   root.toggle('wa-dark', resolved === 'dark');
   root.toggle('wa-light', resolved === 'light');
   const mode = THEME_MODES.find((m) => m.id === themeMode) || THEME_MODES[0];
-  $('themeIcon').textContent = mode.icon;
+  $('themeIcon').setAttribute('name', mode.icon);
   $('themeLabel').textContent = mode.label;
   try { localStorage.setItem(THEME_KEY, themeMode); } catch { /* private mode */ }
 }
@@ -1186,8 +1198,10 @@ function openThemeMenu() {
   menu.id = 'themeMenu';
   for (const m of THEME_MODES) {
     const b = el('button', themeMode === m.id ? 'on' : '');
-    b.appendChild(el('span', 'check', themeMode === m.id ? '✓' : ''));
-    b.appendChild(el('span', null, m.icon + '  ' + m.label));
+    b.appendChild(el('span', 'check', ''));
+    if (themeMode === m.id) b.lastChild.appendChild(ic('check'));
+    b.appendChild(ic(m.icon));
+    b.appendChild(el('span', null, '  ' + m.label));
     b.addEventListener('click', () => { setThemeMode(m.id); closeThemeMenu(); });
     menu.appendChild(b);
   }
@@ -1707,7 +1721,7 @@ function drawHealth(box, spec) {
   box.hidden = false;
   box.className = 'notice ' + (spec.kind === 'ok' ? 'ok' : 'warn');
   box.innerHTML = '';
-  box.appendChild(el('span', 'ic', spec.kind === 'ok' ? '✓' : '⚠'));
+  box.appendChild(ic(spec.kind === 'ok' ? 'circle-check' : 'triangle-alert', 'ic'));
   const main = el('div', 'notice-main');
   main.appendChild(el('div', 'notice-title', spec.title));
   if (spec.sub) main.appendChild(el('div', 'notice-sub', spec.sub));
@@ -1739,7 +1753,10 @@ function probeResultNode(r) {
     box.textContent = '测试中…（会真的发一次最小请求，约 1–30 秒）';
     return box;
   }
-  box.appendChild(el('div', null, (r.ok ? '✓ ' : '✗ ') + (r.text || '')));
+  const line = el('div');
+  line.appendChild(ic(r.ok ? 'circle-check' : 'circle-x'));
+  line.appendChild(document.createTextNode(' ' + (r.text || '')));
+  box.appendChild(line);
   if (r.hint) box.appendChild(el('div', 'test-hint', '→ ' + r.hint));
   if (r.raw) box.appendChild(el('div', 'test-raw', r.raw));
   return box;

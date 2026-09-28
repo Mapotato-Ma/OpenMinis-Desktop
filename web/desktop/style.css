@@ -72,6 +72,21 @@
 
 * { box-sizing: border-box; }
 
+/* ── icons ────────────────────────────────────────────────────────────────
+   <wa-icon> 用 1em 定尺寸、currentColor 上色，所以图标跟着所在容器的字号与
+   颜色走 —— 深浅主题、hover/active 都不用单独写。图标本体是 vendored 的 Lucide
+   （web/desktop/vendor/lucide，由 web/scripts/vendor-lucide.mjs 生成）。
+   细线图标在同字号下比原来的实心字形显小，所以几处字号往上抬一档。 */
+wa-icon { flex: none; align-self: center; }
+.tool-icon wa-icon, .tool-icon { font-size: 13px; }
+.t-icon wa-icon, .t-icon { font-size: 13px; }
+.settings-nav-item .ic { font-size: 15px; }
+.rail-foot-btn wa-icon, .icon-btn wa-icon, .tb-btn wa-icon { vertical-align: -0.12em; }
+.avatar wa-icon { font-size: 13px; }
+.s-del wa-icon { font-size: 12px; }
+.notice .ic { font-size: 14px; }
+.theme-menu .check wa-icon { font-size: 12px; }
+
 /* The overlays/drawers below set ``display: flex``, which would otherwise beat
    the user-agent rule for the ``hidden`` attribute and leave them on screen. */
 [hidden] { display: none !important; }
