@@ -117,25 +117,40 @@ class _TwoDifferentToolsProvider:
 
 @pytest.mark.asyncio
 async def test_round_tools_run_concurrently():
-    """两个各 0.25s 的工具并发跑，总耗时明显小于 0.5s（串行会相加）。"""
+    """同轮的两个工具必须**真的重叠执行**（而不是各自等完再轮下一个）。
+
+    PORT-FIX: 原来断言的是「总耗时 < 0.55s」（两个各 0.3s 的工具，串行会相加）。
+    总耗时是**机器负载的代理**——空载时 0.31s，忙的时候（同时跑测试服务、
+    npm 检查）会超过 0.55s，于是一个正确的实现被报成红的。
+    改成直接断言两个调用的**时间区间有交集**：并发必有交集，串行必无交集，
+    而且与机器快慢无关。
+    """
     delay = 0.3
     rt = AgentRuntime()
     order: list[str] = []
+    spans: list[tuple[str, float, float]] = []
 
     async def _read(args_json: str, session_id: str, **kw) -> ToolExecutionResult:
+        started = time.monotonic()
         await asyncio.sleep(delay)
         order.append(args_json)
+        spans.append((args_json, started, time.monotonic()))
         return ToolExecutionResult("ok", True)
 
     rt.register(ToolExecutor(_two_arg_tool_def(), _read))
-    started = time.monotonic()
     out, stop = await rt.run(_TwoDifferentToolsProvider(delay),
                              [LLMMessage(LLMMessage.Role.USER, "看两张图")],
                              "sess-parallel", AgentRuntimeOptions(loop_mode="react"))
-    elapsed = time.monotonic() - started
     assert stop == "end_turn"
     assert len(order) == 2
-    assert elapsed < delay * 2 - 0.05, f"两个工具似乎串行了: {elapsed:.2f}s"
+
+    (name_a, a0, a1), (name_b, b0, b1) = spans
+    assert a0 < b1 and b0 < a1, f"两个工具没有重叠，似乎串行了: {spans}"
+    # 重叠的程度也别太敷衍：交集至少要有一个完整 delay 的量级，
+    # 否则「几乎串行、只蹭到一丁点重叠」也能蒙过去。
+    overlap = min(a1, b1) - max(a0, b0)
+    assert overlap > delay * 0.5, f"重叠只有 {overlap:.3f}s，不像真的并发: {spans}"
+
     # 结果顺序 = 调用顺序（a 在前 b 在后）
     assert "a.png" in order[0] and "b.png" in order[1]
 
