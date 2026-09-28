@@ -185,6 +185,9 @@ jobs:
             首次启动会在 `%LOCALAPPDATA%\openminis` 建数据目录，然后在设置里
             配置模型服务（OpenAI / Anthropic / 任意 OpenAI 兼容网关）。
 
-            - 快捷键：`Ctrl+K` 命令面板、`Ctrl+\`` 终端、`Ctrl+B` 左侧面板、`Ctrl+N` 新会话
+            - 快捷键：`Ctrl+K` 命令面板、`Ctrl+\`` 终端、`Ctrl+B` 左侧面板、`Ctrl+N` 新会话、
+              `Ctrl+O` 打开文件夹、`Ctrl+,` 设置、`Esc` 关闭当前文件
+            - 界面：菜单栏（文件/视图/帮助）、活动栏、可多标签看代码（同时最多 10 个）、
+              文件树可指向任意目录
             - 首次运行若提示缺少 WebView2，装一次微软的
               [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 较老版本可能需要）
