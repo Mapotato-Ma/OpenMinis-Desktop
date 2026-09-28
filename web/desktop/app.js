@@ -1384,6 +1384,7 @@ async function boot() {
   await loadSessions();
   loadTree();
   refreshModelPill();
+  fillStatusVersion();
   loadInfo();
   $('input').focus();
   autoGrow();
@@ -1710,6 +1711,20 @@ async function renderModelsHealth() {
     dirty: sdirty().any,
     providerCount: sview().providers.length,
   }));
+}
+
+/** 状态栏右下角的版本号。
+ *
+ * 这个 span 以前一直空着 —— 没有任何代码填它，而 CHANGELOG 里却写着
+ * 「看窗口右下角的版本号对照自己装的是哪一版」。要下载新版本时，这正是
+ * 最该看到的东西。数据来自 /api/desktop/info 的 uiVersion（服务端常量）。 */
+async function fillStatusVersion() {
+  const node = $('statusVersion');
+  if (!node) return;
+  try {
+    state.info = state.info || await api('/desktop/info');
+    if (state.info && state.info.uiVersion) node.textContent = 'v' + state.info.uiVersion;
+  } catch { /* 读不到就空着，不编一个版本号出来 */ }
 }
 
 /** 输入框左侧那个胶囊：显示当前对话绑定的模型，点它跳到设置里的模型服务。
