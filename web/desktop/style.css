@@ -616,7 +616,16 @@ kbd {
 .tree-row .t-icon { flex: 0 0 auto; font-size: 11px; opacity: .85; }
 .tree-row .t-name { overflow: hidden; text-overflow: ellipsis; }
 .tree-row .t-size { margin-left: auto; font-size: 10px; color: var(--fg-faint); flex: 0 0 auto; }
-.tree-children { padding-left: 12px; }
+/* 缩进引导线（每条子级缩进画一条竖线，层级深浅一眼看得出） */
+.tree-children { padding-left: 12px; border-left: 1px solid var(--border); margin-left: 7px; }
+/* 折叠箭头 */
+.tree-row .chev {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+  width: 12px; color: var(--fg-faint); transition: transform .12s;
+}
+.tree-row .chev.empty { visibility: hidden; }
+.tree-row:has(+ .tree-children:not([hidden])) .chev { transform: rotate(90deg); }
+.tree-row:hover .chev { color: var(--fg); }
 .tree-empty { padding: 10px 12px; color: var(--fg-faint); font-size: 11.5px; font-family: var(--sans); }
 
 /* code / diff ----------------------------------------------------------- */

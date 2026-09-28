@@ -834,6 +834,16 @@ function buildTreeNodes(nodes, container) {
   for (const n of nodes) {
     const row = el('div', 'tree-row');
     row.dataset.path = n.path;
+    // 折叠箭头：目录才有；文件放一个等宽占位，名字才对得齐。
+    // 箭头的方向**不靠 JS 同步** —— CSS 用 :has(+ .tree-children:not([hidden])) 直接读
+    // 「我后面那个子容器是不是开着」，少一处会和真实状态不同步的地方。
+    if (n.isDir) {
+      const chev = el('span', 'chev');
+      chev.appendChild(ic('chevron-right'));
+      row.appendChild(chev);
+    } else {
+      row.appendChild(el('span', 'chev empty'));
+    }
     row.appendChild(ic(FILE_ICON(n.name, n.isDir), 't-icon'));
     row.appendChild(el('span', 't-name', n.name));
     if (!n.isDir && n.size != null) row.appendChild(el('span', 't-size', fmtBytes(n.size)));
