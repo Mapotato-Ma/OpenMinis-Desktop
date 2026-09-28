@@ -198,7 +198,7 @@ button { cursor: pointer; background: none; border: none; }
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border);
+  border-left: 1px solid var(--border);   /* 会话栏现在在最右 */
   min-height: 0;
 }
 .rail-head { display: flex; gap: 6px; padding: 10px 10px 6px; }
@@ -408,40 +408,50 @@ kbd {
 .tool-pre.err { color: var(--err); }
 
 /* composer -------------------------------------------------------------- */
-.composer { flex: 0 0 auto; padding: 8px 20px 10px; border-top: 1px solid var(--border); background: var(--bg); }
+/* ── composer ────────────────────────────────────────────────────────────
+   一体式输入框：文本域和控件在**同一个**圆角容器里 —— 左边是当前模型胶囊，
+   右边是提示/用量/发送。以前控件（勾选框、用量）单挂在框外一行。 */
+.composer { flex: 0 0 auto; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: var(--bg); }
 .composer-box {
   max-width: 900px; margin: 0 auto;
-  display: flex; align-items: flex-end; gap: 8px;
+  display: flex; flex-direction: column; gap: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  padding: 8px 8px 8px 12px;
+  border-radius: 14px;
+  padding: 10px 12px 8px;
   transition: border-color .12s;
 }
 .composer-box:focus-within { border-color: var(--accent-dim); }
 .composer-box textarea {
-  flex: 1 1 auto; resize: none; border: none; outline: none; background: none;
+  width: 100%; resize: none; border: none; outline: none; background: none;
   max-height: 210px; min-height: 22px; line-height: 1.55; font-size: 13.5px;
-  padding: 2px 0;
+  padding: 0;
 }
-.composer-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-.composer-hint { font-size: 10.5px; color: var(--fg-faint); font-family: var(--mono); }
+.composer-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.composer-left, .composer-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+/* 胶囊（左）：当前对话模型，点开跳到模型服务设置 */
+.mode-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px; border-radius: 999px;
+  background: var(--bg-raised); border: 1px solid var(--border);
+  color: var(--fg-muted); font-size: 12px; max-width: 260px;
+}
+.mode-pill:hover { border-color: var(--accent-dim); color: var(--fg); }
+.mode-pill.warn { border-color: var(--warn); color: var(--warn); }
+.mode-pill #modelPillLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mode-pill .pill-ic { font-size: 13px; color: var(--accent); }
+.mode-pill .pill-caret { font-size: 11px; opacity: .55; }
+
+.composer-hint, .composer-usage { font-size: 10.5px; color: var(--fg-faint); font-family: var(--mono); }
 .send-btn {
-  width: 28px; height: 28px; border-radius: 7px;
+  width: 30px; height: 30px; border-radius: 50%;
   background: var(--accent); color: var(--accent-ink);
-  font-size: 15px; font-weight: 700; line-height: 1;
+  font-size: 15px; line-height: 1;
   display: grid; place-items: center;
 }
 .send-btn:hover { background: var(--accent-strong); }
 .send-btn:disabled { background: var(--bg-active); color: var(--fg-faint); cursor: default; }
-.composer-foot {
-  max-width: 900px; margin: 6px auto 0;
-  display: flex; align-items: center; gap: 8px;
-  font-size: 10.5px; color: var(--fg-faint);
-}
-.mini-toggle { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-.mini-toggle input { accent-color: var(--accent); width: 12px; height: 12px; }
-.sep { color: var(--border-strong); }
 
 /* ── inspector ─────────────────────────────────────────────────────────── */
 .inspector {
@@ -450,7 +460,7 @@ kbd {
   min-width: 250px; max-width: 760px;
   display: flex; flex-direction: column;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);  /* inspector 现在在最左 */
   min-height: 0;
 }
 .inspector.hidden, .splitter.hidden { display: none; }
@@ -697,6 +707,9 @@ kbd {
 .settings-nav-item {
   display: flex;
   align-items: center;
+  /* 全局 button 规则是 justify-content: center（按钮文字居中）；菜单行要左对齐，
+     这里显式覆盖 —— 不写的话它会继承那个居中值。 */
+  justify-content: flex-start;
   gap: 9px;
   width: 100%;
   padding: 8px 11px;
@@ -971,6 +984,7 @@ kbd {
 .theme-menu button {
   display: flex;
   align-items: center;
+  justify-content: flex-start;   /* 同上：菜单行左对齐 */
   gap: 8px;
   width: 100%;
   padding: 7px 10px;

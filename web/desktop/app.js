@@ -928,8 +928,10 @@ function toggleInspector(force) {
 /* ── resizable panes ─────────────────────────────────────────────────── */
 function initSplitters() {
   const pairs = [
-    { splitter: 'splitRail', pane: 'rail', varName: '--rail-w', min: 190, max: 460, invert: false },
-    { splitter: 'splitInspector', pane: 'inspector', varName: '--inspector-w', min: 250, max: 760, invert: true },
+    // invert = 拖拽方向相反：右边那块（会话栏）往左拖才是变宽，所以 invert 为真；
+    // 左边那块（inspector）方向不变。换位置时这两个标记必须跟着换。
+    { splitter: 'splitInspector', pane: 'inspector', varName: '--inspector-w', min: 250, max: 760, invert: false },
+    { splitter: 'splitRail', pane: 'rail', varName: '--rail-w', min: 190, max: 460, invert: true },
   ];
   for (const cfg of pairs) {
     const node = $(cfg.splitter);
@@ -1293,6 +1295,7 @@ function wire() {
   $('btnInspector').addEventListener('click', () => toggleInspector());
   $('btnTheme').addEventListener('click', (e) => { e.stopPropagation(); openThemeMenu(); });
   $('btnSettings').addEventListener('click', () => openSettings());
+  $('btnModel').addEventListener('click', () => openSettings('models'));
   $('btnSettingsClose').addEventListener('click', confirmCloseSettings);
   document.querySelectorAll('.settings-nav-item').forEach((b) => {
     b.addEventListener('click', () => switchSettingsPane(b.dataset.pane));
@@ -1380,6 +1383,7 @@ async function boot() {
 
   await loadSessions();
   loadTree();
+  refreshModelPill();
   loadInfo();
   $('input').focus();
   autoGrow();
@@ -1701,10 +1705,33 @@ async function renderModelsHealth() {
   if (seq !== healthSeq) return;   // 已经有更新的一次在跑了，丢掉这次的结果
   lastReadiness = readiness;
   healthDrawn = true;
+  refreshModelPill();   // 设置里换了绑定，输入框那个胶囊要跟着变
   drawHealth(box, SettingsModel.readinessBanner(readiness, {
     dirty: sdirty().any,
     providerCount: sview().providers.length,
   }));
+}
+
+/** 输入框左侧那个胶囊：显示当前对话绑定的模型，点它跳到设置里的模型服务。
+ *
+ * 这个位置以前放的是一个「自动执行工具」勾选框 —— 实测它全项目只有 index.html
+ * 引用、没有任何 JS 读它，内核协议里也没有「审批工具」这种东西，是个死控件。
+ * 现在换成有真数据来源的一个（/desktop/chat-readiness）。 */
+async function refreshModelPill() {
+  const label = $('modelPillLabel');
+  const pill = $('btnModel');
+  if (!label || !pill) return;
+  let r = null;
+  try { r = await api('/desktop/chat-readiness'); } catch { r = null; }
+  if (r && r.ready) {
+    label.textContent = r.model ? `${r.label} · ${r.model}` : (r.label || '已配置');
+    pill.classList.remove('warn');
+    pill.title = `当前对话：${r.label || ''} ${r.model || ''}`.trim() + ' —— 点击打开模型服务设置';
+  } else {
+    label.textContent = '未配置模型';
+    pill.classList.add('warn');
+    pill.title = '还没绑定对话用的模型 —— 点击去设置';
+  }
 }
 
 /** 脏状态变了就只重画那一句，不再问一次服务端（打字时不该每敲一个字发一个请求）。 */

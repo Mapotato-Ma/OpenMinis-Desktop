@@ -48,69 +48,7 @@
   <!-- ── main body ───────────────────────────────────────────────── -->
   <div class="body" id="body">
 
-    <!-- sessions rail -->
-    <aside class="rail" id="rail">
-      <div class="rail-head">
-        <button class="new-session" id="btnNewSession"><span>＋</span> 新会话</button>
-        <button class="icon-btn" id="btnReloadSessions" title="刷新"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
-      </div>
-      <div class="rail-search">
-        <input id="sessionFilter" type="search" placeholder="过滤会话…" autocomplete="off">
-      </div>
-      <div class="session-list" id="sessionList"></div>
-      <div class="rail-foot">
-        <button class="rail-foot-btn" id="btnSkills" title="技能"><wa-icon library="om" name="zap"></wa-icon> 技能</button>
-        <button class="rail-foot-btn" id="btnMemory" title="记忆"><wa-icon library="om" name="brain"></wa-icon> 记忆</button>
-      </div>
-    </aside>
-
-    <div class="splitter" id="splitRail" title="拖动调整宽度"></div>
-
-    <!-- chat -->
-    <main class="chat" id="chatPane">
-      <div class="chat-head">
-        <div class="chat-title" id="chatTitle">未选择会话</div>
-        <div class="chat-meta">
-          <span class="meta-item" id="metaModel">—</span>
-          <button class="icon-btn" id="btnStop" title="停止生成" hidden><wa-icon library="om" name="square"></wa-icon> 停止</button>
-        </div>
-      </div>
-
-      <div class="chat-scroll" id="messages">
-        <div class="empty-state" id="emptyState">
-          <div class="empty-logo"><wa-icon library="om" name="diamond"></wa-icon></div>
-          <h2>OpenMinis Desktop</h2>
-          <p>本机 AI Agent，带一个真正的 shell。</p>
-          <div class="hint-grid">
-            <div class="hint"><kbd>Ctrl</kbd><kbd>K</kbd><span>命令面板</span></div>
-            <div class="hint"><kbd>Ctrl</kbd><kbd>`</kbd><span>终端</span></div>
-            <div class="hint"><kbd>Ctrl</kbd><kbd>B</kbd><span>右侧面板</span></div>
-            <div class="hint"><kbd>Enter</kbd><span>发送</span></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="composer">
-        <div class="composer-box">
-          <textarea id="input" rows="1" placeholder="描述你的任务…  (Enter 发送 / Shift+Enter 换行)"></textarea>
-          <div class="composer-actions">
-            <span class="composer-hint" id="composerHint"></span>
-            <button class="send-btn" id="btnSend" title="发送 (Enter)"><wa-icon library="om" name="arrow-up"></wa-icon></button>
-          </div>
-        </div>
-        <div class="composer-foot">
-          <label class="mini-toggle" title="允许 agent 执行 shell 命令">
-            <input type="checkbox" id="optAutoApprove" checked> <span>自动执行工具</span>
-          </label>
-          <span class="sep">·</span>
-          <span id="tokenUsage">—</span>
-        </div>
-      </div>
-    </main>
-
-    <div class="splitter" id="splitInspector" title="拖动调整宽度"></div>
-
-    <!-- inspector -->
+    <!-- inspector：文件 / 代码 / 变更 / 信息（左） -->
     <aside class="inspector" id="inspector">
       <div class="tabs" id="inspectorTabs">
         <button class="tab active" data-tab="files">文件</button>
@@ -154,6 +92,72 @@
         <div class="info-list" id="infoList"><div class="placeholder">加载中…</div></div>
       </div>
     </aside>
+
+    <div class="splitter" id="splitInspector" title="拖动调整宽度"></div>
+
+    <!-- chat -->
+    <main class="chat" id="chatPane">
+      <div class="chat-head">
+        <div class="chat-title" id="chatTitle">未选择会话</div>
+        <div class="chat-meta">
+          <span class="meta-item" id="metaModel">—</span>
+          <button class="icon-btn" id="btnStop" title="停止生成" hidden><wa-icon library="om" name="square"></wa-icon> 停止</button>
+        </div>
+      </div>
+
+      <div class="chat-scroll" id="messages">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-logo"><wa-icon library="om" name="diamond"></wa-icon></div>
+          <h2>OpenMinis Desktop</h2>
+          <p>本机 AI Agent，带一个真正的 shell。</p>
+          <div class="hint-grid">
+            <div class="hint"><kbd>Ctrl</kbd><kbd>K</kbd><span>命令面板</span></div>
+            <div class="hint"><kbd>Ctrl</kbd><kbd>`</kbd><span>终端</span></div>
+            <div class="hint"><kbd>Ctrl</kbd><kbd>B</kbd><span>左侧面板</span></div>
+            <div class="hint"><kbd>Enter</kbd><span>发送</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="描述你的任务…（Enter 发送 · Shift+Enter 换行）"></textarea>
+          <div class="composer-row">
+            <div class="composer-left">
+              <button class="mode-pill" id="btnModel" title="当前对话模型 —— 点击打开模型服务设置">
+                <wa-icon library="om" name="sparkles" class="pill-ic"></wa-icon>
+                <span id="modelPillLabel">未配置模型</span>
+                <wa-icon library="om" name="chevron-right" class="pill-caret"></wa-icon>
+              </button>
+            </div>
+            <div class="composer-right">
+              <span class="composer-hint" id="composerHint"></span>
+              <span class="composer-usage" id="tokenUsage">—</span>
+              <button class="send-btn" id="btnSend" title="发送 (Enter)"><wa-icon library="om" name="arrow-up"></wa-icon></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <div class="splitter" id="splitRail" title="拖动调整宽度"></div>
+
+    <!-- 会话栏（右） -->
+    <aside class="rail" id="rail">
+      <div class="rail-head">
+        <button class="new-session" id="btnNewSession"><span>＋</span> 新会话</button>
+        <button class="icon-btn" id="btnReloadSessions" title="刷新"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
+      </div>
+      <div class="rail-search">
+        <input id="sessionFilter" type="search" placeholder="过滤会话…" autocomplete="off">
+      </div>
+      <div class="session-list" id="sessionList"></div>
+      <div class="rail-foot">
+        <button class="rail-foot-btn" id="btnSkills" title="技能"><wa-icon library="om" name="zap"></wa-icon> 技能</button>
+        <button class="rail-foot-btn" id="btnMemory" title="记忆"><wa-icon library="om" name="brain"></wa-icon> 记忆</button>
+      </div>
+    </aside>
+
   </div>
 
   <!-- ── terminal drawer ─────────────────────────────────────────── -->
