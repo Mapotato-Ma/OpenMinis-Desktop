@@ -48,42 +48,50 @@
   <!-- ── main body ───────────────────────────────────────────────── -->
   <div class="body" id="body">
 
-    <!-- inspector：文件 / 代码 / 变更 / 信息（左） -->
-    <aside class="inspector" id="inspector">
-      <div class="tabs" id="inspectorTabs">
-        <button class="tab active" data-tab="files">文件</button>
-        <button class="tab" data-tab="code">代码</button>
-        <button class="tab" data-tab="diff">变更</button>
-        <button class="tab" data-tab="info">信息</button>
-      </div>
+    <!-- 活动栏（VS Code 式）：最左一条竖图标，决定侧栏显示哪个面板。
+         再点当前选中的图标 = 收起侧栏（和 VS Code 的操作一致）。 -->
+    <nav class="activitybar" id="activityBar">
+      <button class="ab-btn active" data-ab="files" title="文件"><wa-icon library="om" name="files"></wa-icon></button>
+      <button class="ab-btn" data-ab="sessions" title="会话"><wa-icon library="om" name="messages-square"></wa-icon></button>
+      <button class="ab-btn" data-ab="info" title="信息"><wa-icon library="om" name="info"></wa-icon></button>
+      <div class="ab-spacer"></div>
+      <button class="ab-btn" id="abSettings" title="设置 (Ctrl+,)"><wa-icon library="om" name="settings"></wa-icon></button>
+      <button class="ab-btn" id="abCollapse" title="收起侧栏 (Ctrl+B)"><wa-icon library="om" name="panel-left"></wa-icon></button>
+    </nav>
 
+    <!-- 侧栏：活动栏选中哪个，这里显示哪个面板（文件 / 会话 / 信息） -->
+    <aside class="inspector" id="inspector">
       <div class="tab-panel active" data-panel="files">
         <div class="panel-head">
-          <span class="panel-title">工作目录</span>
-          <button class="icon-btn" id="btnRefreshTree" title="刷新"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
+          <span class="panel-title">文件</span>
+          <span class="panel-actions">
+            <button class="icon-btn" id="btnPickRoot" title="指定一个目录作为根目录"><wa-icon library="om" name="folder"></wa-icon></button>
+            <button class="icon-btn" id="btnRefreshTree" title="刷新"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
+          </span>
+        </div>
+        <!-- 文件树的根：默认是内核给 agent 的工作目录，也可以指向你自己指定的目录 -->
+        <div class="ws-bar">
+          <wa-select id="wsPicker" size="small" placeholder="默认工作目录"></wa-select>
+          <div class="ws-path" id="wsCurrentPath"></div>
         </div>
         <div class="tree" id="fileTree"></div>
       </div>
 
-      <div class="tab-panel" data-panel="code">
+      <div class="tab-panel" data-panel="sessions">
         <div class="panel-head">
-          <span class="panel-title" id="codePath">未打开文件</span>
+          <span class="panel-title">会话</span>
           <span class="panel-actions">
-            <button class="icon-btn" id="btnCopyCode" title="复制"><wa-icon library="om" name="copy"></wa-icon></button>
-            <button class="icon-btn" id="btnCloseCode" title="关闭"><wa-icon library="om" name="x"></wa-icon></button>
+            <button class="icon-btn" id="btnReloadSessions" title="刷新"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
           </span>
         </div>
-        <div class="code-wrap" id="codeView">
-          <div class="placeholder">在左侧文件树中选择一个文件</div>
+        <button class="new-session" id="btnNewSession"><span>＋</span> 新会话</button>
+        <div class="rail-search">
+          <input id="sessionFilter" type="search" placeholder="过滤会话…" autocomplete="off">
         </div>
-      </div>
-
-      <div class="tab-panel" data-panel="diff">
-        <div class="panel-head">
-          <span class="panel-title" id="diffPath">本会话的文件变更</span>
-        </div>
-        <div class="code-wrap" id="diffView">
-          <div class="placeholder">Agent 编辑文件后，这里显示 diff</div>
+        <div class="session-list" id="sessionList"></div>
+        <div class="rail-foot">
+          <button class="rail-foot-btn" id="btnSkills" title="技能"><wa-icon library="om" name="zap"></wa-icon> 技能</button>
+          <button class="rail-foot-btn" id="btnMemory" title="记忆"><wa-icon library="om" name="brain"></wa-icon> 记忆</button>
         </div>
       </div>
 
@@ -95,8 +103,39 @@
 
     <div class="splitter" id="splitInspector" title="拖动调整宽度"></div>
 
-    <!-- chat -->
-    <main class="chat" id="chatPane">
+    <!-- 编辑器（中间）：没打开文件时是欢迎页，打开文件后换成全宽预览 -->
+    <main class="editor" id="editor">
+      <div class="editor-welcome" id="editorWelcome">
+        <div class="empty-logo"><wa-icon library="om" name="diamond"></wa-icon></div>
+        <h2>OpenMinis Desktop</h2>
+        <p>在左侧选一个文件，这里全宽显示；右边与 agent 对话。</p>
+        <div class="hint-grid">
+          <div class="hint"><kbd>Ctrl</kbd><kbd>K</kbd><span>命令面板</span></div>
+          <div class="hint"><kbd>Ctrl</kbd><kbd>`</kbd><span>终端</span></div>
+          <div class="hint"><kbd>Ctrl</kbd><kbd>B</kbd><span>侧栏</span></div>
+          <div class="hint"><kbd>Esc</kbd><span>关闭文件</span></div>
+        </div>
+      </div>
+      <!-- 中间的文件预览（只读）：点文件树里的文件就在这里全宽看代码。
+           打开时它接替对话区，Esc 或右上角 × 回到对话。 -->
+      <div class="file-view" id="fileView">
+        <div class="file-head">
+          <span class="file-name" id="fileTitle">—</span>
+          <span class="file-path" id="filePath">—</span>
+          <span class="file-actions">
+            <button class="icon-btn" id="btnCopyFile" title="复制全文"><wa-icon library="om" name="copy"></wa-icon></button>
+            <button class="icon-btn" id="btnCloseFile" title="关闭 (Esc)"><wa-icon library="om" name="x"></wa-icon></button>
+          </span>
+        </div>
+        <div class="code-wrap" id="fileBody"></div>
+      </div>
+
+    </main>
+
+    <div class="splitter" id="splitChat" title="拖动调整宽度"></div>
+
+    <!-- 对话（右）：agent 的会话流 + 输入框 -->
+    <aside class="chat" id="chatPane">
       <div class="chat-head">
         <div class="chat-title" id="chatTitle">未选择会话</div>
         <div class="chat-meta">
@@ -107,15 +146,7 @@
 
       <div class="chat-scroll" id="messages">
         <div class="empty-state" id="emptyState">
-          <div class="empty-logo"><wa-icon library="om" name="diamond"></wa-icon></div>
-          <h2>OpenMinis Desktop</h2>
-          <p>本机 AI Agent，带一个真正的 shell。</p>
-          <div class="hint-grid">
-            <div class="hint"><kbd>Ctrl</kbd><kbd>K</kbd><span>命令面板</span></div>
-            <div class="hint"><kbd>Ctrl</kbd><kbd>`</kbd><span>终端</span></div>
-            <div class="hint"><kbd>Ctrl</kbd><kbd>B</kbd><span>左侧面板</span></div>
-            <div class="hint"><kbd>Enter</kbd><span>发送</span></div>
-          </div>
+          <p>还没有选中会话 —— 按 <kbd>Ctrl</kbd>+<kbd>N</kbd> 新建，或在左侧「会话」里挑一个。</p>
         </div>
       </div>
 
@@ -137,24 +168,6 @@
             </div>
           </div>
         </div>
-      </div>
-    </main>
-
-    <div class="splitter" id="splitRail" title="拖动调整宽度"></div>
-
-    <!-- 会话栏（右） -->
-    <aside class="rail" id="rail">
-      <div class="rail-head">
-        <button class="new-session" id="btnNewSession"><span>＋</span> 新会话</button>
-        <button class="icon-btn" id="btnReloadSessions" title="刷新"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
-      </div>
-      <div class="rail-search">
-        <input id="sessionFilter" type="search" placeholder="过滤会话…" autocomplete="off">
-      </div>
-      <div class="session-list" id="sessionList"></div>
-      <div class="rail-foot">
-        <button class="rail-foot-btn" id="btnSkills" title="技能"><wa-icon library="om" name="zap"></wa-icon> 技能</button>
-        <button class="rail-foot-btn" id="btnMemory" title="记忆"><wa-icon library="om" name="brain"></wa-icon> 记忆</button>
       </div>
     </aside>
 

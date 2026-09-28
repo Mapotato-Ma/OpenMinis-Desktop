@@ -37,8 +37,10 @@
   --mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 
-  --rail-w: 268px;
-  --inspector-w: 420px;
+  /* 布局宽度：左=侧栏（活动栏选中的面板），右=对话。都能拖。
+     （以前是 --inspector-w 给侧栏、--rail-w 给右边的会话栏；B 布局后语义换了。） */
+  --sidebar-w: 300px;
+  --chat-w: 460px;
   --titlebar-h: 40px;
   --statusbar-h: 26px;
   --radius: 7px;
@@ -190,18 +192,6 @@ button { cursor: pointer; background: none; border: none; }
 .splitter:hover::after, .splitter.dragging::after { background: var(--accent-dim); }
 
 /* ── rail ──────────────────────────────────────────────────────────────── */
-.rail {
-  flex: 0 0 var(--rail-w);
-  width: var(--rail-w);
-  min-width: 190px;
-  max-width: 460px;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border-left: 1px solid var(--border);   /* 会话栏现在在最右 */
-  min-height: 0;
-}
-.rail-head { display: flex; gap: 6px; padding: 10px 10px 6px; }
 .new-session {
   flex: 1 1 auto;
   display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -247,6 +237,7 @@ button { cursor: pointer; background: none; border: none; }
 .session-item .s-del:hover { color: var(--err); background: rgba(240,97,109,.12); }
 
 .rail-foot { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); }
+.tab-panel[data-panel="sessions"] .new-session { margin: 0 10px 8px; }
 .rail-foot-btn {
   flex: 1 1 0; padding: 6px; border-radius: 6px; font-size: 11.5px;
   color: var(--fg-muted); border: 1px solid var(--border);
@@ -255,9 +246,13 @@ button { cursor: pointer; background: none; border: none; }
 
 /* ── chat ──────────────────────────────────────────────────────────────── */
 .chat {
-  flex: 1 1 auto;
+  /* B 布局：对话在右侧，宽度自己定（可拖），中间留给编辑器 */
+  flex: 0 0 var(--chat-w);
+  width: var(--chat-w);
+  min-width: 320px; max-width: 900px;
   display: flex; flex-direction: column;
-  min-width: 320px; min-height: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
   background: var(--bg);
 }
 .chat-head {
@@ -408,6 +403,54 @@ kbd {
 .tool-pre.err { color: var(--err); }
 
 /* composer -------------------------------------------------------------- */
+/* 文件页签的工作区选择：默认是内核给 agent 的工作目录，
+   也可以指向你自己指定的目录（内核的 workspaces 机制，fs 接口按 id 解析根）。 */
+.ws-bar { flex: 0 0 auto; padding: 0 10px 8px; display: flex; flex-direction: column; gap: 4px; }
+.ws-bar wa-select { width: 100%; }
+.ws-path {
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 「指定目录」弹窗 */
+.ws-form { display: flex; flex-direction: column; gap: 6px; }
+.ws-form-label { font-size: 11.5px; color: var(--fg-muted); margin-top: 4px; }
+.ws-form-row { display: flex; gap: 6px; align-items: center; }
+.ws-form-row input { flex: 1 1 auto; min-width: 0; }
+.ws-form-hint { font-size: 11px; color: var(--fg-faint); }
+.ws-form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+
+/* ── 中间的文件预览 ──────────────────────────────────────────────────────
+   点文件树里的文件就在中间全宽打开（只读），打开时它接替对话区 ——
+   写代码/看代码要的是宽度，而左侧那块面板只有几百像素。
+   用 #chatPane 上的一个类切模式，不用碰 display 与 hidden 的优先级。 */
+/* 编辑器（中间那块）：没打开文件时显示欢迎页，打开后显示全宽预览 */
+.editor {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  min-width: 320px; min-height: 0; background: var(--bg);
+}
+.editor-welcome {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px;
+  padding: 40px 24px; text-align: center; color: var(--fg-muted);
+}
+.editor-welcome h2 { margin: 10px 0 4px; font-size: 17px; color: var(--fg-strong); font-weight: 620; }
+.editor-welcome p { margin: 0 0 22px; font-size: 12.5px; }
+.editor.file-open .editor-welcome { display: none; }
+
+.file-view { display: none; min-height: 0; }
+.editor.file-open .file-view { display: flex; flex-direction: column; flex: 1 1 auto; }
+.file-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg-panel); min-height: 38px;
+}
+.file-name { flex: 0 0 auto; font-size: 12.5px; font-weight: 620; color: var(--fg-strong); }
+.file-path {
+  flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 11px; color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+
 /* ── composer ────────────────────────────────────────────────────────────
    一体式输入框：文本域和控件在**同一个**圆角容器里 —— 左边是当前模型胶囊，
    右边是提示/用量/发送。以前控件（勾选框、用量）单挂在框外一行。 */
@@ -455,9 +498,9 @@ kbd {
 
 /* ── inspector ─────────────────────────────────────────────────────────── */
 .inspector {
-  flex: 0 0 var(--inspector-w);
-  width: var(--inspector-w);
-  min-width: 250px; max-width: 760px;
+  flex: 0 0 var(--sidebar-w);
+  width: var(--sidebar-w);
+  min-width: 200px; max-width: 560px;
   display: flex; flex-direction: column;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);  /* inspector 现在在最左 */
@@ -465,13 +508,27 @@ kbd {
 }
 .inspector.hidden, .splitter.hidden { display: none; }
 
-.tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid var(--border); padding: 0 4px; }
-.tab {
-  padding: 9px 11px; font-size: 12px; color: var(--fg-muted);
-  border-bottom: 2px solid transparent; margin-bottom: -1px;
+/* ── 活动栏（VS Code 式）────────────────────────────────────────────────
+   最左一条 46px 的竖图标，点它决定侧栏显示哪个面板；
+   再点当前这个 = 收起侧栏。选中的图标左边有一条 accent 竖线（VS Code 的习惯）。 */
+.activitybar {
+  flex: 0 0 46px; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 6px 0; background: var(--bg-panel);
+  border-right: 1px solid var(--border);
 }
-.tab:hover { color: var(--fg); }
-.tab.active { color: var(--fg-strong); border-bottom-color: var(--accent); }
+.ab-btn {
+  position: relative; width: 34px; height: 34px;
+  display: grid; place-items: center; border-radius: 6px;
+  color: var(--fg-faint);
+}
+.ab-btn wa-icon { font-size: 19px; }
+.ab-btn:hover { color: var(--fg-strong); background: var(--bg-hover); }
+.ab-btn.active { color: var(--fg-strong); }
+.ab-btn.active::before {
+  content: ""; position: absolute; left: -6px; top: 6px; bottom: 6px;
+  width: 2px; border-radius: 2px; background: var(--accent);
+}
+.ab-spacer { flex: 1 1 auto; }
 
 .tab-panel { display: none; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 .tab-panel.active { display: flex; }
@@ -520,14 +577,6 @@ kbd {
 .code-table .src { padding: 0 14px 0 10px; white-space: pre; }
 .code-table tr:hover .ln { color: var(--fg-muted); }
 
-.diff-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; line-height: 1.6; }
-.diff-table td { padding: 0 6px; vertical-align: top; white-space: pre; }
-.diff-table td.ln { width: 1%; text-align: right; color: var(--fg-faint); user-select: none; padding: 0 8px; }
-.diff-table tr.add { background: rgba(91,140,255,.15); }
-.diff-table tr.add td.ln { color: var(--accent-strong); }
-.diff-table tr.del { background: rgba(240,97,109,.14); }
-.diff-table tr.del td.ln { color: var(--err); }
-.diff-table tr.ctx td.ln { color: var(--fg-faint); }
 
 /* syntax highlight ------------------------------------------------------ */
 .tok-com { color: #6b7378; font-style: italic; }

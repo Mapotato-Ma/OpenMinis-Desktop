@@ -84,6 +84,22 @@ test('组件库接线没掉（样式表在、主题类跟着 data-theme 走）',
   }
 });
 
+test('文件面板与中间预览的接线没掉', () => {
+  const html = read('index.html');
+  for (const need of ['id="fileView"', 'id="fileBody"', 'id="wsPicker"', 'id="btnPickRoot"',
+                      'id="btnCloseFile"', 'id="fileTitle"']) {
+    assert.ok(html.includes(need), `index.html 里没有 ${need}`);
+  }
+  const app = read('app.js');
+  // 关键回归点：每一次 /fs 调用都得走 fsUrl()（带当前工作区）。
+  // 漏一处的表现是「在指定目录里点文件夹是空的」—— 我第一版就漏了展开那一处。
+  const raw = app.split('\n').filter((l) => /api\(`\/fs\//.test(l));
+  assert.deepEqual(raw, [], `这些 /fs 调用没走 fsUrl()：\n${raw.join('\n')}`);
+  assert.ok(app.includes('function fsUrl('), 'app.js 里没有 fsUrl()');
+  assert.ok(app.includes("send('/chats/workspaces'".replace("send", "api")) || app.includes("api('/chats/workspaces'"),
+    '工作区接口路径不对（内核挂在 /api/chats 下面）');
+});
+
 test('全部脚本拼起来能解析（跨脚本的重复声明会在这里现形）', () => {
   const scripts = classicScripts().filter((s) => s.endsWith('.js'));
   // 关键：**拼成一个程序再解析** —— 每个文件单独看都是合法的，只有放回

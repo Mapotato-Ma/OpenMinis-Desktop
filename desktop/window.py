@@ -62,6 +62,35 @@ class WindowAPI:
         except Exception:  # pragma: no cover
             logger.debug("destroy unsupported", exc_info=True)
 
+    def pick_folder(self, initial: str = "") -> str:
+        """Open the native "choose a folder" dialog; return the path, or "".
+
+        This one belongs in the shell rather than over HTTP: it needs the GUI
+        process, and pywebview marshals JS→Python calls onto that thread for us.
+        A headless run (dev server, smoke test) simply reports "cancelled".
+        """
+        # pywebview 的对话框类型是字符串常量（FOLDER_DIALOG == 'FOLDER_DIALOG'）。
+        # 能导入就用它的常量（权威），导入不到就用字符串 —— 后者让这个方法在没有
+        # GUI 的环境里也能被测试（CI 上没有 pywebview）。
+        dialog_type: Any = "FOLDER_DIALOG"
+        try:
+            import webview  # noqa: PLC0415
+
+            dialog_type = getattr(webview, "FOLDER_DIALOG", dialog_type)
+        except Exception:
+            pass
+
+        try:
+            start = initial if initial and Path(initial).is_dir() else ""
+            result = self._window.create_file_dialog(dialog_type, directory=start)
+        except Exception:  # pragma: no cover - dialog is host-specific
+            logger.debug("folder dialog unsupported", exc_info=True)
+            return ""
+        if not result:
+            return ""
+        first = result[0] if isinstance(result, (list, tuple)) else result
+        return str(first or "")
+
     def open_in_file_manager(self, path: str) -> bool:
         """Reveal a path in Explorer / Finder / the desktop's file manager."""
         import subprocess  # noqa: PLC0415

@@ -588,7 +588,6 @@ async function newSession() {
       $('messages').innerHTML = '';
       $('messages').appendChild(emptyNode());
       emptyNode().style.display = '';
-      renderDiff();
       await loadSessions();
       updateSessionHeader();
       $('input').focus();
@@ -667,7 +666,6 @@ function renderMessages(messages) {
     if (!isUser && m.text) addMessageActions(node, m.text);
     box.appendChild(node);
   }
-  renderDiff();
   scrollChat(true);
 }
 
@@ -682,68 +680,11 @@ function recordChange(kind, input) {
     old: kind === 'file_edit' ? (input.old_string ?? input.oldString ?? '') : '',
     neu: kind === 'file_edit' ? (input.new_string ?? input.newString ?? '') : (input.content ?? ''),
   });
-  renderDiff();
 }
 
-function diffRows(oldText, newText) {
-  // Line diff by longest-common-subsequence. The snippets an agent edits are
-  // small, so the O(n*m) table is affordable and the result reads far better
-  // than a naive "all deletions then all insertions" listing.
-  const a = String(oldText).replace(/\n$/, '').split('\n');
-  const b = String(newText).replace(/\n$/, '').split('\n');
-  if (a.length > 1500 || b.length > 1500) {
-    return a.map((l) => ({ t: 'del', l })).concat(b.map((l) => ({ t: 'add', l })));
-  }
-  const n = a.length; const m = b.length;
-  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const out = [];
-  let i = 0; let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { out.push({ t: 'ctx', l: a[i] }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: 'del', l: a[i] }); i++; }
-    else { out.push({ t: 'add', l: b[j] }); j++; }
-  }
-  while (i < n) out.push({ t: 'del', l: a[i++] });
-  while (j < m) out.push({ t: 'add', l: b[j++] });
-  return out;
-}
-
-function renderDiff() {
-  const view = $('diffView');
-  view.innerHTML = '';
-  if (!state.changes.length) {
-    view.appendChild(el('div', 'placeholder', 'Agent 编辑文件后，这里显示 diff'));
-    return;
-  }
-  for (const ch of state.changes.slice(-12).reverse()) {
-    const head = el('div', 'panel-head');
-    head.appendChild(el('span', 'panel-title', ch.path));
-    head.appendChild(el('span', 'meta-item', ch.kind === 'file_edit' ? '编辑' : '写入'));
-    view.appendChild(head);
-
-    const rows = ch.kind === 'file_edit' ? diffRows(ch.old, ch.neu) : diffRows('', ch.neu);
-    const table = el('table', 'diff-table');
-    const tbody = el('tbody');
-    let ln = 0;
-    for (const r of rows) {
-      if (r.t !== 'del') ln++;
-      const tr = el('tr', r.t);
-      tr.appendChild(el('td', 'ln', r.t === 'del' ? '' : String(ln)));
-      const sign = r.t === 'add' ? '+ ' : r.t === 'del' ? '- ' : '  ';
-      const td = el('td', null);
-      td.innerHTML = esc(sign + r.l);
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    view.appendChild(table);
-  }
-}
+/* 会话语义的文件改动仍在 state.changes 里收集（工具事件里 push），
+   但**不再有面板渲染它** —— 代码 / 变更两个面板已按需求撤掉。
+   数据留着：以后要在中间开一个「本次会话改动」视图，直接用这份数据。 */
 
 /* ── file tree ───────────────────────────────────────────────────────── */
 const FILE_ICON = (name, isDir) => {
@@ -758,10 +699,121 @@ const FILE_ICON = (name, isDir) => {
   return 'file';
 };
 
+/* ── 工作区（文件树的根）─────────────────────────────────────────────────
+   内核本来就支持「用户指定路径的工作区」：POST /workspaces {name, path} 建一个，
+   fs 接口按 ?workspace=<id> 解析根目录。所以这里只是把它接到界面上 ——
+   不自己读盘，也不越过内核那层路径解析。 */
+const WS_KEY = 'om.workspaceId';
+let workspaces = [];
+let currentWorkspace = '';
+
+/** 文件接口的 URL：带上当前工作区（空 = 内核默认工作区，不用带）。 */
+function fsUrl(kind, params) {
+  const q = new URLSearchParams(params);
+  if (currentWorkspace) q.set('workspace', currentWorkspace);
+  return `/fs/${kind}?${q.toString()}`;
+}
+
+async function loadWorkspaces() {
+  try {
+    const d = await api('/chats/workspaces');
+    workspaces = (d && d.workspaces) || [];
+  } catch { workspaces = []; }
+  // 选中的那个可能已经被删了 → 退回默认，别指着一个不存在的工作区
+  if (currentWorkspace && !workspaces.some((w) => w.id === currentWorkspace)) {
+    currentWorkspace = '';
+    try { localStorage.removeItem(WS_KEY); } catch { /* private mode */ }
+  }
+  renderWorkspacePicker();
+}
+
+function renderWorkspacePicker() {
+  const sel = $('wsPicker');
+  if (!sel) return;
+  sel.innerHTML = '';
+  const def = document.createElement('wa-option');
+  def.value = '';
+  def.textContent = '默认工作目录（agent 的沙盒）';
+  sel.appendChild(def);
+  for (const w of workspaces) {
+    const o = document.createElement('wa-option');
+    o.value = w.id;
+    o.textContent = w.name + (w.path ? ' · ' + w.path : '');
+    sel.appendChild(o);
+  }
+  sel.value = currentWorkspace;
+  const cur = workspaces.find((w) => w.id === currentWorkspace);
+  const shown = (cur && cur.path) || '';
+  $('wsCurrentPath').textContent = shown || '（内核默认工作区）';
+  $('wsCurrentPath').title = shown || '内核默认工作区';
+}
+
+/** 「指定目录」：给文件树换一个根。走内核的工作区接口，界面不直接读盘。 */
+function promptForRoot() {
+  const form = el('div', 'ws-form');
+  const cur = workspaces.find((w) => w.id === currentWorkspace);
+  const pathInput = el('input');
+  pathInput.type = 'text';
+  pathInput.placeholder = '绝对路径，例如 D:\\projects\\my-app';
+  pathInput.value = (cur && cur.path) || '';
+  const nameInput = el('input');
+  nameInput.type = 'text';
+  nameInput.placeholder = '显示名称（留空就用目录名）';
+  nameInput.value = (cur && cur.name) || '';
+
+  const row = el('div', 'ws-form-row');
+  row.appendChild(pathInput);
+  const browse = el('button', 'btn ghost', '浏览…');
+  browse.addEventListener('click', async () => {
+    const bridge = window.pywebview && window.pywebview.api;
+    if (!bridge || !bridge.pick_folder) {
+      toast('这个环境没有系统文件夹对话框 —— 手动粘贴路径也一样');
+      return;
+    }
+    const picked = await bridge.pick_folder(pathInput.value.trim());
+    if (picked) pathInput.value = picked;
+  });
+  row.appendChild(browse);
+
+  form.appendChild(el('div', 'ws-form-label', '目录'));
+  form.appendChild(row);
+  form.appendChild(el('div', 'ws-form-label', '名称'));
+  form.appendChild(nameInput);
+  form.appendChild(el('div', 'ws-form-hint',
+    '内核只要求绝对路径（目录暂时不存在也可以先填）。选它会成为一个可复用的工作区。'));
+
+  const actions = el('div', 'ws-form-actions');
+  const ok = el('button', 'btn', currentWorkspace ? '更新这个工作区' : '添加为工作区');
+  ok.addEventListener('click', async () => {
+    const path = pathInput.value.trim();
+    if (!path) { toast('先填一个目录', 'err'); return; }
+    const name = nameInput.value.trim()
+      || path.split(/[\\/]/).filter(Boolean).pop() || '工作目录';
+    try {
+      const saved = currentWorkspace
+        ? await api(`/chats/workspaces/${encodeURIComponent(currentWorkspace)}`,
+                    { method: 'PATCH', body: JSON.stringify({ path, name }) })
+        : await api('/chats/workspaces', { method: 'POST', body: JSON.stringify({ name, path }) });
+      currentWorkspace = (saved && saved.id) || currentWorkspace;
+      try { localStorage.setItem(WS_KEY, currentWorkspace); } catch { /* private mode */ }
+      $('modalOverlay').hidden = true;
+      await loadWorkspaces();
+      await loadTree();
+      toast('文件树的根已切换');
+    } catch (e) { toast('设置失败: ' + e.message, 'err'); }
+  });
+  const cancel = el('button', 'btn ghost', '取消');
+  cancel.addEventListener('click', () => { $('modalOverlay').hidden = true; });
+  actions.appendChild(ok);
+  actions.appendChild(cancel);
+  form.appendChild(actions);
+  openModal('指定目录', form);
+}
+
 async function loadTree(path = '', container = $('fileTree'), depth = 2) {
   container.innerHTML = '<div class="tree-empty">加载中…</div>';
   try {
-    const data = await api(`/fs/tree?path=${encodeURIComponent(path)}&depth=${depth}`);
+    const data = await api(fsUrl('tree', { path, depth }));
     container.innerHTML = '';
     const kids = (data && data.children) || [];
     if (!kids.length) {
@@ -797,7 +849,9 @@ function buildTreeNodes(nodes, container) {
           sub.appendChild(el('div', 'tree-empty', '加载中…'));
           kids.appendChild(sub);
           try {
-            const data = await api(`/fs/tree?path=${encodeURIComponent(n.path)}&depth=1`);
+            // 注意：展开子目录也要带上当前工作区 —— 漏了它就会去读默认工作区，
+            // 表现为「点了文件夹是空的」（我第一版就漏了这处）。
+            const data = await api(fsUrl('tree', { path: n.path, depth: 1 }));
             kids.innerHTML = '';
             const inner = (data && data.children) || [];
             kids.appendChild(inner.length ? buildTreeNodes(inner, container) : el('div', 'tree-empty', '(空)'));
@@ -824,29 +878,57 @@ function langOf(path) {
     toml: 'toml', ini: 'ini', conf: 'ini' })[ext] || 'js';
 }
 
+/** 打开一个文件：**中间区域全宽预览**（只读），左侧「代码」页签同步同一个文件。
+ *
+ * 以前点文件只会在左侧那块面板里打开 —— 面板只有几百像素宽，看代码很难受。
+ * 现在中间接替对话区（`.file-open` 那个类），左边保持你正在做的浏览（不再强制切页签），
+ * 但内容会一起刷，免得两边显示不同的文件。
+ */
 async function openFile(path, container) {
-  switchTab('code');
-  $('codePath').textContent = shortPath(path, 60);
-  const view = $('codeView');
-  view.innerHTML = '<div class="placeholder">读取中…</div>';
+  state.currentFile = path;
+  $('fileTitle').textContent = path.split('/').pop();
+  $('filePath').textContent = shortPath(path, 96);
+
+  const center = $('fileBody');
+  center.innerHTML = '<div class="placeholder">读取中…</div>';
+  // 先把视图打开：读取失败也要看得见失败，而不是"点了没反应"
+  $('editor').classList.add('file-open');
   try {
-    const data = await api(`/fs/read?path=${encodeURIComponent(path)}&maxBytes=200000`);
+    const data = await api(fsUrl('read', { path, maxBytes: 200000 }));
     const content = (data && (data.text ?? data.content)) || '';
-    state.currentFile = path;
     if (container) {
       container.querySelectorAll('.tree-row.active').forEach((r) => r.classList.remove('active'));
       const row = container.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
       if (row) row.classList.add('active');
     }
-    view.innerHTML = '';
-    view.appendChild(renderCode(content, langOf(path)));
-    if (data && data.truncated) {
-      view.appendChild(el('div', 'placeholder', '（文件较大，已截断显示）'));
-    }
+    const paint = (view, note) => {
+      view.innerHTML = '';
+      view.appendChild(renderCode(content, langOf(path)));
+      if (note && data && data.truncated) {
+        view.appendChild(el('div', 'placeholder', '（文件较大，已截断显示）'));
+      }
+    };
+    paint(center, true);
   } catch (e) {
-    view.innerHTML = '';
-    view.appendChild(el('div', 'placeholder', '读取失败: ' + e.message));
+    center.innerHTML = '';
+    center.appendChild(el('div', 'placeholder', '读取失败: ' + e.message));
   }
+}
+
+/** 关掉中间的文件预览，回到对话。 */
+function closeFileView() {
+  $('editor').classList.remove('file-open');
+  $('fileBody').innerHTML = '';
+}
+
+/** 复制当前打开文件的内容（左侧页签和中间视图共用）。 */
+async function copyCurrentFile() {
+  if (!state.currentFile) { toast('还没有打开文件'); return; }
+  try {
+    const data = await api(fsUrl('read', { path: state.currentFile, maxBytes: 200000 }));
+    await navigator.clipboard.writeText((data && (data.text ?? data.content)) || '');
+    toast('已复制文件内容');
+  } catch (e) { toast('复制失败: ' + e.message, 'err'); }
 }
 
 function renderCode(content, lang) {
@@ -908,7 +990,7 @@ function termAppend(text) {
 
 /* ── inspector tabs ──────────────────────────────────────────────────── */
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.ab-btn[data-ab]').forEach((b) => b.classList.toggle('active', b.dataset.ab === name));
   document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === name));
   $('inspector').classList.remove('hidden');
   $('splitInspector').classList.remove('hidden');
@@ -928,10 +1010,10 @@ function toggleInspector(force) {
 /* ── resizable panes ─────────────────────────────────────────────────── */
 function initSplitters() {
   const pairs = [
-    // invert = 拖拽方向相反：右边那块（会话栏）往左拖才是变宽，所以 invert 为真；
-    // 左边那块（inspector）方向不变。换位置时这两个标记必须跟着换。
-    { splitter: 'splitInspector', pane: 'inspector', varName: '--inspector-w', min: 250, max: 760, invert: false },
-    { splitter: 'splitRail', pane: 'rail', varName: '--rail-w', min: 190, max: 460, invert: true },
+    // invert = 拖拽方向相反：右侧那块（对话）往左拖才是变宽，所以 invert 为真；
+    // 左边的侧栏方向不变。两块换边时这两个标记必须跟着换。
+    { splitter: 'splitInspector', pane: 'inspector', varName: '--sidebar-w', min: 200, max: 560, invert: false },
+    { splitter: 'splitChat', pane: 'chatPane', varName: '--chat-w', min: 320, max: 900, invert: true },
   ];
   for (const cfg of pairs) {
     const node = $(cfg.splitter);
@@ -1241,6 +1323,7 @@ function onKeydown(ev) {
     if (!$('settingsOverlay').hidden) { confirmCloseSettings(); return; }
     if (state.palette.open) { closePalette(); return; }
     if (!$('modalOverlay').hidden) { $('modalOverlay').hidden = true; return; }
+    if ($('editor').classList.contains('file-open')) { closeFileView(); return; }
     if (state.streaming) { stopTurn(); return; }
   }
   if (ev.key === 'Enter' && !ev.shiftKey && document.activeElement === $('input')) {
@@ -1340,19 +1423,26 @@ function wire() {
   $('btnSkills').addEventListener('click', () => openSettings('skills'));
   $('btnMemory').addEventListener('click', showMemory);
   $('btnRefreshTree').addEventListener('click', () => loadTree());
-  $('btnCopyCode').addEventListener('click', async () => {
-    if (!state.currentFile) return;
-    try {
-      const data = await api(`/fs/read?path=${encodeURIComponent(state.currentFile)}&maxBytes=200000`);
-      await navigator.clipboard.writeText((data && (data.text ?? data.content)) || '');
-      toast('已复制文件内容');
-    } catch (e) { toast('复制失败: ' + e.message, 'err'); }
+  // 活动栏：点图标切面板；再点当前这个 = 收起侧栏（VS Code 的手感）
+  document.querySelectorAll('.ab-btn[data-ab]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const name = b.dataset.ab;
+      const collapsed = $('inspector').classList.contains('hidden');
+      if (!collapsed && b.classList.contains('active')) { toggleInspector(false); return; }
+      switchTab(name);
+    });
   });
-  $('btnCloseCode').addEventListener('click', () => {
-    state.currentFile = null;
-    $('codePath').textContent = '未打开文件';
-    $('codeView').innerHTML = '<div class="placeholder">在左侧文件树中选择一个文件</div>';
+  $('abSettings').addEventListener('click', () => openSettings());
+  $('abCollapse').addEventListener('click', () => toggleInspector(false));
+  $('btnPickRoot').addEventListener('click', promptForRoot);
+  $('wsPicker').addEventListener('change', async (ev) => {
+    currentWorkspace = ev.target.value || '';
+    try { localStorage.setItem(WS_KEY, currentWorkspace); } catch { /* private mode */ }
+    renderWorkspacePicker();
+    await loadTree();
   });
+  $('btnCopyFile').addEventListener('click', copyCurrentFile);
+  $('btnCloseFile').addEventListener('click', closeFileView);
 
   $('modalClose').addEventListener('click', () => { $('modalOverlay').hidden = true; });
   $('modalOverlay').addEventListener('click', (e) => { if (e.target === $('modalOverlay')) $('modalOverlay').hidden = true; });
@@ -1374,14 +1464,20 @@ async function boot() {
     else if (mql.addListener) mql.addListener(onScheme);
   }
   try { if (localStorage.getItem('om.inspector') === '0') toggleInspector(false); } catch { /* ignore */ }
-  try { switchTab(localStorage.getItem('om.tab') || 'files'); } catch { switchTab('files'); }
+  // 存下来的页签名可能是已撤掉的 code / diff → 落到文件面板
+  try {
+    const saved = localStorage.getItem('om.tab');
+    switchTab(['files', 'sessions', 'info'].includes(saved) ? saved : 'files');
+  } catch { switchTab('files'); }
 
   wire();
   initSplitters();
   connect();
   termLine('OpenMinis Desktop — 终端已就绪（命令在本机 shell 中执行）', 'sys');
 
+  try { currentWorkspace = localStorage.getItem(WS_KEY) || ''; } catch { currentWorkspace = ''; }
   await loadSessions();
+  await loadWorkspaces();   // 顺便校正「选中的工作区已被删掉」这种情况
   loadTree();
   refreshModelPill();
   fillStatusVersion();
