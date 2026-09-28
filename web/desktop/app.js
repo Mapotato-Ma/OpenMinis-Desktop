@@ -1132,8 +1132,124 @@ function paletteKey(ev) {
   }
 }
 
+/* ── 菜单栏 ──────────────────────────────────────────────────────────────
+   菜单内容在这里定义，**打开时才渲染** —— 所以主题的勾选态、禁用态永远是最新的
+   （评审指出：不要另存一份状态，否则会出现陈旧的勾）。
+   退出项只在打包版显示（靠壳层的 JS 桥判断，浏览器里没有）。 */
+const HAS_BRIDGE = () => !!(window.pywebview && window.pywebview.api);
+
+function backToDefaultWorkspace() {
+  currentWorkspace = '';
+  try { localStorage.removeItem(WS_KEY); } catch { /* private mode */ }
+  closeFileView();          // 换了根，别留着一个指向旧工作区的文件在编辑器里
+  renderWorkspacePicker();
+  loadTree();
+  toast('已回到默认工作目录');
+}
+
+function quitApp() {
+  if (HAS_BRIDGE() && window.pywebview.api.close) window.pywebview.api.close();
+  else toast('浏览器里不能退出应用');
+}
+
+const MENUS = {
+  file: () => [
+    { label: '新建会话', hint: 'Ctrl+N', run: () => newSession() },
+    { label: '打开文件夹…', hint: 'Ctrl+O', run: () => promptForRoot() },
+    {
+      label: '回到默认工作目录',
+      disabled: !currentWorkspace,
+      run: backToDefaultWorkspace,
+    },
+    { sep: true },
+    { label: '设置', hint: 'Ctrl+,', run: () => openSettings() },
+    { label: '退出', packagedOnly: true, run: quitApp },
+  ],
+  view: () => [
+    { label: '命令面板', hint: 'Ctrl+K', run: () => openPalette() },
+    { label: '终端', hint: 'Ctrl+`', run: () => toggleTerminal() },
+    { label: '侧栏', hint: 'Ctrl+B', run: () => toggleInspector() },
+    { sep: true },
+    { label: '主题：跟随系统', theme: 'system' },
+    { label: '主题：浅色', theme: 'light' },
+    { label: '主题：深色', theme: 'dark' },
+  ],
+  // 注意页签名：设置页里叫 about（'info' 是左侧栏那个「信息」面板，两者不是一回事）
+  help: () => [{ label: '关于', run: () => openSettings('about') }],
+};
+
+let openMenu = null;        // { name, pop, btn }
+let menuIndex = -1;
+
+function menuItems(name) {
+  return MENUS[name]()
+    .filter((it) => !(it.packagedOnly && !HAS_BRIDGE()))
+    .map((it) => ({ ...it }));
+}
+
+function closeMenu() {
+  if (!openMenu) return;
+  openMenu.pop.remove();
+  openMenu.btn.classList.remove('open');
+  openMenu = null;
+  menuIndex = -1;
+}
+
+function drawMenuFocus() {
+  if (!openMenu) return;
+  const items = [...openMenu.pop.querySelectorAll('button:not([disabled])')];
+  items.forEach((b, i) => b.classList.toggle('kbd-focus', i === menuIndex));
+  if (items[menuIndex]) items[menuIndex].focus();
+}
+
+function openMenuFor(name, btn) {
+  closeMenu();
+  const pop = el('div', 'menu-pop');
+  let i = -1;
+  for (const it of menuItems(name)) {
+    if (it.sep) { pop.appendChild(el('div', 'sep')); continue; }
+    const b = el('button');
+    b.dataset.idx = String(++i);
+    if (it.disabled) b.disabled = true;
+    if (it.theme) {
+      b.appendChild(el('span', 'tick', themeMode === it.theme ? '✓' : ''));
+      b.appendChild(el('span', null, it.label.replace('主题：', '')));
+      b.addEventListener('click', () => { closeMenu(); setThemeMode(it.theme); });
+    } else {
+      b.appendChild(el('span', null, it.label));
+      if (it.hint) b.appendChild(el('span', 'hint', it.hint));
+      if (it.run) b.addEventListener('click', () => { closeMenu(); it.run(); });
+    }
+    pop.appendChild(b);
+  }
+  document.body.appendChild(pop);
+  const r = btn.getBoundingClientRect();
+  pop.style.top = Math.round(r.bottom + 4) + 'px';
+  pop.style.left = Math.round(Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+  btn.classList.add('open');
+  openMenu = { name, pop, btn };
+  menuIndex = -1;
+}
+
+function menuKeydown(ev) {
+  if (!openMenu) return false;
+  const items = [...openMenu.pop.querySelectorAll('button:not([disabled])')];
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    const dir = ev.key === 'ArrowDown' ? 1 : -1;
+    menuIndex = menuIndex < 0 ? (dir > 0 ? 0 : items.length - 1)
+      : (menuIndex + dir + items.length) % items.length;
+    drawMenuFocus();
+    return true;
+  }
+  if (ev.key === 'Enter' && menuIndex >= 0) { ev.preventDefault(); items[menuIndex].click(); return true; }
+  if (ev.key === 'Escape') { ev.preventDefault(); closeMenu(); return true; }
+  return false;
+}
+
 /* ── modal panels ────────────────────────────────────────────────────── */
 function openModal(title, node) {
+  closeMenu();
   $('modalTitle').textContent = title;
   const body = $('modalBody');
   body.innerHTML = '';
@@ -1319,6 +1435,9 @@ function onKeydown(ev) {
   if (mod && ev.key.toLowerCase() === 'n') { ev.preventDefault(); newSession(); return; }
   if (mod && ev.key === ',') { ev.preventDefault(); openSettings(); return; }
   if (mod && ev.shiftKey && ev.key.toLowerCase() === 'l') { ev.preventDefault(); cycleTheme(); return; }
+  // 菜单是最上层浮层 —— Esc 先关它（评审指出：排在文件预览后面会关错东西）
+  if (openMenu && menuKeydown(ev)) return;
+  if (mod && ev.key.toLowerCase() === 'o') { ev.preventDefault(); promptForRoot(); return; }
   if (ev.key === 'Escape') {
     if (!$('settingsOverlay').hidden) { confirmCloseSettings(); return; }
     if (state.palette.open) { closePalette(); return; }
@@ -1377,6 +1496,20 @@ function wire() {
 
   $('btnInspector').addEventListener('click', () => toggleInspector());
   $('btnTheme').addEventListener('click', (e) => { e.stopPropagation(); openThemeMenu(); });
+  // 菜单栏：点菜单名展开 / 再点收起；点外面、缩放、失焦都关掉
+  document.querySelectorAll('.menu-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (openMenu && openMenu.name === btn.dataset.menu) { closeMenu(); return; }
+      openMenuFor(btn.dataset.menu, btn);
+    });
+  });
+  document.addEventListener('click', (ev) => {
+    if (openMenu && !openMenu.pop.contains(ev.target)) closeMenu();
+  });
+  window.addEventListener('resize', closeMenu);
+  window.addEventListener('blur', closeMenu);
+
   $('btnSettings').addEventListener('click', () => openSettings());
   $('btnModel').addEventListener('click', () => openSettings('models'));
   $('btnSettingsClose').addEventListener('click', confirmCloseSettings);
@@ -1437,6 +1570,7 @@ function wire() {
   $('btnPickRoot').addEventListener('click', promptForRoot);
   $('wsPicker').addEventListener('change', async (ev) => {
     currentWorkspace = ev.target.value || '';
+    closeFileView();   // 换了根，编辑器里不该留着旧工作区的文件
     try { localStorage.setItem(WS_KEY, currentWorkspace); } catch { /* private mode */ }
     renderWorkspacePicker();
     await loadTree();

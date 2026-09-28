@@ -58,6 +58,23 @@ test('module 脚本只能是 vendor 进来的第三方库（外加一个钉死�
   assert.equal(MODULE_ALLOWLIST.length, 1, '白名单里不该再多了 —— 加之前先想清楚为什么');
 });
 
+test('菜单栏接线没掉（三个菜单、页签名真实存在）', () => {
+  const html = read('index.html');
+  assert.match(html, /<nav class="menubar"/, 'index.html 里没有菜单栏');
+  const app = read('app.js');
+  for (const group of ['file:', 'view:', 'help:']) {
+    assert.ok(app.includes(group), `MENUS 里缺 ${group} 这组菜单`);
+  }
+  // 曾经踩过：菜单里写 openSettings('info')，但设置页的页签叫 about ——
+  // 'info' 是左侧栏那个面板，两边不是一回事，点了什么也不会发生。
+  const panes = new Set([...html.matchAll(/data-pane="([^"]+)"/g)].map((m) => m[1]));
+  const used = [...app.matchAll(/openSettings\('([^']+)'\)/g)].map((m) => m[1]);
+  for (const name of used) {
+    assert.ok(panes.has(name), `openSettings('${name}') 指向不存在的设置页签（有：${[...panes].join('/')}）`);
+  }
+  assert.ok(app.includes('packagedOnly'), '「退出」这类只在打包版有的项没有 packagedOnly 标记');
+});
+
 test('图标库接线没掉（本地 Lucide + 注册模块都在）', () => {
   const html = read('index.html');
   assert.ok(html.includes('src="./icons.js"'), 'index.html 没有再引 icons.js');

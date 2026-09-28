@@ -508,6 +508,28 @@ kbd {
 }
 .inspector.hidden, .splitter.hidden { display: none; }
 
+/* ── 菜单栏 ──────────────────────────────────────────────────────────────
+   页面绘制的菜单（我们没有原生菜单条）。.menu-pop 是挂在 body 上的浮层，
+   位置由 JS 按按钮的 rect 算 —— 所以窗口 resize / 失焦时要关掉它。 */
+.menubar { display: flex; gap: 2px; margin-left: 6px; }
+.menu-btn { padding: 4px 9px; border-radius: 5px; font-size: 12.5px; color: var(--fg); }
+.menu-btn:hover, .menu-btn.open { background: var(--bg-hover); color: var(--fg-strong); }
+.menu-pop {
+  position: fixed; z-index: 320; min-width: 208px;
+  background: var(--bg-raised); border: 1px solid var(--border-strong);
+  border-radius: 8px; box-shadow: 0 12px 34px rgba(0, 0, 0, .38); padding: 5px;
+}
+.menu-pop button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 9px; border-radius: 5px; font-size: 12.5px; color: var(--fg); text-align: left;
+}
+.menu-pop button:hover, .menu-pop button.kbd-focus { background: var(--bg-hover); }
+.menu-pop button[disabled] { color: var(--fg-faint); opacity: .55; cursor: default; }
+.menu-pop button[disabled]:hover { background: none; }
+.menu-pop .sep { height: 1px; background: var(--border); margin: 4px 2px; }
+.menu-pop .hint { margin-left: auto; font-size: 10.5px; color: var(--fg-faint); font-family: var(--mono); }
+.menu-pop .tick { width: 13px; font-size: 11px; }
+
 /* ── 活动栏（VS Code 式）────────────────────────────────────────────────
    最左一条 46px 的竖图标，点它决定侧栏显示哪个面板；
    再点当前这个 = 收起侧栏。选中的图标左边有一条 accent 竖线（VS Code 的习惯）。 */

@@ -28,6 +28,14 @@
       <span class="badge">Desktop</span>
     </div>
 
+    <!-- 菜单栏：和 VS Code 一样的一排菜单名。菜单内容由 app.js 的 MENUS 定义，
+         打开时才渲染（所以主题勾选态、禁用态永远是最新的）。 -->
+    <nav class="menubar" id="menubar">
+      <button class="menu-btn" data-menu="file">文件</button>
+      <button class="menu-btn" data-menu="view">视图</button>
+      <button class="menu-btn" data-menu="help">帮助</button>
+    </nav>
+
     <div class="tb-group tb-center">
       <button class="chip" id="wsChip" title="工作目录 — 点击在文件管理器中打开">
         <span class="chip-dot"></span><span id="wsPath">workspace</span>
