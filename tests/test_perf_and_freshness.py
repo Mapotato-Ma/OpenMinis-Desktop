@@ -22,6 +22,7 @@ import pytest
 from openminis.agent.agent_runtime import AgentRuntime, AgentRuntimeOptions, ToolExecutor
 from openminis.core import context
 from openminis.data.model import LLMMessage, LLMStreamChunk, ThinkingLevel
+from openminis.data.model.agent_content_part import ToolResult
 from openminis.data.model.agent_tool_definition import AgentToolDefinition, AgentToolParam
 from openminis.tools.tool_execution_result import ToolExecutionResult
 
@@ -91,6 +92,44 @@ async def test_same_round_duplicate_is_blocked():
     assert any("LOOP BLOCKED" in t for t in texts)
 
 
+class _ThreeToolProvider:
+    """一轮里调用同一个工具三次（参数不同）—— 用来验证没有隐性并发上限。"""
+
+    def __init__(self, delay: float = 0.2) -> None:
+        self.calls = 0
+        self.delay = delay
+
+    def stream_message(self, messages, system_prompt=None, max_tokens=0,
+                       temperature=None, image_parts=None, tools=None,
+                       thinking_level=ThinkingLevel.OFF):
+        async def gen():
+            self.calls += 1
+            if self.calls == 1:
+                for i, name in enumerate(("a.png", "b.png", "c.png")):
+                    yield LLMStreamChunk.ToolCallComplete(
+                        f"c{i + 1}", "read_image", {"path": name})
+                yield LLMStreamChunk.Finished("tool_use")
+            else:
+                yield LLMStreamChunk.Text("三张都看完了。")
+                yield LLMStreamChunk.Finished("end_turn")
+        return gen()
+
+
+#: 屏障等待上限。并发时「所有人到齐」在毫秒级；串行时等不到就是等不到，
+#: 这个值只决定「多久之后判定失败」，不参与正确性判断。
+BARRIER_TIMEOUT_S = 1.0
+
+
+def _tool_results(messages) -> list[ToolResult]:
+    """从跑完的会话里取出工具结果（按回填顺序）。"""
+    out: list[ToolResult] = []
+    for m in messages:
+        for part in getattr(m, "content_parts", None) or []:
+            if isinstance(part, ToolResult):
+                out.append(part)
+    return out
+
+
 class _TwoDifferentToolsProvider:
     """一轮里调用两个不同参数的工具（都该并发跑）。"""
 
@@ -117,42 +156,79 @@ class _TwoDifferentToolsProvider:
 
 @pytest.mark.asyncio
 async def test_round_tools_run_concurrently():
-    """同轮的两个工具必须**真的重叠执行**（而不是各自等完再轮下一个）。
+    """同轮的工具必须**同时在跑**，而不是各自等完再轮下一个。
 
-    PORT-FIX: 原来断言的是「总耗时 < 0.55s」（两个各 0.3s 的工具，串行会相加）。
-    总耗时是**机器负载的代理**——空载时 0.31s，忙的时候（同时跑测试服务、
-    npm 检查）会超过 0.55s，于是一个正确的实现被报成红的。
-    改成直接断言两个调用的**时间区间有交集**：并发必有交集，串行必无交集，
-    而且与机器快慢无关。
+    PORT-FIX: 原来断言「总耗时 < 0.55s」（两个各 0.3s 的工具，串行会相加）。
+    总耗时是**机器负载的代理** —— 空载 0.31s、忙时会超过阈值，于是一个正确的
+    实现被报成红的。
+
+    第一版修法是改成「两个调用的时间区间有交集」，但那只是把「总时长敏感」
+    换成了「启动偏移敏感」（分派之间有 await、负载下 loop 卡顿，交集会被吃掉）。
+
+    现在改成**屏障**，一个计时阈值都不用：每个工具进来先登记，然后等
+    「所有工具都到齐」。并发时全部到齐 → 立刻放行；串行时**总有一个等不到**
+    → 超时 → 它就是单独跑的。与机器快慢无关。
     """
     delay = 0.3
-    rt = AgentRuntime()
-    order: list[str] = []
-    spans: list[tuple[str, float, float]] = []
+    arrived: list[str] = []
+    all_in_flight = asyncio.Event()
+    starved: list[str] = []          # 等到超时 = 它跑的时候别人不在
 
     async def _read(args_json: str, session_id: str, **kw) -> ToolExecutionResult:
-        started = time.monotonic()
-        await asyncio.sleep(delay)
-        order.append(args_json)
-        spans.append((args_json, started, time.monotonic()))
-        return ToolExecutionResult("ok", True)
+        arrived.append(args_json)
+        if len(arrived) >= 2:
+            all_in_flight.set()
+        try:
+            await asyncio.wait_for(all_in_flight.wait(), timeout=BARRIER_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            starved.append(args_json)
+        await asyncio.sleep(delay)   # 真跑一点活，好让两个区间确实重叠
+        return ToolExecutionResult(f"done:{args_json}", True)
 
+    rt = AgentRuntime()
     rt.register(ToolExecutor(_two_arg_tool_def(), _read))
-    out, stop = await rt.run(_TwoDifferentToolsProvider(delay),
-                             [LLMMessage(LLMMessage.Role.USER, "看两张图")],
-                             "sess-parallel", AgentRuntimeOptions(loop_mode="react"))
+    messages: list[LLMMessage] = [LLMMessage(LLMMessage.Role.USER, "看两张图")]
+    _out, stop = await rt.run(_TwoDifferentToolsProvider(delay), messages,
+                              "sess-parallel", AgentRuntimeOptions(loop_mode="react"))
+
     assert stop == "end_turn"
-    assert len(order) == 2
+    assert len(arrived) == 2
+    assert starved == [], f"有工具是单独跑完的 —— 同轮工具串行了: {starved}"
 
-    (name_a, a0, a1), (name_b, b0, b1) = spans
-    assert a0 < b1 and b0 < a1, f"两个工具没有重叠，似乎串行了: {spans}"
-    # 重叠的程度也别太敷衍：交集至少要有一个完整 delay 的量级，
-    # 否则「几乎串行、只蹭到一丁点重叠」也能蒙过去。
-    overlap = min(a1, b1) - max(a0, b0)
-    assert overlap > delay * 0.5, f"重叠只有 {overlap:.3f}s，不像真的并发: {spans}"
+    # 对外契约是「结果**按调用顺序**回填」，不是完成顺序 —— 后者取决于调度，不该断言。
+    results = _tool_results(messages)
+    assert [r.id for r in results] == ["c1", "c2"], "工具结果没有按调用顺序回填"
+    assert "a.png" in results[0].content and "b.png" in results[1].content
 
-    # 结果顺序 = 调用顺序（a 在前 b 在后）
-    assert "a.png" in order[0] and "b.png" in order[1]
+
+async def test_many_round_tools_all_run_concurrently():
+    """三个工具也要同时在跑 —— 两个跑得通测不出「只允许 2 个并发」这类隐性上限。"""
+    delay = 0.2
+    arrived: list[str] = []
+    all_in_flight = asyncio.Event()
+    starved: list[str] = []
+
+    async def _read(args_json: str, session_id: str, **kw) -> ToolExecutionResult:
+        arrived.append(args_json)
+        if len(arrived) >= 3:
+            all_in_flight.set()
+        try:
+            await asyncio.wait_for(all_in_flight.wait(), timeout=BARRIER_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            starved.append(args_json)
+        await asyncio.sleep(delay)
+        return ToolExecutionResult(f"done:{args_json}", True)
+
+    rt = AgentRuntime()
+    rt.register(ToolExecutor(_two_arg_tool_def(), _read))
+    messages: list[LLMMessage] = [LLMMessage(LLMMessage.Role.USER, "看三张图")]
+    _out, stop = await rt.run(_ThreeToolProvider(delay), messages,
+                              "sess-parallel3", AgentRuntimeOptions(loop_mode="react"))
+
+    assert stop == "end_turn"
+    assert len(arrived) == 3
+    assert starved == [], f"三个工具里有单独跑的（存在隐性并发上限？）: {starved}"
+    assert [r.id for r in _tool_results(messages)] == ["c1", "c2", "c3"]
 
 
 # --------------------------------------------------------------------------

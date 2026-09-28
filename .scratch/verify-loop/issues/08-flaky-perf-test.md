@@ -10,20 +10,41 @@ Type: task
 npm 检查）会超过 0.55s —— 于是一个**正确的实现被报成红的**。
 调阈值只是让偶发变少，没有改变「量的是机器，不是代码」这件事。
 
-## 改法：直接断言**时间区间有交集**
+## 改法（第一版）：断言时间区间有交集 —— 被评审推翻了
 
 ```python
-async def _read(args_json, session_id, **kw):
-    started = time.monotonic()
-    await asyncio.sleep(delay)
-    spans.append((args_json, started, time.monotonic()))
-...
 (na, a0, a1), (nb, b0, b1) = spans
-assert a0 < b1 and b0 < a1, "两个工具没有重叠，似乎串行了"
-assert overlap > delay * 0.5      # 别只蹭到一丁点重叠就算过
+assert a0 < b1 and b0 < a1
+assert overlap > delay * 0.5
 ```
 
-并发必有交集、串行必无交集，而且**与机器快慢无关**。
+**独立评审（GLM 5.3 Flash）指出这没根除问题**：如果分派之间夹着 await、
+或者负载下事件循环卡顿，启动偏移会吃掉交集 —— 「只是把**总时长敏感**换成了
+**启动偏移敏感**」。这个批评成立。
+
+## 改法（最终）：屏障 —— 一个计时阈值都不用
+
+每个工具进门先登记，然后等「所有人都到齐」；并发时全部到齐立刻放行，
+串行时**总有一个等不到** → 超时 → 它就是单独跑的。
+
+```python
+arrived.append(args_json)
+if len(arrived) >= 2:
+    all_in_flight.set()
+try:
+    await asyncio.wait_for(all_in_flight.wait(), timeout=1.0)
+except asyncio.TimeoutError:
+    starved.append(args_json)
+...
+assert starved == [], f"有工具是单独跑完的 —— 同轮工具串行了: {starved}"
+```
+
+评审还指出另外两点，都采纳了：
+
+1. **「结果顺序 = 调用顺序」原来断言的是完成顺序**（`order` 记录的是谁先跑完）——
+   而对外契约是**结果按调用顺序回填**。完成顺序取决于调度，断言它本身就是偶发红
+   的来源。现在改成检查会话里回填的 `ToolResult.id` 顺序。
+2. **两个工具测不出「只允许 2 个并发」这类隐性上限** → 新增三项变体的用例。
 
 ## 验证
 
