@@ -108,7 +108,8 @@ ignore = [
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# desktop/tests 是桌面壳自己的测试（上游 tests/ 之外的代码，不该混进去）
+testpaths = ["tests", "desktop/tests"]
 pythonpath = ["src"]
 
 # ---------------------------------------------------------------------------

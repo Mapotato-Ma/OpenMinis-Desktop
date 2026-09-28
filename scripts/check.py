@@ -53,8 +53,10 @@ class Step:
 STEPS = [
     Step(
         name="pytest",
-        label="内核测试套件 (pytest tests/)",
-        cmd=[sys.executable, "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
+        label="全部测试（pyproject 的 testpaths：tests/ + desktop/tests）",
+        # 不写路径：交给 pyproject 的 testpaths 决定「什么算测试套件」。
+        # 写死 tests/ 会让 desktop/tests（桌面壳自己的测试）悄悄掉在门外。
+        cmd=[sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
         timeout=1800,
         hint="pytest 没装：pip install -e '.[dev]'",
     ),

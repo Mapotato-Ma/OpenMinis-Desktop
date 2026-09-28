@@ -37,14 +37,12 @@ async def spa_fallback(full_path: str): ...
 ```
 
 Starlette 按注册顺序匹配，**任何 append 在它之后的路由都不会被命中**。
-所以 `desktop/ui_mount.py` 全部用 `app.router.routes.insert(0, route)`：
+所以 `desktop/ui_mount.py` 把桌面壳的全部路由插到路由表最前面：
 
 ```python
-_insert_front(app, Mount("/_desktop", app=StaticFiles(directory=..., html=True)))
-_insert_front(app, Route("/", _root_redirect))            # 307 -> /_desktop/
-_insert_front(app, Route("/_desktop/", _desktop_index))
-_insert_front(app, Route("/api/desktop/info", _info))
-_insert_front(app, Route("/_desktop/window-bootstrap.js", _bootstrap))
+FIRST = 0
+for route in reversed(routes):            # 倒着插 → 清单顺序即匹配优先级
+    app.router.routes.insert(FIRST, route)
 ```
 
 代价是依赖 Starlette 的路由表内部结构（`app.router.routes` 是普通 list）。
@@ -53,6 +51,22 @@ _insert_front(app, Route("/_desktop/window-bootstrap.js", _bootstrap))
 
 > 兜底路由只对 `/api/` 和 `/ws` 开头返回 JSON 404，其余一律吐 SPA index。
 > 所以自定义 API 必须插到前面，否则会被当成未知页面吞掉。
+
+### 顺序是显式契约，不再是「碰巧成立」
+
+以前「插到最前」这条规则散在四个 `attach_*` 函数里，每个各自 `insert(0)`；
+清单内部的相对顺序则靠**调用顺序**碰巧满足。两个后果：
+
+1. 新增一个接口的人得先读懂 Starlette 的匹配规则，否则症状是静默的 ——
+   请求被兜底吞掉，返回首页 HTML 或 JSON 404；
+2. `/_desktop/window-bootstrap.js` 是**磁盘上并不存在、由处理器现算**的路由，
+   一旦排到 `Mount("/_desktop", StaticFiles(...))` 后面就会被静态挂载接走并 404
+   （界面的「我在原生窗口里」标记静默失效）。
+
+现在规则只有两条：**往 `desktop_routes()` 这个清单里加一项**，`attach()`
+负责一次性前置安装，装完再自查一遍「有没有哪条排到了兜底之后」并告警。
+契约由 `desktop/tests/test_ui_mount.py` 钉住（9 项断言，含「自检真的能发现
+被吞掉的路由」这一条）。
 
 ---
 

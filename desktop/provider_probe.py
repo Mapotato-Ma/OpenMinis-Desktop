@@ -147,6 +147,7 @@ async def chat_readiness() -> dict[str, Any]:
     Mirrors the two guards at the top of ``chat_service`` so the UI can warn
     *before* the user types a message and eats the same error again.
     """
+    from openminis.settings.catalog import ENGINE_READY, engine_for
     from openminis.settings.store import SettingsStore
 
     store = SettingsStore.get()
@@ -159,6 +160,13 @@ async def chat_readiness() -> dict[str, Any]:
     if not isinstance(conf, dict):
         return {"ready": False, "reason": "missing_provider",
                 "message": f"当前服务商 {pid} 的配置不存在。"}
+    # 引擎没移植的厂商在 build_provider 里就过不去 —— 这里漏掉它会让横幅说
+    # 「已就绪」，而用户发的第一条消息照样报同一个错。探针/横幅存在的意义
+    # 就是不许出现这种假绿（由 desktop/tests/test_provider_probe.py 的契约钉住）。
+    ptype = str(conf.get("type") or pid)
+    if engine_for(ptype) not in ENGINE_READY:
+        return {"ready": False, "reason": "engine_not_ported",
+                "message": f"厂商 {ptype} 的引擎尚未移植，暂时不能对话。"}
     if not str(conf.get("apiKey") or "").strip():
         return {"ready": False, "reason": "no_api_key",
                 "message": "当前服务商没有填 API Key。"}
