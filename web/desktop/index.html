@@ -127,13 +127,16 @@
       <!-- 中间的文件预览（只读）：点文件树里的文件就在这里全宽看代码。
            打开时它接替对话区，Esc 或右上角 × 回到对话。 -->
       <div class="file-view" id="fileView">
+        <!-- 标签栏：同时开着多个文件时在这里切换（没有文件时整条隐藏） -->
+        <div class="editor-tabs" id="editorTabs" hidden></div>
         <div class="file-head">
-          <span class="file-name" id="fileTitle">—</span>
-          <!-- 面包屑：目录段可点（点了在文件树里展开并定位），末段是当前文件所以不可点 -->
+          <!-- 面包屑：目录段可点（点了在文件树里展开并定位），末段是当前文件所以不可点。
+               文件名不再单独写一遍 —— 标签上已经有了。 -->
           <span class="crumbs" id="fileCrumbs"></span>
           <span class="file-actions">
+            <button class="icon-btn" id="btnReloadFile" title="重新读取（磁盘改了就用它）"><wa-icon library="om" name="refresh-cw"></wa-icon></button>
             <button class="icon-btn" id="btnCopyFile" title="复制全文"><wa-icon library="om" name="copy"></wa-icon></button>
-            <button class="icon-btn" id="btnCloseFile" title="关闭 (Esc)"><wa-icon library="om" name="x"></wa-icon></button>
+            <button class="icon-btn" id="btnCloseFile" title="关闭当前标签 (Esc)"><wa-icon library="om" name="x"></wa-icon></button>
           </span>
         </div>
         <div class="code-wrap" id="fileBody"></div>

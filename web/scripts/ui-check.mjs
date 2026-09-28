@@ -75,6 +75,21 @@ test('菜单栏接线没掉（三个菜单、页签名真实存在）', () => {
   assert.ok(app.includes('packagedOnly'), '「退出」这类只在打包版有的项没有 packagedOnly 标记');
 });
 
+test('多标签接线没掉（含「上限要在读盘之前判」）', () => {
+  assert.match(read('index.html'), /id="editorTabs"/, 'index.html 里没有标签栏');
+  const app = read('app.js');
+  assert.match(app, /openFiles: \[\]/, 'state 里没有 openFiles');
+  assert.match(app, /OPEN_FILE_MAX = \d+/, '同时打开的上限没定义');
+  // 复核点：上限必须在发请求之前判，否则第 11 个文件会白读一次再丢掉
+  const start = app.indexOf('async function openFile');
+  const body = app.slice(start, start + 1500);
+  const cap = body.indexOf('OPEN_FILE_MAX');
+  const readAt = body.indexOf("fsUrl('read'");   // 别叫 read：会遮蔽模块顶部的 read() 助手
+  assert.ok(cap > 0 && readAt > 0, 'openFile 里找不到上限判断或读盘调用');
+  assert.ok(cap < readAt, '上限判断必须在读盘之前');
+  assert.match(app, /state\.openFiles = \[\]/, 'closeFileView 没有清空标签（切工作区会留下旧根的文件）');
+});
+
 test('图标库接线没掉（本地 Lucide + 注册模块都在）', () => {
   const html = read('index.html');
   assert.ok(html.includes('src="./icons.js"'), 'index.html 没有再引 icons.js');
@@ -103,8 +118,9 @@ test('组件库接线没掉（样式表在、主题类跟着 data-theme 走）',
 
 test('文件面板与中间预览的接线没掉', () => {
   const html = read('index.html');
+  // 文件名从文件头搬到了标签上（2026-09-29），所以这里要的是面包屑 + 标签栏，不再是 fileTitle
   for (const need of ['id="fileView"', 'id="fileBody"', 'id="wsPicker"', 'id="btnPickRoot"',
-                      'id="btnCloseFile"', 'id="fileTitle"']) {
+                      'id="btnCloseFile"', 'id="fileCrumbs"', 'id="editorTabs"']) {
     assert.ok(html.includes(need), `index.html 里没有 ${need}`);
   }
   const app = read('app.js');

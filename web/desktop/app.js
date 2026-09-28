@@ -14,6 +14,8 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.h
 const state = {
   sessions: [],
   sessionId: null,
+  openFiles: [],       // [{path, content, truncated, scrollTop}] —— 编辑器里开着的文件
+  currentFile: null,   // 当前激活的那个文件（面包屑/状态栏/复制都看它）
   messages: [],
   ws: null,
   wsReady: false,
@@ -983,48 +985,147 @@ async function revealInTree(dirPath) {
   setTimeout(() => target.classList.remove('flash'), 900);
 }
 
-/** 打开一个文件：**编辑器（中间）全宽预览**，只读。
- *
- * 以前点文件只会在左侧那块面板里打开 —— 面板只有几百像素宽，看代码很难受。
- * 现在编辑器接替欢迎页（`.file-open` 那个类），侧栏保持你正在浏览的面板，不抢页签。
- */
-async function openFile(path, container) {
-  state.currentFile = path;
-  $('fileTitle').textContent = path.split('/').pop();
-  renderCrumbs(path);
+/* ── 多标签（VS Code 式）─────────────────────────────────────────────────
+   同时开着多个文件，在编辑器顶部的标签栏里切换。内容缓存在内存里，切标签不重新请求；
+   同时最多开 OPEN_FILE_MAX 个（超了拒绝 —— 比悄悄关掉你开着的标签要可预期）。
+   状态设计：**state.currentFile 仍然是「当前文件」**，只是多了一张 openFiles 表。
+   面包屑 / 状态栏 / 复制 / Esc 这些老消费方因此一行都不用改。 */
 
-  const center = $('fileBody');
-  center.innerHTML = '<div class="placeholder">读取中…</div>';
-  // 先把视图打开：读取失败也要看得见失败，而不是"点了没反应"
-  $('editor').classList.add('file-open');
-  try {
-    const data = await api(fsUrl('read', { path, maxBytes: 200000 }));
-    const content = (data && (data.text ?? data.content)) || '';
-    if (container) {
-      container.querySelectorAll('.tree-row.active').forEach((r) => r.classList.remove('active'));
-      const row = container.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
-      if (row) row.classList.add('active');
-    }
-    const paint = (view, note) => {
-      view.innerHTML = '';
-      view.appendChild(renderCode(content, langOf(path)));
-      if (note && data && data.truncated) {
-        view.appendChild(el('div', 'placeholder', '（文件较大，已截断显示）'));
-      }
-    };
-    paint(center, true);
-    setStatusFile(path, content, !!(data && data.truncated));
-  } catch (e) {
-    center.innerHTML = '';
-    center.appendChild(el('div', 'placeholder', '读取失败: ' + e.message));
-    setStatusFile(null);   // 读失败就不要在状态栏留上一个文件的信息（评审提醒）
+const OPEN_FILE_MAX = 10;
+
+/** 标签的去重键：把 './' 和重复斜杠归一化掉，免得同一个文件被开成两个标签。显示仍用原路径。 */
+function fileKey(p) { return String(p || '').replace(/^\.\//, '').replace(/\/{2,}/g, '/'); }
+
+function findTab(path) {
+  const k = fileKey(path);
+  return state.openFiles.find((f) => fileKey(f.path) === k);
+}
+
+/** 标签栏。没有文件打开时整条隐藏 —— 欢迎页不该顶着一条空标签栏。 */
+function renderTabs() {
+  const host = $('editorTabs');
+  if (!host) return;
+  host.innerHTML = '';
+  host.hidden = !state.openFiles.length;
+  const activeKey = fileKey(state.currentFile);
+  for (const f of state.openFiles) {
+    const tab = el('div', 'editor-tab' + (fileKey(f.path) === activeKey ? ' active' : ''));
+    tab.title = f.path;
+    tab.appendChild(el('span', 'tname', String(f.path).split('/').pop()));
+    const x = el('button', 'tclose');
+    x.title = '关闭';
+    x.appendChild(ic('x'));
+    x.addEventListener('click', (ev) => { ev.stopPropagation(); closeTab(f.path); });
+    tab.appendChild(x);
+    tab.addEventListener('click', () => activateTab(f.path));
+    tab.addEventListener('mousedown', (ev) => {
+      // 中键关闭（VS Code 的习惯）。必须 preventDefault，否则会触发浏览器的中键默认行为
+      if (ev.button === 1) { ev.preventDefault(); closeTab(f.path); }
+    });
+    host.appendChild(tab);
   }
 }
 
-/** 关掉中间的文件预览，回到对话。 */
+/** 把某个标签的内容画进编辑器（内容来自标签缓存，不重新请求）。 */
+function showTab(f) {
+  state.currentFile = f.path;
+  renderCrumbs(f.path);
+  const body = $('fileBody');
+  body.innerHTML = '';
+  body.appendChild(renderCode(f.content, langOf(f.path)));
+  if (f.truncated) body.appendChild(el('div', 'placeholder', '（文件较大，已截断显示）'));
+  body.scrollTop = f.scrollTop || 0;
+  setStatusFile(f.path, f.content, f.truncated);
+  renderTabs();
+}
+
+function activateTab(path) {
+  const f = findTab(path);
+  if (!f || fileKey(f.path) === fileKey(state.currentFile)) { renderTabs(); return; }
+  const prev = findTab(state.currentFile);
+  if (prev) prev.scrollTop = $('fileBody').scrollTop;   // 记住上一个标签滚到哪了
+  $('editor').classList.add('file-open');
+  showTab(f);
+}
+
+function closeTab(path) {
+  const idx = state.openFiles.findIndex((f) => fileKey(f.path) === fileKey(path));
+  if (idx < 0) return;
+  const wasActive = fileKey(state.currentFile) === fileKey(path);
+  state.openFiles.splice(idx, 1);
+  if (!state.openFiles.length) { closeFileView(); return; }   // 全关掉 → 回欢迎页
+  if (wasActive) activateTab((state.openFiles[idx] || state.openFiles[idx - 1]).path);
+  else renderTabs();
+}
+
+/** 重新从磁盘读当前文件 —— 缓存是内存里的，不给个刷新口子的话改了代码看不到（评审指出）。 */
+async function reloadCurrentFile() {
+  const f = findTab(state.currentFile);
+  if (!f) return;
+  try {
+    const data = await api(fsUrl('read', { path: f.path, maxBytes: 200000 }));
+    f.content = (data && (data.text ?? data.content)) || '';
+    f.truncated = !!(data && data.truncated);
+    showTab(f);
+    toast('已重新读取 ' + String(f.path).split('/').pop());
+  } catch (e) { toast('重新读取失败: ' + e.message); }
+}
+
+/** 在文件树里把当前文件那一行标出来。 */
+function markActiveRow(path, container) {
+  if (!container) return;
+  container.querySelectorAll('.tree-row.active').forEach((r) => r.classList.remove('active'));
+  const row = container.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
+  if (row) row.classList.add('active');
+}
+
+/** 打开一个文件：**编辑器（中间）全宽预览**，只读。
+ *
+ * 已经开着的话只是切过去（不重读）；没开过才读盘并加一个标签。
+ * 读取失败不建标签，保持「读取失败」视图 —— 点了没反应最容易被当成坏了。
+ */
+async function openFile(path, container) {
+  const already = findTab(path);
+  if (already) {
+    $('editor').classList.add('file-open');
+    activateTab(already.path);
+    markActiveRow(already.path, container);
+    return;
+  }
+  if (state.openFiles.length >= OPEN_FILE_MAX) {
+    // 上限在请求之前判，别白发一次请求再丢掉
+    toast(`一次最多开 ${OPEN_FILE_MAX} 个文件，先关掉几个`);
+    return;
+  }
+  state.currentFile = path;
+  renderCrumbs(path);
+  const body = $('fileBody');
+  body.innerHTML = '<div class="placeholder">读取中…</div>';
+  // 先把视图打开：读取失败也要看得见失败，而不是"点了没反应"
+  $('editor').classList.add('file-open');
+  renderTabs();
+  try {
+    const data = await api(fsUrl('read', { path, maxBytes: 200000 }));
+    const content = (data && (data.text ?? data.content)) || '';
+    const tab = { path, content, truncated: !!(data && data.truncated), scrollTop: 0 };
+    state.openFiles.push(tab);
+    markActiveRow(path, container);
+    showTab(tab);
+  } catch (e) {
+    body.innerHTML = '';
+    body.appendChild(el('div', 'placeholder', '读取失败: ' + e.message));
+    setStatusFile(null);   // 读失败就不要在状态栏留上一个文件的信息（评审提醒）
+    renderTabs();
+  }
+}
+
+/** 关掉所有标签，回到欢迎页。切工作区也走这里（换了根不该留着旧根的文件）。 */
 function closeFileView() {
   $('editor').classList.remove('file-open');
   $('fileBody').innerHTML = '';
+  state.currentFile = null;
+  state.openFiles = [];
+  renderTabs();
   setStatusFile(null);
 }
 
@@ -1549,7 +1650,10 @@ function onKeydown(ev) {
     if (!$('settingsOverlay').hidden) { confirmCloseSettings(); return; }
     if (state.palette.open) { closePalette(); return; }
     if (!$('modalOverlay').hidden) { $('modalOverlay').hidden = true; return; }
-    if ($('editor').classList.contains('file-open')) { closeFileView(); return; }
+    if ($('editor').classList.contains('file-open')) {
+      if (state.currentFile) closeTab(state.currentFile); else closeFileView();
+      return;
+    }
     if (state.streaming) { stopTurn(); return; }
   }
   if (ev.key === 'Enter' && !ev.shiftKey && document.activeElement === $('input')) {
@@ -1683,7 +1787,15 @@ function wire() {
     await loadTree();
   });
   $('btnCopyFile').addEventListener('click', copyCurrentFile);
-  $('btnCloseFile').addEventListener('click', closeFileView);
+  $('btnReloadFile').addEventListener('click', reloadCurrentFile);
+  $('btnCloseFile').addEventListener('click', () => {
+    if (state.currentFile) closeTab(state.currentFile); else closeFileView();
+  });
+  // 记住当前标签滚到哪了（切回来时 showTab 会恢复）
+  $('fileBody').addEventListener('scroll', () => {
+    const f = state.openFiles.find((x) => x.path === state.currentFile);
+    if (f) f.scrollTop = $('fileBody').scrollTop;
+  });
 
   $('modalClose').addEventListener('click', () => { $('modalOverlay').hidden = true; });
   $('modalOverlay').addEventListener('click', (e) => { if (e.target === $('modalOverlay')) $('modalOverlay').hidden = true; });
