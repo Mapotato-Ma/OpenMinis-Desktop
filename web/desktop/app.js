@@ -1157,6 +1157,11 @@ function resolvedTheme() {
 function applyTheme() {
   const resolved = resolvedTheme();
   document.documentElement.dataset.theme = resolved;
+  // 组件库（Web Awesome）的明暗是靠 <html> 上的 wa-dark / wa-light 类切换的，
+  // 所以每次换主题要把它一起带上 —— 否则组件会停在上一档的配色里。
+  const root = document.documentElement.classList;
+  root.toggle('wa-dark', resolved === 'dark');
+  root.toggle('wa-light', resolved === 'light');
   const mode = THEME_MODES.find((m) => m.id === themeMode) || THEME_MODES[0];
   $('themeIcon').textContent = mode.icon;
   $('themeLabel').textContent = mode.label;
@@ -1926,16 +1931,22 @@ function passwordField(label, onChange) {
   return wrap;
 }
 
+// Web Awesome 的 wa-select（vendored，见 web/scripts/vendor-webawesome.mjs）。
+// 换掉原生 <select> 的原因：它的下拉弹层在 Windows 的 WebView2 里由系统绘制，
+// 页面样式碰不到，和这套深色 IDE 界面放在一起会很突兀。
+// 事件名：wa-select 派发标准 'change'（见包里的 custom-elements.json 元数据）。
 function selectField(label, value, options, onChange) {
   const wrap = el('div', 'field');
   wrap.appendChild(el('label', 'field-label', label));
-  const sel = el('select');
+  const sel = document.createElement('wa-select');
+  sel.setAttribute('size', 'small');
   for (const [val, text] of options) {
-    const o = el('option', null, text);
-    o.value = val;
-    if (val === value) o.selected = true;
+    const o = document.createElement('wa-option');
+    o.value = val;              // 复杂值走 property，属性只适合字符串
+    o.textContent = text;
     sel.appendChild(o);
   }
+  sel.value = value;
   sel.addEventListener('change', () => onChange(sel.value));
   wrap.appendChild(sel);
   return wrap;

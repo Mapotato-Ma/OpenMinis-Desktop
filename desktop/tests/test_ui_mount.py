@@ -230,3 +230,76 @@ def test_second_attach_reports_the_first_result(tmp_path: Path):
     (d / "index.html").write_text("<!doctype html>", encoding="utf-8")
     assert attach(app, desktop_dir=d, ui_active=True) is False, "被幂等跳过，就不该说界面挂上了"
     assert f"{DESKTOP_MOUNT_PATH}/" not in paths(app)
+
+
+# ── 契约 6：桌面静态资源禁缓存 ───────────────────────────────────────────
+def test_desktop_assets_are_not_cacheable(ui_dir: Path):
+    """静态挂载只发 etag，浏览器会按启发式新鲜度自己缓存 —— 升级后 WebView 跑旧界面。
+
+    实测踩到：改完 app.js，页面里执行的还是上一版的函数，白排查一轮。
+    """
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    app = kernel_like_app()
+    attach(app, desktop_dir=ui_dir, ui_active=True)
+    with TestClient(app) as client:
+        # 夹具里只有这两个文件；`/_desktop/` 走的是目录 → index.html 那条路径
+        for path in ("app.js", ""):
+            r = client.get(f"{DESKTOP_MOUNT_PATH}/{path}")
+            assert r.status_code == 200, path
+            assert r.headers.get("cache-control") == "no-store", f"{path}: {dict(r.headers)}"
+
+
+def test_no_store_does_not_leak_to_other_routes(ui_dir: Path):
+    """只对 /_desktop/ 生效 —— 内核自己的接口不该被我们改掉缓存策略。"""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    app = kernel_like_app()
+    attach(app, desktop_dir=ui_dir, ui_active=True)
+    with TestClient(app) as client:
+        r = client.get("/api/desktop/info")
+        assert r.status_code == 200
+        assert r.headers.get("cache-control") != "no-store"
+
+
+# ── 契约 7：首页的资源引用带指纹 ─────────────────────────────────────────
+def test_index_assets_are_stamped(ui_dir: Path, tmp_path: Path):
+    """新 HTML + 旧 JS 的错配必须不可能发生（实测踩到过一次，白排查一轮）。"""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    # 夹具里的首页太简陋（没有任何资源引用），这里造一个像真首页的
+    (ui_dir / "index.html").write_text(
+        '<!doctype html><script src="./app.js"></script>', encoding="utf-8"
+    )
+    app = kernel_like_app()
+    attach(app, desktop_dir=ui_dir, ui_active=True)
+    with TestClient(app) as client:
+        r = client.get("/_desktop/")
+        assert r.status_code == 200, r.status_code
+        assert "./app.js?v=" in r.text, r.text[:200]
+
+
+def test_missing_asset_reference_is_left_alone(tmp_path: Path):
+    """引用不存在的文件时不要伪造指纹 —— 那是个 404，应该照常暴露。"""
+    d = tmp_path / "ui"
+    d.mkdir()
+    (d / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    (d / "app.js").write_text("// x", encoding="utf-8")
+
+    stamped = ui_mount.stamp_assets(
+        '<script src="./app.js"></script><link href="./nope.css" rel="stylesheet">', d
+    )
+    assert "./app.js?v=" in stamped
+    assert "./nope.css" in stamped and "nope.css?v=" not in stamped
+
+
+def test_stamp_changes_when_the_file_changes(ui_dir: Path):
+    """文件改了，指纹就得跟着变 —— 否则等于没指纹。"""
+    import os  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    before = ui_mount.stamp_assets('<script src="./app.js"></script>', ui_dir)
+    time.sleep(0.01)
+    os.utime(ui_dir / "app.js", (time.time() + 5, time.time() + 5))
+    after = ui_mount.stamp_assets('<script src="./app.js"></script>', ui_dir)
+    assert before != after, f"{before} == {after}"

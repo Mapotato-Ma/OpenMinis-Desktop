@@ -23,23 +23,52 @@ const SERVER_COMPUTED = { 'window-bootstrap.js': 'window.__OPENMINIS_DESKTOP__ =
 
 const sourceOf = (name) => (name in SERVER_COMPUTED ? SERVER_COMPUTED[name] : read(name));
 
-/** index.html 里按顺序引入的脚本（就是浏览器实际的执行顺序）。 */
-function scriptOrder() {
+/** index.html 里的脚本，带 type（module 与 classic 的作用域规则不同，要分开处理）。 */
+function scripts() {
   const html = read('index.html');
-  return [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\.\//, ''));
+  return [...html.matchAll(/<script([^>]*)\ssrc="([^"]+)"([^>]*)>/g)].map((m) => ({
+    src: m[2].replace(/^\.\//, ''),
+    module: /type="module"/.test(m[1] + m[3]),
+  }));
 }
+const classicScripts = () => scripts().filter((s) => !s.module).map((s) => s.src);
 
 test('index.html 引的脚本都存在（少一个就是 404 + 界面半死）', () => {
-  const scripts = scriptOrder();
-  assert.ok(scripts.length > 0, 'index.html 里没找到 <script src>');
-  for (const s of scripts) {
-    if (s in SERVER_COMPUTED) continue;      // 见上：它由服务端现算
-    assert.ok(existsSync(new URL(s, DESKTOP)), `index.html 引了 ${s}，但磁盘上没有`);
+  const all = scripts();
+  assert.ok(all.length > 0, 'index.html 里没找到 <script src>');
+  for (const { src } of all) {
+    if (src in SERVER_COMPUTED) continue;      // 见上：它由服务端现算
+    assert.ok(existsSync(new URL(src, DESKTOP)), `index.html 引了 ${src}，但磁盘上没有`);
+  }
+});
+
+test('module 脚本只能是 vendor 进来的第三方库', () => {
+  // 我们自己的代码全是 classic script —— 上面那条「拼起来解析」的检查只对
+  // classic 有效（module 有独立作用域，撞名规则完全不同）。
+  // 把界限钉住：一旦有人给我们自己的代码加上 type="module"，那条检查就悄悄失效了。
+  for (const { src, module: isModule } of scripts()) {
+    if (!isModule) continue;
+    assert.ok(src.startsWith('vendor/'), `${src} 是 module，但不是 vendor 的第三方库`);
+  }
+});
+
+test('组件库接线没掉（样式表在、主题类跟着 data-theme 走）', () => {
+  const html = read('index.html');
+  for (const need of ['vendor/webawesome/styles/webawesome.css', 'wa-theme.css']) {
+    assert.ok(html.includes(need), `index.html 没有再引 ${need}`);
+    assert.ok(existsSync(new URL(need, DESKTOP)), `${need} 不在磁盘上（vendor 没跑？）`);
+  }
+  assert.match(html, /class="wa-theme-default"/,
+    'Web Awesome 的主题类不在 <html> 上 —— 组件会退回它自己的默认配色');
+  const app = read('app.js');
+  for (const cls of ["'wa-dark'", "'wa-light'"]) {
+    assert.ok(app.includes(cls),
+      `app.js 没有把 data-theme 同步到 ${cls} —— 切主题时组件会停在上一次的配色`);
   }
 });
 
 test('全部脚本拼起来能解析（跨脚本的重复声明会在这里现形）', () => {
-  const scripts = scriptOrder().filter((s) => s.endsWith('.js'));
+  const scripts = classicScripts().filter((s) => s.endsWith('.js'));
   // 关键：**拼成一个程序再解析** —— 每个文件单独看都是合法的，只有放回
   // 「共享全局作用域」这个真实条件下，重复声明才会报 SyntaxError。
   const combined = scripts.map((s) => `\n/* ===== ${s} ===== */\n${sourceOf(s)}`).join('\n');
@@ -52,7 +81,7 @@ test('全部脚本拼起来能解析（跨脚本的重复声明会在这里现�
 });
 
 test('每个脚本自己也要能解析（拼起来之前先分清是谁的错）', () => {
-  for (const s of scriptOrder().filter((s) => s.endsWith('.js'))) {
+  for (const s of classicScripts().filter((s) => s.endsWith('.js'))) {
     try {
       new Function(sourceOf(s)); // eslint-disable-line no-new-func
     } catch (e) {

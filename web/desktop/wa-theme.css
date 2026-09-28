@@ -1,0 +1,46 @@
+/* Web Awesome ← 本项目的主题 token 映射。
+ *
+ * 为什么单独一个文件：`vendor/webawesome/` 里的东西是**生成**的（见
+ * web/scripts/vendor-webawesome.mjs），手改会在下次重跑时被覆盖。所以库只管提供
+ * 结构和交互，颜色/圆角/字号一律由这里映射到我们自己的 token 上 —— 这样组件库
+ * 天生跟着 [data-theme] 走，深色/浅色不用各维护一套。
+ *
+ * 只映射**确认存在**的 WA token（从 dist-cdn/styles/themes/default.css 里读出来的）；
+ * 编造 token 名不会报错、只会静默无效，所以宁可少写。
+ */
+:root {
+  /* 品牌色：我们的 accent（浅色主题下是一个更深的蓝，由 [data-theme] 覆盖） */
+  --wa-color-brand-fill-loud: var(--accent);
+  --wa-color-brand-fill-normal: var(--accent);
+  --wa-color-brand-fill-quiet: var(--accent-soft);
+  --wa-color-brand-on-loud: var(--accent-ink);
+  --wa-color-brand-on-normal: var(--accent-ink);
+  --wa-color-brand-border-loud: var(--accent);
+  --wa-color-brand-border-normal: var(--accent-dim);
+
+  /* 表面与描边 */
+  --wa-color-surface-default: var(--bg-raised);
+  --wa-color-surface-lowered: var(--bg-panel);
+  --wa-color-surface-border: var(--border);
+  --wa-color-neutral-fill-quiet: var(--bg-hover);
+  --wa-color-neutral-border-normal: var(--border);
+  --wa-color-neutral-border-loud: var(--border-strong);
+
+  /* 焦点圈：这个应用大量用键盘，焦点可见性不能丢 */
+  --wa-color-focus: var(--accent);
+
+  /* 圆角对齐现有界面（--radius: 7px） */
+  --wa-border-radius-m: 6px;
+  --wa-border-radius-s: 5px;
+}
+
+/* 组件继承我们的字号与字体（这些是继承属性，写在 host 上就会进 shadow DOM）。 */
+wa-select,
+wa-option,
+wa-tooltip,
+wa-input,
+wa-switch,
+wa-callout {
+  font-family: var(--sans);
+  font-size: 13px;
+}

@@ -1,12 +1,19 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="dark" class="wa-theme-default">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenMinis Desktop</title>
 <link rel="stylesheet" href="./style.css">
+<!-- 组件库（vendored 子集，见 web/scripts/vendor-webawesome.mjs）与主题映射 -->
+<link rel="stylesheet" href="./vendor/webawesome/styles/webawesome.css">
+<link rel="stylesheet" href="./wa-theme.css">
 <script src="./window-bootstrap.js"></script>
 <script src="./settings-model.js"></script>
+<!-- 只引我们真正用到的组件；每个 module 都会自己注册 custom element -->
+<script type="module" src="./vendor/webawesome/components/select/select.js"></script>
+<script type="module" src="./vendor/webawesome/components/option/option.js"></script>
+<script type="module" src="./vendor/webawesome/components/tooltip/tooltip.js"></script>
 </head>
 <body>
 <div id="app">

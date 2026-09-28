@@ -27,6 +27,7 @@ the old failure mode was silent (requests answered by the catch-all, or a JSON
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -141,10 +142,14 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
     if ui_active and desktop_dir is not None:
         index = desktop_dir / "index.html"
 
-        async def _desktop_index(request: Any) -> FileResponse:  # noqa: ARG001
+        async def _desktop_index(request: Any) -> HTMLResponse:  # noqa: ARG001
             # Starlette 把 Request 交给普通 Route 端点 —— 收下并忽略它，而不是
             # 把这些函数写成零参数。
-            return FileResponse(index, headers={"Cache-Control": "no-store"})
+            # 首页每次现读：它才几 KB，换来的是「改完刷新就能看到」。
+            return HTMLResponse(
+                stamp_assets(index.read_text(encoding="utf-8"), desktop_dir),
+                headers={"Cache-Control": "no-store"},
+            )
 
         async def _root_redirect(request: Any) -> RedirectResponse:  # noqa: ARG001
             return RedirectResponse(f"{DESKTOP_MOUNT_PATH}/", status_code=307)
@@ -162,6 +167,60 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         )
 
     return routes
+
+
+_ASSET_REF = re.compile(r'(?P<attr>src|href)="\./(?P<name>[^"?]+)"')
+
+
+def stamp_assets(html: str, desktop_dir: Path) -> str:
+    """把首页里的本地资源引用换成 ``./x.js?v=<mtime 毫秒>``。
+
+    没有构建步骤就没有指纹文件名，而静态挂载只发 etag —— 浏览器于是按「启发式新鲜度」
+    自己缓存。于是升级后会出现一种很难查的错配：**index.html 是新的、JS 还是缓存的旧版**
+    （实测踩到：新首页引了 module 脚本，页面里跑的却是上一版 app.js，白排查一轮）。
+    把 URL 本身换掉，这种错配就不可能发生 —— 也能顺带绕开任何中间层缓存。
+
+    引用不存在的文件时原样保留：那是 404，应该照常暴露出来。
+    """
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group("name")
+        target = desktop_dir / name
+        if not target.is_file():
+            return m.group(0)
+        stamp = int(target.stat().st_mtime * 1000)
+        return f'{m.group("attr")}="./{name}?v={stamp}"'
+
+    return _ASSET_REF.sub(repl, html)
+
+
+class DesktopNoStore:
+    """给 ``/_desktop/`` 下的响应补上 ``Cache-Control: no-store``。
+
+    静态挂载只发 ``etag`` / ``last-modified``，**没有** ``Cache-Control``；浏览器于是
+    按「启发式新鲜度」自己决定缓存多久（通常是文件年龄的 10%）。桌面应用里这意味着一件事：
+    **升级后 WebView 会继续跑上一版的界面**。实测踩到过 —— 改完 app.js，页面里执行的
+    还是旧的 ``applyTheme``，白排查一轮。这些文件都在本机磁盘上，省这点缓存没有意义。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or not str(scope.get("path", "")).startswith(
+            DESKTOP_MOUNT_PATH
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_no_store(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = message.setdefault("headers", [])
+                if not any(k.lower() == b"cache-control" for k, _ in headers):
+                    headers.append((b"cache-control", b"no-store"))
+            await send(message)
+
+        await self.app(scope, receive, send_no_store)
 
 
 def catch_all_index(app: FastAPI) -> int | None:
@@ -248,6 +307,10 @@ def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) ->
     # 倒着插，清单顺序即最终顺序（可读性：清单从上到下就是匹配优先级）。
     for route in reversed(routes):
         app.router.routes.insert(0, route)
+    # 静态资源禁缓存：否则升级后 WebView 会拿旧的 JS/CSS 继续跑（见 DesktopNoStore）。
+    # add_middleware 必须在应用开始处理请求之前调用 —— attach() 正是这个时机。
+    app.add_middleware(DesktopNoStore)
+
     app.state.desktop_routes_attached = True
     app.state.desktop_ui_mounted = mounted
 
