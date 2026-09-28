@@ -1625,6 +1625,7 @@ function updateDirtyUI() {
   const btn = $('btnSettingsSave');
   if (pill) pill.hidden = !d.any;
   if (btn) btn.hidden = !d.any;
+  refreshHealthNote();   // 横幅里那句「有未保存的改动」要跟着变
 }
 
 // The settings page tells the user where their API keys live, so it had better
@@ -1661,51 +1662,60 @@ function setChatProvider(pid) {
   updateDirtyUI();
 }
 
-function renderModelsHealth() {
+// 同一件事以前有两份实现：这里自己判「有没有 model / 有没有 key」，服务端又判
+// 一遍（chat-readiness）。两份都可能漏 —— 「引擎未移植」那条两边都漏过，于是
+// 横幅说已就绪、用户发的第一条消息照样报错。现在只认服务端的结论。
+let healthSeq = 0;
+let lastReadiness;      // 最近一次问到的结论（undefined = 还没问过，null = 没问到）
+let healthDrawn = false;
+
+async function renderModelsHealth() {
   const box = $('modelsHealth');
   if (!box) return;
-  const { provider: p } = draftChatBinding();
-  const provs = sview().providers;
-  const pendingKeys = new Set(sview().newKeys);
+  const seq = ++healthSeq;
+  let readiness = null;
+  try {
+    readiness = await api('/desktop/chat-readiness');
+  } catch {
+    readiness = null;   // 问不到也是结论的一种，如实画出来
+  }
+  if (seq !== healthSeq) return;   // 已经有更新的一次在跑了，丢掉这次的结果
+  lastReadiness = readiness;
+  healthDrawn = true;
+  drawHealth(box, SettingsModel.readinessBanner(readiness, {
+    dirty: sdirty().any,
+    providerCount: sview().providers.length,
+  }));
+}
+
+/** 脏状态变了就只重画那一句，不再问一次服务端（打字时不该每敲一个字发一个请求）。 */
+function refreshHealthNote() {
+  const box = $('modelsHealth');
+  if (!box || !healthDrawn || !settings.model) return;
+  drawHealth(box, SettingsModel.readinessBanner(lastReadiness, {
+    dirty: sdirty().any,
+    providerCount: sview().providers.length,
+  }));
+}
+
+function drawHealth(box, spec) {
   box.hidden = false;
-  box.className = 'notice';
+  box.className = 'notice ' + (spec.kind === 'ok' ? 'ok' : 'warn');
   box.innerHTML = '';
-
-  const ic = el('span', 'ic');
+  box.appendChild(el('span', 'ic', spec.kind === 'ok' ? '✓' : '⚠'));
   const main = el('div', 'notice-main');
-
-  if (!p) {
-    box.classList.add('warn');
-    ic.textContent = '⚠';
-    main.appendChild(el('div', 'notice-title', '会话还不能用：没有指定「当前对话」用哪个服务商'));
-    main.appendChild(el('div', 'notice-sub',
-      '真正生效的是「用途绑定 → 对话」那一行。它空着的话，发消息只会得到「还没有配置模型服务」。'));
-    if (provs.length) {
+  main.appendChild(el('div', 'notice-title', spec.title));
+  if (spec.sub) main.appendChild(el('div', 'notice-sub', spec.sub));
+  if (spec.hint) main.appendChild(el('div', 'notice-sub', spec.hint));
+  if (spec.note) main.appendChild(el('div', 'notice-sub', spec.note));
+  if (spec.showPickFirst) {
+    const first = sview().providers[0];
+    if (first) {
       const fix = el('button', 'btn', '把第一个服务商设为当前对话');
-      fix.addEventListener('click', () => setChatProvider(provs[0].id));
+      fix.addEventListener('click', () => setChatProvider(first.id));
       main.appendChild(fix);
-    } else {
-      main.appendChild(el('div', 'notice-sub', '先点下面的「＋ 添加服务商」。'));
-    }
-  } else {
-    const missing = [];
-    if (!p.model) missing.push('模型 ID');
-    if (!p.hasKey && !pendingKeys.has(p.id)) missing.push('API Key');
-    if (missing.length) {
-      box.classList.add('warn');
-      ic.textContent = '⚠';
-      main.appendChild(el('div', 'notice-title',
-        `当前对话服务商「${p.label || p.id}」还缺：${missing.join(' / ')}`));
-      main.appendChild(el('div', 'notice-sub', '补上并保存后，点「测试连接」确认真的能通。'));
-    } else {
-      box.classList.add('ok');
-      ic.textContent = '✓';
-      main.appendChild(el('div', 'notice-title', `当前对话：${p.label || p.id} / ${p.model}`));
-      main.appendChild(el('div', 'notice-sub',
-        '已经指定了。建议点「测试连接」发一次真实请求 —— 它会验证地址、密钥和模型 ID。'));
     }
   }
-  box.appendChild(ic);
   box.appendChild(main);
 }
 

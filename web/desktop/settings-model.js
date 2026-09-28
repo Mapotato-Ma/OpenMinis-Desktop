@@ -353,6 +353,74 @@
     };
   }
 
+  /* ── 「会话能不能跑」横幅：规则在服务端，这里只翻译结论 ────────────────
+     同一件事以前有两份实现（前端自己判 model/key，服务端又判一遍），于是两边
+     都漏过「引擎未移植」那条 —— 横幅说已就绪、第一条消息照样报错。
+     现在规则只有一份：GET /api/desktop/chat-readiness（它的契约由
+     desktop/tests/test_provider_probe.py 与内核的 build_provider 绑在一起）。
+     这个函数只把结论翻译成界面要画的东西 —— 纯函数，可以在 node 里断言。
+
+     ``readiness === null`` 表示**没问到**（网络/接口挂了），那也是结论的一种。 */
+
+  const READINESS_TITLES = {
+    no_active_provider: '会话还不能用：没有指定「当前对话」用哪个服务商',
+    missing_provider: '会话还不能用：当前服务商不见了',
+    engine_not_ported: '会话还不能用：当前服务商的引擎尚未移植',
+    no_api_key: '当前服务商还缺 API Key',
+    no_model: '当前服务商还缺模型 ID',
+  };
+
+  /** 下一步该做什么 —— 界面味道，不参与「能不能跑」的判断。 */
+  function readinessHint(reason, providerCount) {
+    switch (reason) {
+      case 'no_active_provider':
+        return providerCount > 0
+          ? '真正生效的是「用途绑定 → 对话」那一行。它空着的话，发消息只会得到「还没有配置模型服务」。'
+          : '先点下面的「＋ 添加服务商」。';
+      case 'missing_provider':
+        return '它可能已经被删掉了 —— 在「用途绑定」里重新选一个，然后保存。';
+      case 'engine_not_ported':
+        return '这类厂商的内核暂未移植，换一个卡片上标着「引擎就绪」的服务商。';
+      case 'no_api_key':
+      case 'no_model':
+        return '补上并保存后，点「测试连接」确认真的能通。';
+      default:
+        return '点「测试连接」可以发一次真实请求，验证地址、密钥和模型 ID。';
+    }
+  }
+
+  function readinessBanner(readiness, opts) {
+    const o = opts || {};
+    const providerCount = o.providerCount || 0;
+    const note = o.dirty ? '有未保存的改动 —— 保存之后这里会重新判定。' : '';
+
+    if (!readiness) {
+      return {
+        kind: 'warn',
+        title: '拿不到「会话能不能跑」的结论',
+        sub: '界面没问到服务端的判断。可以先用「测试连接」验一次。',
+        hint: '', note, showPickFirst: false,
+      };
+    }
+    if (readiness.ready) {
+      return {
+        kind: 'ok',
+        title: `当前对话：${readiness.label || readiness.providerId} / ${readiness.model || '（未填模型）'}`,
+        sub: '已经指定了。建议点「测试连接」发一次真实请求 —— 它会验证地址、密钥和模型 ID。',
+        hint: '', note, showPickFirst: false,
+      };
+    }
+    const reason = readiness.reason || '';
+    return {
+      kind: 'warn',
+      title: READINESS_TITLES[reason] || '会话还不能用',
+      sub: readiness.message || '',
+      hint: readinessHint(reason, providerCount),
+      note,
+      showPickFirst: reason === 'no_active_provider' && providerCount > 0,
+    };
+  }
+
   /* 供渲染层判断「这个 id 是不是锁定工具」。 */
   function isLockedTool(id) {
     return LOCKED_TOOL_IDS.includes(id);
@@ -361,7 +429,7 @@
   function identityTools(state, id) {
     return (state.identities.tools[id] || []).slice();
   }
-  const api = { load, reduce, toPayload, view, isLockedTool, identityTools, LOCKED_TOOL_IDS, SLOT_CHAT };
+  const api = { load, reduce, toPayload, view, readinessBanner, isLockedTool, identityTools, LOCKED_TOOL_IDS, SLOT_CHAT };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;  // node 测试
   if (global) global.SettingsModel = api;                                     // 浏览器
 })(typeof window !== 'undefined' ? window : null);

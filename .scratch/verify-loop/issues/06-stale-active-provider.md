@@ -2,7 +2,7 @@
 
 Status: open
 Type: task
-优先级：低（上游问题，界面侧已经堵住）
+优先级：低（上游问题；**用户可见的部分已由 ticket 07 解决**）
 
 ## 现象
 
@@ -26,6 +26,10 @@ Type: task
 在 `chat-readiness`（`desktop/provider_probe.py`）里加一句：`activeProviderId`
 指向的实例不存在时，直接说「当前对话指向的服务商已被删除，请重选一个」，
 而不是把它当成配置完整。这是壳层能做的事，不用改内核。
+
+**已完成（ticket 07 那次）**：`chat_readiness()` 现在返回
+`reason: "missing_provider"`，横幅显示「会话还不能用：当前服务商不见了 +
+在「用途绑定」里重新选一个，然后保存」—— 浏览器里实测过。
 
 顺带：如果哪天要提给上游，这是一条 ——「删除实例时应当同时清掉
 `activeProviderId`」。

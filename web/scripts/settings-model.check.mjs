@@ -214,3 +214,71 @@ test('load(server, prev) 保留未保存的编辑（重新加载不丢草稿）'
   const s2 = M.load(serverPayload(), s1);
   assert.equal(M.toPayload(s2).body.providers.find((p) => p.id === 'p2').apiKey, 'sk-keep');
 });
+
+/* ── 「会话能不能跑」横幅：规则在服务端，这里只翻译结论 ─────────────────── */
+test('服务端说 ready → 横幅是绿的，显示实际生效的那个服务商', () => {
+  const spec = M.readinessBanner(
+    { ready: true, providerId: 'p1', label: '甲', model: 'm-a' },
+    { providerCount: 2 },
+  );
+  assert.equal(spec.kind, 'ok');
+  assert.ok(spec.title.includes('甲') && spec.title.includes('m-a'));
+  assert.equal(spec.showPickFirst, false);
+});
+
+test('没指定当前对话 → 有服务商就给出「设为当前对话」的按钮，没有就说先去加', () => {
+  const withProv = M.readinessBanner(
+    { ready: false, reason: 'no_active_provider', message: '还没有指定「当前对话」用哪个服务商。' },
+    { providerCount: 1 },
+  );
+  assert.equal(withProv.kind, 'warn');
+  assert.equal(withProv.showPickFirst, true);
+  assert.ok(withProv.title.includes('没有指定'));
+  assert.ok(withProv.hint.includes('用途绑定'));
+
+  const empty = M.readinessBanner(
+    { ready: false, reason: 'no_active_provider', message: '还没有指定「当前对话」用哪个服务商。' },
+    { providerCount: 0 },
+  );
+  assert.equal(empty.showPickFirst, false);
+  assert.ok(empty.hint.includes('添加服务商'));
+});
+
+test('引擎未移植这条以前两边都漏，现在横幅必须明说', () => {
+  const spec = M.readinessBanner(
+    { ready: false, reason: 'engine_not_ported', message: '厂商 gemini 的引擎尚未移植，暂时不能对话。' },
+    { providerCount: 1 },
+  );
+  assert.equal(spec.kind, 'warn');
+  assert.ok(spec.title.includes('引擎尚未移植'));
+  assert.ok(spec.sub.includes('gemini'), '服务端原话要透出来');
+  assert.ok(spec.hint.includes('引擎就绪'));
+});
+
+test('缺密钥/模型 → 提示去补并测试连接', () => {
+  for (const reason of ['no_api_key', 'no_model']) {
+    const spec = M.readinessBanner({ ready: false, reason, message: '缺东西' }, { providerCount: 1 });
+    assert.equal(spec.kind, 'warn');
+    assert.ok(spec.hint.includes('测试连接'));
+  }
+});
+
+test('问不到服务端时如实说「拿不到结论」，而不是假装就绪', () => {
+  const spec = M.readinessBanner(null, { providerCount: 1 });
+  assert.equal(spec.kind, 'warn');
+  assert.ok(spec.title.includes('拿不到'));
+});
+
+test('有未保存改动时补一句，别让人误以为横幅在说当前草稿', () => {
+  const spec = M.readinessBanner({ ready: true, providerId: 'p1', label: '甲', model: 'm' }, { dirty: true, providerCount: 1 });
+  assert.ok(spec.note.includes('未保存'));
+  const clean = M.readinessBanner({ ready: true, providerId: 'p1', label: '甲', model: 'm' }, { providerCount: 1 });
+  assert.equal(clean.note, '');
+});
+
+test('未知 reason 也要有兜底文案（服务端以后加了新原因）', () => {
+  const spec = M.readinessBanner({ ready: false, reason: 'some_new_reason', message: '新原因' }, {});
+  assert.equal(spec.kind, 'warn');
+  assert.ok(spec.title.length > 0);
+  assert.equal(spec.sub, '新原因');
+});
