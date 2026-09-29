@@ -173,11 +173,15 @@ def elapsed_ms() -> float:
 
 
 def summary() -> str:
-    """一行可读可 grep 的时间线。"""
-    origin, source = _resolve_origin()
-    pre = _pre_python_ms(origin)
-    parts = [f"{name}=+{pre + (when - _T0) * 1000.0:.0f}ms" for name, when in _MARKS]
-    return f"[startup] origin={source} total={elapsed_ms():.0f}ms | " + " ".join(parts)
+    """一行可读可 grep 的时间线。量不出来也不许抛。"""
+    try:
+        origin, source = _resolve_origin()
+        pre = _pre_python_ms(origin)
+        parts = [f"{name}=+{pre + (when - _T0) * 1000.0:.0f}ms" for name, when in _MARKS]
+        return f"[startup] origin={source} total={elapsed_ms():.0f}ms | " + " ".join(parts)
+    except Exception:  # pragma: no cover - 量时间不能反过来把启动搞挂
+        logger.warning("could not build the startup timeline", exc_info=True)
+        return "[startup] <unavailable>"
 
 
 def report(*, version: str = "") -> str:
@@ -191,16 +195,26 @@ def report(*, version: str = "") -> str:
     _REPORTED = True
 
     logger.info("%s", line)
+
+    # 两段分开写、都记日志：CI 上曾经出现过"该有一行却找不到文件"的情况，
+    # 分不清是没调到还是写失败。日志里留下真实路径，下次不用猜。
     try:
         from .paths import data_root  # noqa: PLC0415 - 内核此时已 import 完
 
         path = data_root() / "logs" / "startup.log"
+    except Exception:
+        logger.warning("startup timeline: cannot resolve the data dir", exc_info=True)
+        return line
+
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         with open(path, "a", encoding="utf-8", errors="replace") as fh:
             fh.write(f"{stamp} {line}\n")
-    except Exception:  # pragma: no cover - 写不了日志不该影响应用
-        logger.debug("could not write startup.log", exc_info=True)
+        logger.info("startup timeline appended to %s", path)
+    except Exception:
+        # 写不了不该影响应用，但必须留下证据（warning 而不是 debug）。
+        logger.warning("could not append the startup timeline to %s", path, exc_info=True)
     return line
 
 

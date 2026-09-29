@@ -48,6 +48,7 @@ function Wait-Health([int]$portToTest, [int]$timeoutSeconds) {
 }
 
 Write-Host "=== startup probe: $ExePath ==="
+Write-Host "log dir: $logDir (exists: $(Test-Path $logDir))"
 $healthy = 0
 
 for ($i = 1; $i -le $Runs; $i++) {
@@ -76,22 +77,29 @@ for ($i = 1; $i -le $Runs; $i++) {
 
     Write-Host ("run {0} ({1}): port={2}ms health={3}ms exited={4}" -f $i, $label, $portMs, $healthMs, $p.HasExited)
 
-    if (-not $ok) {
-        # 失败时只报"没起来"没有意义：把应用自己的日志尾巴打出来。上一次 CI 就是
-        # 这样才发现真相（进程健康之后立刻 NameError 崩掉）。
-        $appLog = Join-Path $logDir "desktop.log"
-        if (Test-Path $appLog) {
+    # 应用自己写的那一行（解包 / 内核 / 后端各段累计毫秒）比外面量到的总时长有用得多。
+    $appLog = Join-Path $logDir "desktop.log"
+    if (Test-Path $appLog) {
+        $timeline = Select-String -Path $appLog -Pattern '\[startup\]' | Select-Object -Last 1
+        if ($timeline) { Write-Host ("  app timeline: " + $timeline.Line.Trim()) }
+        if (-not $ok) {
             Write-Host "--- $appLog (tail 30) ---"
             Get-Content $appLog -Tail 30 | ForEach-Object { Write-Host $_ }
-        } else {
-            Write-Host "no desktop.log at $appLog"
         }
+    } elseif (-not $ok) {
+        Write-Host "no desktop.log at $appLog"
     }
 
     if ($p -and -not $p.HasExited) {
-        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-        # 给它一点时间释放端口，否则第二次启动会换一个端口
-        Start-Sleep -Seconds 2
+        # onefile 是「父进程解包 + 子进程跑 Python」：只 Stop-Process 父进程会留下一个
+        # 还在跑的子进程，下一个样本就连到它头上 —— 实测 run 2 只花 7ms，那是在量别人。
+        & taskkill /PID $p.Id /T /F | Out-Null
+    }
+    # 端口必须真的空出来，否则下一个样本是假的
+    $freeDeadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $freeDeadline) {
+        if (-not (Test-Port $Port)) { break }
+        Start-Sleep -Milliseconds 250
     }
 }
 
@@ -99,7 +107,10 @@ if (Test-Path $startupLog) {
     Write-Host "--- $startupLog (last $Runs entries) ---"
     Get-Content $startupLog | Select-Object -Last $Runs | ForEach-Object { Write-Host $_ }
 } else {
+    # 这一条本身也是信息：说明 report() 没跑成，去 desktop.log 里找 [startup] 那行。
     Write-Host "no startup.log at $startupLog"
+    Write-Host "--- $logDir ---"
+    Get-ChildItem $logDir -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table | Out-String | Write-Host
 }
 
 if ($healthy -lt $Runs) {
