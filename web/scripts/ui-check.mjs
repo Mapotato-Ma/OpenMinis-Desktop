@@ -264,3 +264,39 @@ test('桌面界面不许再用原生 confirm/alert（WebView2 会弹系统框、
   assert.ok(read('app.js').includes("document.createElement('wa-dialog')"), '确认框不再基于 wa-dialog');
   assert.ok(read('index.html').includes('components/dialog/dialog.js'), 'index.html 没有加载 dialog 组件');
 });
+
+test('根节点缩放不会把整页撑高（vh 不跟着 zoom 缩小，实测 144% 时高出 44%）', () => {
+  // 用户实测：144% 下点「新会话」后整页被顶上去 —— 根因是 #app 用了 100vh：
+  // 它按放大后的视口铺满，页面比视口高一截，输入框一聚焦浏览器就把根容器滚下去。
+  // 修法：根高度按 --ui-h（= innerHeight / zoom 的布局像素）补偿。
+  const css = read('style.css');
+  const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(/html,\s*body\s*\{[^}]*height:\s*var\(--ui-h/.test(body),
+    'html, body 的高度必须走 var(--ui-h, …) 补偿，否则缩放后会比视口高');
+  assert.ok(!/#app\s*\{[^}]*height:\s*[\d.]+vh/.test(body),
+    '#app 又用回 vh 了 —— 缩放时会比视口高，焦点滚动会把整页顶上去');
+
+  const prefs = read('ui-prefs.js');
+  assert.ok(prefs.includes('--ui-h'), 'ui-prefs.js 不再写 --ui-h，补偿链断了');
+  assert.ok(/applyViewportHeight/.test(prefs), 'zoom 变化时不再重算根高度');
+});
+
+test('侧栏里的纵向元素不许自己长高（按钮和列表抢剩余空间 → 按钮撑成一整块）', () => {
+  const css = read('style.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rule = /\.new-session\s*\{([^}]*)\}/.exec(css);
+  assert.ok(rule, 'style.css 里找不到 .new-session 规则');
+  assert.ok(!/flex:\s*1\b|flex-grow:\s*[1-9]/.test(rule[1]),
+    '.new-session 又在和 .session-list 抢剩余空间了 —— 会话少时按钮会撑成一大块');
+});
+
+test('缩放优先交给宿主原生（WebView2），拿不到才回落 CSS', () => {
+  // 引擎级缩放没有 vh 的坑、文字按真实字号渲染；CSS zoom 是兜底。
+  // 关键是**回落路径必须存在**：宿主说不行时界面不能两头空（缩放了但没人执行）。
+  const app = read('app.js');
+  assert.ok(app.includes("api('/desktop/zoom')"), '不再问宿主能不能原生缩放');
+  assert.ok(app.includes('setNativeZoomHook(requestNativeZoom)'), '没把原生缩放挂到 ui-prefs 上');
+  assert.ok(app.includes('setNativeZoomHook(null)'), '缺回落路径：宿主失灵时界面会两头空');
+  assert.ok(app.includes('probeNativeZoom()'), '开机没有探测原生缩放能力');
+  assert.ok(app.includes('fallbackToCssZoom'), '没有回落函数');
+  assert.ok(read('index.html').includes('id="uiZoomMode"'), '界面面板没有显示当前缩放方式');
+});

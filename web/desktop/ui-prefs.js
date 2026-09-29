@@ -92,8 +92,24 @@
       try { handled = nativeZoom(z) !== false; } catch (e) { handled = false; }
     }
     root.style.zoom = handled ? '' : String(z);
+    applyViewportHeight(handled ? 1 : z);
     return z;
   }
+
+  /* 根节点 zoom 不会让视口单位跟着缩小（Chromium 与 WebKit 实测一致）：
+     `100vh` 仍是放大后的视口高，于是整页比视口高一截，输入框一被聚焦，
+     浏览器就把根容器滚下去 —— 表现是「点一下整页上移、标题栏消失」。
+     这里把根高度写成「缩放前的视口」布局像素（innerHeight / z），
+     渲染出来正好等于视口高。宿主原生缩放接管时（handled）清掉它。 */
+  let appliedZoom = 1;
+
+  function applyViewportHeight(z) {
+    appliedZoom = z > 0 ? z : 1;
+    if (appliedZoom === 1 || !window.innerHeight) root.style.removeProperty('--ui-h');
+    else root.style.setProperty('--ui-h', (window.innerHeight / appliedZoom).toFixed(2) + 'px');
+  }
+
+  if (window.addEventListener) window.addEventListener('resize', function () { applyViewportHeight(appliedZoom); });
 
   function setStack(varName, custom, fallbackStack) {
     const stack = fontStack(custom, fallbackStack);

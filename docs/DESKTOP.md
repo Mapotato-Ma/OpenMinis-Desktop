@@ -331,6 +331,28 @@ v0.1.0 的「模型服务」页**没有保存按钮**，于是出现了一个非
 语法高亮的字符串用琥珀、类型名用蓝（原本是绿和青绿）。
 `scripts/make_icon.py` 里的图标配色同步改成蓝，别只改 CSS。
 
+### 界面缩放：先要原生的，拿不到才在页面里缩
+
+缩放**优先走 WebView2 的原生 `ZoomFactor`**（`desktop/native_zoom.py`）：
+它是引擎级缩放 —— CSS px 变大、布局视口变小，`vh` / `100%` / 媒体查询全部自洽，
+文字按真实字号渲染。pywebview 6 的 Windows 后端**不给 `window.native` 赋值**
+（只有 cocoa/gtk/qt/winforms 赋），所以壳层在建窗口之前把 `EdgeChrome.__init__`
+包一层自己接住控件。**只有「设进去 + 读回来一致」才算成功**（不接受"可能生效"），
+失败一律回落 CSS zoom —— 界面不会两头空。
+
+回落路径是页面内的 `zoom`（`web/desktop/ui-prefs.js`），它有两个必须记住的坑：
+
+1. **`vh` 不跟着 `zoom` 缩小**（Chromium 与 WebKit 实测一致）。所以根高度按
+   「缩放前的视口」补偿：`--ui-h = innerHeight / zoom`，随缩放与窗口大小重算。
+   不补的话 144% 下页面比视口高 44%，输入框一被聚焦浏览器就把根容器滚下去
+   （用户看到的是「点一下整页上移、标题栏消失」）。
+2. 根节点要 `overflow: clip` 而不是 `hidden` —— `hidden` 仍然能被
+   `focus()` / `scrollIntoView()` 程序化滚动。
+
+「设置 → 界面」里直接写出当前用的是哪种缩放（原生 / 界面内）以及回落原因，
+`GET /api/desktop/zoom` 是同一份数据；CI 的打包探活会把它打进日志，
+所以「Windows 上到底能不能原生缩放」不需要靠用户回报。
+
 ---
 
 ## 5. 打包

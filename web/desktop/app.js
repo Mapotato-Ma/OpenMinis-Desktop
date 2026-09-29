@@ -1923,6 +1923,61 @@ function confirmDialog(message, opts = {}) {
 /* ── 界面 pane（桌面本地偏好）──────────────────────────────────────────
    控件都是 UiPrefs 的薄壳：落盘与广播在 UiPrefs，订阅回调负责把值刷回控件。
    这些字段不进内核 settings payload —— 那边是全量替换，未知字段会被拒。 */
+/* ── 缩放落在哪儿：WebView2 原生 ZoomFactor，还是页面里的 CSS zoom ────────
+   引擎级缩放（原生）让 CSS px 变大、布局视口变小，vh/100%/媒体查询全部自洽，
+   文字也按真实字号渲染；CSS zoom 是页面内缩放，视口单位得自己补偿（见
+   ui-prefs.js 里的 --ui-h）。拿不到原生就继续用 CSS —— 两条路都真的能用，
+   所以判断必须诚实：只有宿主**读回来一致**才算切过去，说不行就当场回落。 */
+let zoomMode = 'checking';   // checking | native | css
+let zoomModeReason = '';
+
+function setZoomMode(mode, reason) {
+  zoomMode = mode;
+  zoomModeReason = reason || '';
+  renderInterfacePane();
+}
+
+async function probeNativeZoom() {
+  let cap = null;
+  try {
+    cap = await api('/desktop/zoom');
+  } catch (e) {
+    setZoomMode('css', '取不到宿主的缩放能力：' + e.message);
+    return;
+  }
+  if (!cap || !cap.handle || !cap.ready) {
+    setZoomMode('css', (cap && cap.reason) || '这个窗口没有 WebView2 缩放能力');
+    return;
+  }
+  UiPrefs.setNativeZoomHook(requestNativeZoom);
+  setZoomMode('native', '');
+  UiPrefs.applyAll();   // 立刻切过去：ui-prefs 会清掉 CSS zoom 与 --ui-h
+}
+
+/* ui-prefs 的钩子是同步的（得立刻决定「这次缩放归谁」），所以这里同步返回
+   true，请求异步发出去；宿主说不行就回落，界面不会两头空。 */
+function requestNativeZoom(z) {
+  pushNativeZoom(z);
+  return true;
+}
+
+async function pushNativeZoom(z) {
+  try {
+    const res = await api('/desktop/zoom', { method: 'POST', body: JSON.stringify({ factor: z }) });
+    if (res && res.ok) { setZoomMode('native', ''); return; }
+    fallbackToCssZoom((res && res.reason) || '宿主拒绝了这次缩放');
+  } catch (e) {
+    fallbackToCssZoom('请求失败：' + e.message);
+  }
+}
+
+function fallbackToCssZoom(reason) {
+  UiPrefs.setNativeZoomHook(null);
+  UiPrefs.applyAll();   // 回到 CSS：CSS zoom 与 --ui-h 补偿一起回来
+  setZoomMode('css', reason);
+  toast('原生缩放不可用，已回落界面内缩放：' + reason, 'err');
+}
+
 function renderInterfacePane() {
   const val = (id, v) => { const el = $(id); if (el) el.value = v; };
   const chk = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
@@ -1930,6 +1985,18 @@ function renderInterfacePane() {
   if (z) z.textContent = UiPrefs.zoomLabel();
   const zin = $('uiZoomIn'); if (zin) zin.disabled = !UiPrefs.zoomCanIn();
   const zout = $('uiZoomOut'); if (zout) zout.disabled = !UiPrefs.zoomCanOut();
+  const zm = $('uiZoomMode');
+  const zw = $('uiZoomModeWhy');
+  if (zm) {
+    zm.textContent = zoomMode === 'native' ? '原生（WebView2）'
+      : (zoomMode === 'checking' ? '检测中…' : '界面内（CSS）');
+  }
+  if (zw) {
+    zw.textContent = zoomMode === 'native'
+      ? '引擎级缩放：文字按真实字号渲染，视口单位不需要补偿'
+      : (zoomMode === 'checking' ? '正在问宿主能不能原生缩放…'
+        : (zoomModeReason || '页面内缩放（CSS zoom）：视口单位由 --ui-h 补偿'));
+  }
   val('uiTheme', UiPrefs.get('theme'));
   val('uiFontSans', UiPrefs.get('fontSans'));
   val('uiFontMono', UiPrefs.get('fontMono'));
@@ -2001,6 +2068,7 @@ async function boot() {
   refreshModelPill();
   fillStatusVersion();
   loadInfo();
+  probeNativeZoom();   // 能原生缩放就切过去（失败会自己回落，见上面的说明）
   $('input').focus();
   autoGrow();
 }

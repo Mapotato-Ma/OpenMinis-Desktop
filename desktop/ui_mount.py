@@ -39,7 +39,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.3.4"
+DESKTOP_UI_VERSION = "0.3.5"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -148,6 +148,30 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         clean = [str(i).strip()[:128] for i in ids[:50] if isinstance(i, str) and str(i).strip()]
         return JSONResponse(ccswitch_import.entries(clean), headers=_NO_STORE)
 
+    async def _zoom_capability(request: Any) -> JSONResponse:  # noqa: ARG001
+        """缩放交给谁：WebView2 原生 ZoomFactor（引擎级）还是页面里的 CSS zoom。
+
+        只报告**握到手的东西**，不声称支持 —— 真正的权威是 POST 的返回。
+        """
+        from . import native_zoom  # noqa: PLC0415
+
+        return JSONResponse(native_zoom.capability(), headers=_NO_STORE)
+
+    async def _zoom_set(request: Any) -> JSONResponse:
+        """把缩放交给 WebView2。只有「设进去 + 读回来一致」才 ok=True。"""
+        from . import native_zoom  # noqa: PLC0415
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - 客户端发什么都有可能
+            body = {}
+        factor = body.get("factor") if isinstance(body, dict) else None
+        # 脏参数是客户端错误（400）；「窗口不支持」是能力问题（200 + ok=false）。
+        # 界面两条路都会回落 CSS，但分开能让日志一眼看出是谁的问题。
+        if isinstance(factor, bool) or not isinstance(factor, (int, float)):
+            return JSONResponse({"error": "factor 必须是数字"}, status_code=400, headers=_NO_STORE)
+        return JSONResponse(native_zoom.set_zoom(factor), headers=_NO_STORE)
+
     routes.extend(
         [
             # 壳层与界面之间那点小事：界面靠 /api/desktop/info 画窗口 chrome，
@@ -162,6 +186,12 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             Route("/api/desktop/chat-readiness", _readiness, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/import/cc-switch", _import_scan, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/import/cc-switch", _import_entries, methods=["POST"], include_in_schema=False),
+            # /api/desktop/zoom —— 缩放落在哪儿。WebView2 的 ZoomFactor 是引擎级
+            # 缩放（vh/100%/媒体查询自洽，文字按真实字号渲染），CSS zoom 是页面内
+            # 缩放（视口单位要自己补偿）。界面开机问一次、每次改缩放 POST 一次，
+            # 失败就自动回落 CSS —— 所以这里的返回必须诚实（见 native_zoom）。
+            Route("/api/desktop/zoom", _zoom_capability, methods=["GET"], include_in_schema=False),
+            Route("/api/desktop/zoom", _zoom_set, methods=["POST"], include_in_schema=False),
         ]
     )
 

@@ -21,6 +21,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from . import native_zoom
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_WIDTH = 1440
@@ -142,6 +144,11 @@ def create_window(
     """
     import webview  # noqa: PLC0415
 
+    # 建窗口之前先把 Edge 后端接住：WebView2 的原生缩放要用它的控件，
+    # 而 pywebview 自己不给 ``window.native`` 赋值。非 Windows / 非 Edge 后端
+    # 下这是空操作，永不抛 —— 界面会继续用 CSS zoom（见 native_zoom 的说明）。
+    native_zoom.install_hook()
+
     api = WindowAPI(None, app_root=app_root or Path.cwd())
     window = webview.create_window(
         title,
@@ -161,6 +168,7 @@ def start_gui(*, storage_path: Path | None = None, debug: bool = False) -> None:
     """Run the GUI loop until the last window closes."""
     import webview  # noqa: PLC0415
 
+    native_zoom.install_hook()  # 幂等；见 create_window 里的说明
     kwargs: dict[str, Any] = {"debug": debug}
     if storage_path is not None:
         storage_path.mkdir(parents=True, exist_ok=True)

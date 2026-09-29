@@ -95,8 +95,14 @@ wa-icon { flex: none; align-self: center; }
 
 html, body {
   margin: 0;
-  height: 100%;
+  /* 根节点上的 zoom 不会让视口单位跟着缩小：`100vh` 仍是「放大后」的视口高，
+     于是整页比视口高一截，聚焦输入框时浏览器把根容器滚下去 —— 用户看到的是
+     「点一下就整个页面上移、标题栏消失」。--ui-h 由 ui-prefs.js 写成
+     「innerHeight / zoom」的布局像素，两种引擎下渲染出来都正好等于视口。 */
+  height: var(--ui-h, 100%);
+  min-height: 0;
   overflow: hidden;
+  overflow: clip;   /* hidden 仍可被 focus/scrollIntoView 程序化滚动，clip 不能 */
   background: var(--bg);
   color: var(--fg);
   font-family: var(--sans);
@@ -117,7 +123,7 @@ button { cursor: pointer; background: none; border: none; }
 #app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   min-width: 0;
 }
 
@@ -193,7 +199,7 @@ button { cursor: pointer; background: none; border: none; }
 
 /* ── rail ──────────────────────────────────────────────────────────────── */
 .new-session {
-  flex: 1 1 auto;
+  flex: 0 0 auto;   /* 按钮不能长高：flex:1 时它会和会话列表平分剩余空间 → 撑成一整块 */
   display: flex; align-items: center; justify-content: center; gap: 6px;
   padding: 7px 10px;
   border-radius: var(--radius);

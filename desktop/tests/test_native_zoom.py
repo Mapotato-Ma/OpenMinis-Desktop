@@ -1,0 +1,138 @@
+"""原生缩放（WebView2 ZoomFactor）的契约测试。
+
+这里能测的是**逻辑**：失败一律变成 reason、只有读回一致才算成功、
+跨线程时走 UI 线程兜底、越界/脏参数不进控件。真正的 .NET 控件在 iSH 里
+不存在 —— 那部分靠 CI（windows-latest 上跑真 exe）拿 ``GET /api/desktop/zoom``
+的实测回答，别在这里假装测过。
+"""
+from __future__ import annotations
+
+import sys
+import types
+
+import pytest
+
+from desktop import native_zoom
+
+
+class FakeWidget:
+    """最小 WebView2 替身：ZoomFactor 可读可写。"""
+
+    CoreWebView2 = object()
+
+    def __init__(self, *, sticky: float | None = None, cross_thread: bool = False):
+        self._value = 1.0
+        self._sticky = sticky
+        self._cross_thread = cross_thread
+        self.on_ui_thread = False
+        self.sets: list[float] = []
+
+    @property
+    def ZoomFactor(self) -> float:
+        return self._sticky if self._sticky is not None else self._value
+
+    @ZoomFactor.setter
+    def ZoomFactor(self, value: float) -> None:
+        if self._cross_thread and not self.on_ui_thread:
+            raise RuntimeError("Cross-thread operation not valid")
+        self.sets.append(value)
+        self._value = value
+
+
+class FakeForm:
+    def __init__(self, widgets: list[FakeWidget]):
+        self._widgets = widgets
+
+    def Invoke(self, action):  # noqa: ANN001, ANN201 - 模拟 WinForms 的回到 UI 线程
+        for widget in self._widgets:
+            widget.on_ui_thread = True
+        action()
+
+
+class FakeChrome:
+    def __init__(self, widget: FakeWidget):
+        self.webview = widget
+        self.form = FakeForm([widget])
+
+
+@pytest.fixture(autouse=True)
+def _clean():
+    native_zoom.reset_for_tests()
+    yield
+    native_zoom.reset_for_tests()
+
+
+def _attach(widget: FakeWidget) -> FakeChrome:
+    chrome = FakeChrome(widget)
+    native_zoom._state["chrome"] = chrome
+    return chrome
+
+
+def test_no_window_reports_why_and_never_raises():
+    """拿不到控件时：说清原因，且不许抛（这模块在启动路径上）。"""
+    cap = native_zoom.capability()
+    assert cap["handle"] is False
+    assert cap["reason"], "失败必须给人话原因，否则界面上只能显示“不可用”"
+    result = native_zoom.set_zoom(1.44)
+    assert result["ok"] is False
+    assert result["reason"] == cap["reason"]
+
+
+def test_install_hook_is_safe_without_edge_backend():
+    """非 Windows / 没装 pywebview 时安装挂钩是空操作，不是错误。"""
+    native_zoom.install_hook()
+    native_zoom.install_hook()  # 幂等
+    assert native_zoom.capability()["handle"] is False
+
+
+def test_sets_and_reads_back_the_exact_factor():
+    widget = FakeWidget()
+    _attach(widget)
+    cap = native_zoom.capability()
+    assert cap["handle"] is True and cap["ready"] is True and cap["applied"] == 1.0
+
+    result = native_zoom.set_zoom(1.44)
+    assert result == {"ok": True, "applied": 1.44, "reason": ""}
+    assert widget.sets == [1.44], "应当只调一次控件"
+
+
+def test_lying_control_is_a_failure_not_a_shrug():
+    """设进去但读回来不一致 —— 不接受“可能生效”（不然界面会同时什么都不做）。"""
+    widget = FakeWidget(sticky=1.0)
+    _attach(widget)
+    result = native_zoom.set_zoom(1.44)
+    assert result["ok"] is False
+    assert "不接受" in result["reason"]
+
+
+def test_cross_thread_falls_back_to_the_ui_thread():
+    """WinForms 控件跨线程改属性会抛 —— 要能自己回到 UI 线程再设。"""
+    widget = FakeWidget(cross_thread=True)
+    _attach(widget)
+    fake_system = types.ModuleType("System")
+    fake_system.Action = lambda fn: fn  # pythonnet 的委托替身
+    sys.modules["System"] = fake_system
+    try:
+        result = native_zoom.set_zoom(1.2)
+    finally:
+        sys.modules.pop("System", None)
+    assert result["ok"] is True, result["reason"]
+    assert result["applied"] == 1.2
+    assert widget.on_ui_thread is True, "没有回到 UI 线程"
+
+
+@pytest.mark.parametrize("bad", ["nope", None, {}, float("nan")])
+def test_dirty_factor_never_reaches_the_control(bad):
+    widget = FakeWidget()
+    _attach(widget)
+    result = native_zoom.set_zoom(bad)
+    assert result["ok"] is False
+    assert widget.sets == [], "脏参数不该碰控件"
+
+
+@pytest.mark.parametrize("factor", [0.4, 5.5, 100])
+def test_out_of_range_is_refused(factor):
+    widget = FakeWidget()
+    _attach(widget)
+    assert native_zoom.set_zoom(factor)["ok"] is False
+    assert widget.sets == []

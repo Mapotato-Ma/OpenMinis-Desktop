@@ -165,6 +165,11 @@ jobs:
             Write-Host "packaged asset ok: $asset"
           }
           Write-Host "desktop info: $info"
+          # 缩放交给谁：WebView2 原生 ZoomFactor（引擎级）还是页面里的 CSS zoom。
+          # 这里只打印不判定 —— 原生拿不到是降级、不是失败（界面会回落 CSS），
+          # 但我们要在日志里看得见，别靠用户报「缩放感觉不对」来发现。
+          $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/desktop/zoom").Content
+          Write-Host "::notice::zoom capability: $zoom"
           Write-Host "frozen exe is healthy and serving the desktop UI"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 

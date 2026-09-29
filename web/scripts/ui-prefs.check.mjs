@@ -37,10 +37,10 @@ function harness(initial) {
   const getComputedStyle = () => ({
     getPropertyValue: (name) => (name === '--sans' ? '-apple-system, "Segoe UI"' : 'Consolas, monospace'),
   });
-  const win = {};
+  const win = { innerHeight: 900, addEventListener: (t, fn) => { win.handlers[t] = fn; }, handlers: {} };
   new Function('module', 'window', 'document', 'localStorage', 'getComputedStyle', SRC)(
     { exports: {} }, win, { documentElement: root }, localStorage, getComputedStyle);
-  return { P: win.UiPrefs, store, props, classes, style, root };
+  return { P: win.UiPrefs, store, props, classes, style, root, win };
 }
 
 test('档位换算 = VS Code 的 1.2^n', () => {
@@ -99,8 +99,7 @@ test('宿主原生缩放接管时不留 CSS zoom（否则两者相乘）', () =>
   P.setNativeZoomHook(null);
 });
 
-test('档位边界处不许越界（菜单置灰用）', () => {
-  const { P } = harness();
+test('档位边界处不许越界（菜单置灰用）', () => {  const { P } = harness();
   P.set('uiZoomLevel', 9);
   assert.equal(P.zoomCanIn(), false);
   assert.equal(P.zoomCanOut(), true);
@@ -157,4 +156,29 @@ test('主题沿用既有的 om.themeMode 键（不另起一份）', () => {
   assert.equal(store.get('om.themeMode'), 'dark');
   assert.equal(store.has('om.theme'), false);
   assert.equal(P.set('theme', 'nonsense'), 'system');
+});
+
+test('缩放时补偿根高度 --ui-h（否则页面比视口高、焦点滚动会把整页顶上去）', () => {
+  // 用户实测（144%）：点「新会话」后标题栏消失、整页上移。根因是 vh 不跟着 zoom 缩小，
+  // 100vh 的 #app 按放大后的视口铺满 → 页面比视口高一截。补偿 = innerHeight / zoom。
+  const h = harness();
+  h.P.zoomIn();                                   // 120%
+  assert.equal(h.style.zoom, '1.2');
+  assert.equal(h.props['--ui-h'], '750.00px', '120% 时根高度应写成 900/1.2');
+  h.P.zoomReset();
+  assert.equal(h.props['--ui-h'], undefined, '回到 100% 就该把补偿去掉（否则根高度被写死）');
+  h.P.zoomIn(); h.P.zoomIn();                      // 144%
+  assert.equal(h.props['--ui-h'], '625.00px');
+  assert.equal(typeof h.win.handlers.resize, 'function', '没有监听窗口变化，改窗口大小后补偿会失真');
+  h.win.innerHeight = 450;
+  h.win.handlers.resize();
+  assert.equal(h.props['--ui-h'], '312.50px', '窗口变高变矮后没有重算补偿');
+});
+
+test('宿主原生缩放接管时不写 --ui-h（原生缩放自己就管视口）', () => {
+  const h = harness();
+  h.P.setNativeZoomHook(() => true);
+  h.P.zoomIn();
+  assert.equal(h.style.zoom, '', '原生缩放接管了还留着 CSS zoom 会乘起来');
+  assert.equal(h.props['--ui-h'], undefined, '原生缩放下不该再补偿 CSS 的 vh 语义');
 });
