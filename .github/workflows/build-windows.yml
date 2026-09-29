@@ -158,6 +158,12 @@ jobs:
           }
 
           $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/desktop/info").Content
+          # 打包断言：新界面文件真的进了包（不然 exe 会跑在没有 ui-prefs 的旧界面上）
+          foreach ($asset in @('ui-prefs.js', 'components/dialog/dialog.js')) {
+            $code = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/_desktop/$asset").StatusCode
+            if ($code -ne 200) { Write-Error "packaged UI is missing $asset"; exit 1 }
+            Write-Host "packaged asset ok: $asset"
+          }
           Write-Host "desktop info: $info"
           Write-Host "frozen exe is healthy and serving the desktop UI"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
