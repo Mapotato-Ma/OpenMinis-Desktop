@@ -32,7 +32,7 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from desktop import paths  # noqa: E402
+from desktop import __version__, paths  # noqa: E402
 from desktop import startup_trace as trace  # noqa: E402
 from desktop.launcher import (  # noqa: E402
     BootPlan,

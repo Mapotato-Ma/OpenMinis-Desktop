@@ -61,6 +61,28 @@ STEPS = [
         hint="pytest 没装：pip install -e '.[dev]'",
     ),
     Step(
+        name="lint",
+        label="静态检查：未定义 / 重复定义的名字（ruff F821/F811）",
+        # 只挑"一定是 bug"的两条规则。全量 ruff 会淹在历史噪声里（未用 import、
+        # import 排序），而门禁的价值在于**每次都真的会跑**。
+        # 这一条本来就能拦住 v0.3.1 那次 `NameError: name '__version__' is not defined`：
+        # 它只在冻结版走 --no-window 那条路径时才炸，本地测试与冒烟测试都没走到。
+        cmd=[
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--select",
+            "F821,F811",
+            "desktop",
+            "desktop_main.py",
+            "scripts",
+        ],
+        needs="ruff",
+        timeout=180,
+        hint="pip install ruff（CI 的 verify.yml 装 dev 依赖，那边一定会跑）",
+    ),
+    Step(
         name="frontend",
         label="前端检查 (npm run check)",
         cmd=["npm", "run", "check"],

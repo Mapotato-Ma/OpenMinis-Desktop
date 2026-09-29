@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from desktop import launcher, paths
+from desktop import __version__, launcher, paths
 from desktop import startup_trace as trace
 from desktop.server_runner import BootCancelled
 
@@ -318,3 +318,29 @@ def test_splash_falls_back_when_the_ui_dir_is_missing(monkeypatch):
     monkeypatch.setattr(paths, "desktop_web_dir", lambda: None)
     html = launcher.splash_html()
     assert "__bootStatus" in html and "__bootFail" in html
+
+
+# ---------------------------------------------------------------------------
+# 无窗口路径
+# ---------------------------------------------------------------------------
+def test_headless_path_runs_and_reports_the_timeline(monkeypatch, tmp_path):
+    """`--no-window` 就是 CI 探活走的那条路，它必须真的跑得过。
+
+    v0.3.1 的第一版在这里引用了没 import 的 ``__version__``：本地测试全绿、
+    冒烟测试也全绿（它直接调 ``start_server``，不经过 ``main``），而冻结版一进
+    ``--no-window`` 就 NameError —— 因为它是"进程起来、健康、然后马上死"，
+    外面看到的是端口开着但请求没人应。这条测试就是那次的回归护栏。
+    """
+    from desktop import app as desktop_app
+
+    monkeypatch.setattr(desktop_app, "_park", lambda server: 0)  # noqa: ARG005
+    trace.reset_for_tests()
+
+    plan = make_plan(tmp_path, existing="http://127.0.0.1:9999")
+    args = SimpleNamespace(no_window=True, browser=False, debug=False)
+
+    assert desktop_app._present_headless(plan, args) == 0
+
+    log = paths.data_root() / "logs" / "startup.log"
+    assert log.is_file()
+    assert f"version={__version__}" in log.read_text(encoding="utf-8")

@@ -76,6 +76,18 @@ for ($i = 1; $i -le $Runs; $i++) {
 
     Write-Host ("run {0} ({1}): port={2}ms health={3}ms exited={4}" -f $i, $label, $portMs, $healthMs, $p.HasExited)
 
+    if (-not $ok) {
+        # 失败时只报"没起来"没有意义：把应用自己的日志尾巴打出来。上一次 CI 就是
+        # 这样才发现真相（进程健康之后立刻 NameError 崩掉）。
+        $appLog = Join-Path $logDir "desktop.log"
+        if (Test-Path $appLog) {
+            Write-Host "--- $appLog (tail 30) ---"
+            Get-Content $appLog -Tail 30 | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Host "no desktop.log at $appLog"
+        }
+    }
+
     if ($p -and -not $p.HasExited) {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
         # 给它一点时间释放端口，否则第二次启动会换一个端口
