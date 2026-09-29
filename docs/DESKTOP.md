@@ -353,6 +353,12 @@ v0.1.0 的「模型服务」页**没有保存按钮**，于是出现了一个非
 `GET /api/desktop/zoom` 是同一份数据；CI 的打包探活会把它打进日志，
 所以「Windows 上到底能不能原生缩放」不需要靠用户回报。
 
+**别按印象包 `__init__`**：pywebview 6.2.1 的签名是
+`EdgeChrome.__init__(self, form, window, cache_dir)`，包装器一律写
+`(self, *args, **kwargs)` 原样透传。v0.3.5 就是按 `(self, window)` 包了一层，
+`EdgeChrome(...)` 一调就 `TypeError`，窗口建不出来 —— **exe 双击毫无反应**
+（窗口模式没有控制台，连报错都看不到）。我们自己的记账代码也必须整块吞异常。
+
 ---
 
 ## 5. 打包

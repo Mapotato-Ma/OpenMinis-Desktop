@@ -16,6 +16,7 @@ WebView2 控件。这里在建窗口之前包一层 `EdgeChrome.__init__` 自己
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -25,7 +26,8 @@ _ZOOM_MIN = 0.5
 _ZOOM_MAX = 5.0
 _TOLERANCE = 0.005
 
-_state: dict[str, Any] = {"chrome": None, "patch_error": None, "installed": False}
+_state: dict[str, Any] = {"chrome": None, "patch_error": None, "installed": False,
+                           "signature": None}
 
 
 def install_hook() -> None:
@@ -43,14 +45,18 @@ def install_hook() -> None:
         if getattr(original, "__openminis_wrapped__", False):  # 已经有人包过
             _state["installed"] = True
             return
+        try:
+            _state["signature"] = str(inspect.signature(original))
+        except (TypeError, ValueError):
+            _state["signature"] = "?"
 
-        def patched(self, window):  # noqa: ANN001
-            original(self, window)
-            _state["chrome"] = self
-            try:
-                window.native = self  # pywebview 漏的一步，顺手补上
-            except Exception:  # noqa: BLE001 - 补不上也不影响我们自己的引用
-                pass
+        def patched(self, *args, **kwargs):
+            # 参数必须**完全照传**：pywebview 6.2.1 的签名是
+            # ``(self, form, window, cache_dir)``。v0.3.5 我按 ``(self, window)``
+            # 包过一层，结果 EdgeChrome(...) 一调就 TypeError，窗口建不出来 ——
+            # 双击 exe 没反应。签名无关的 ``*args`` 是对这类改动的唯一防御。
+            original(self, *args, **kwargs)
+            _keep(self)
 
         patched.__openminis_wrapped__ = True  # type: ignore[attr-defined]
         edgechromium.EdgeChrome.__init__ = patched
@@ -59,6 +65,14 @@ def install_hook() -> None:
     except Exception as exc:  # noqa: BLE001
         _state["patch_error"] = f"挂钩失败：{type(exc).__name__}: {exc}"
         _state["installed"] = True
+
+
+def _keep(chrome: Any) -> None:
+    """把后端对象接住。**只做这件事** —— 我们加的代码不许影响建窗口。"""
+    try:
+        _state["chrome"] = chrome
+    except BaseException:  # noqa: BLE001
+        pass
 
 
 def _why_no_control() -> str:
@@ -103,7 +117,8 @@ def capability() -> dict[str, Any]:
     """给界面/CI 看的能力快照。**不声称支持**，只报告握到手的东西。"""
     widget, why = control()
     if widget is None:
-        return {"handle": False, "ready": False, "applied": None, "reason": why}
+        return {"handle": False, "ready": False, "applied": None, "reason": why,
+                "signature": _state.get("signature")}
     try:
         ready = bool(getattr(widget, "CoreWebView2", None))
     except Exception:  # noqa: BLE001
@@ -113,7 +128,8 @@ def capability() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"handle": True, "ready": ready, "applied": None,
                 "reason": f"读不到 ZoomFactor：{type(exc).__name__}"}
-    return {"handle": True, "ready": ready, "applied": applied, "reason": ""}
+    return {"handle": True, "ready": ready, "applied": applied, "reason": "",
+            "signature": _state.get("signature")}
 
 
 def set_zoom(factor: Any) -> dict[str, Any]:
@@ -147,4 +163,5 @@ def set_zoom(factor: Any) -> dict[str, Any]:
 
 def reset_for_tests() -> None:
     """仅供测试：清掉接住的对象与补丁标记。"""
-    _state.update({"chrome": None, "patch_error": None, "installed": False})
+    _state.update({"chrome": None, "patch_error": None, "installed": False,
+                   "signature": None})

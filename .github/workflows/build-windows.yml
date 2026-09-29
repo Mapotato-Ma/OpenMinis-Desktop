@@ -182,28 +182,35 @@ jobs:
       - name: Probe native zoom capability (windowed)
         shell: pwsh
         # 上面那次探活是 --no-window 起的：进程里根本没有窗口，所以 /api/desktop/zoom
-        # 只会回答「没有控件」，**证明不了原生缩放能不能用**。这一步带窗口再起一次
-        # （Start-Process 不带 --no-window），只打印不判定 —— runner 上桌面会话未必
-        # 可用，失败也只是降级（界面会回落 CSS zoom），别把流水线染红。
+        # 只会回答「没有控件」，**证明不了原生缩放能不能用**，更拦不住「窗口模式崩了」
+        # （v0.3.5 就是这样漏出去的）。这一步带窗口再起一次，并把**进程退出码**和
+        # 应用自己的 startup.log 打出来 —— 崩了和「runner 没桌面」必须能分开看。
+        # 仍然 continue-on-error：runner 上桌面会话未必可用，降级不该染红流水线。
         continue-on-error: true
         run: |
           $p = Start-Process -FilePath dist\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
           $zoom = $null
           for ($i = 0; $i -lt 25; $i++) {
             Start-Sleep -Seconds 2
+            $p.Refresh()
+            if ($p.HasExited) { break }
             try {
               $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "http://127.0.0.1:8803/api/desktop/zoom").Content
               if ($zoom) { break }
             } catch { }
           }
+          $p.Refresh()
           if ($zoom) {
             Write-Host "::notice::windowed zoom capability: $zoom"
-            $banner = '{"handle":true'
-            if ($zoom.StartsWith($banner)) { Write-Host "native zoom is usable on Windows" }
+            if ($zoom.StartsWith('{"handle":true')) { Write-Host "native zoom is usable on Windows" }
             else { Write-Host "::warning::native zoom NOT usable — see reason above" }
+          } elseif ($p.HasExited) {
+            Write-Host "::error::windowed exe exited early (exit code $($p.ExitCode)) — 窗口模式的启动路径崩了，别当成“runner 没桌面”"
           } else {
-            Write-Host "::warning::windowed probe got no answer (runner has no usable desktop?)"
+            Write-Host "::warning::windowed exe is alive but never served HTTP within 50s"
           }
+          $log = Join-Path $env:USERPROFILE 'openminis\logs\startup.log'
+          if (Test-Path $log) { Write-Host "--- startup.log tail"; Get-Content $log -Tail 25 }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           exit 0
 

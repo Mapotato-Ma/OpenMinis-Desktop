@@ -147,3 +147,63 @@ def test_reason_distinguishes_not_installed_from_no_window():
     after = native_zoom.capability()
     assert "挂钩未安装" not in after["reason"]
     assert after["reason"], "装了挂钩也得说清为什么还没接住控件"
+
+
+def _fake_edge_module(monkeypatch, arity: int = 3):
+    """装一个假的 ``webview.platforms.edgechromium``（`__init__` 形状可控）。"""
+    calls: dict[str, tuple] = {}
+
+    class FakeEdgeChrome:
+        def __init__(self, *args):  # noqa: ANN002
+            calls["args"] = args
+
+    if arity == 3:  # 真 pywebview 6.2.1 的形状：(self, form, window, cache_dir)
+        def _init(self, form, window, cache_dir):  # noqa: ANN001
+            calls["args"] = (form, window, cache_dir)
+
+        FakeEdgeChrome.__init__ = _init
+
+    edge = types.ModuleType("webview.platforms.edgechromium")
+    edge.EdgeChrome = FakeEdgeChrome
+    platforms = types.ModuleType("webview.platforms")
+    platforms.edgechromium = edge
+    monkeypatch.setitem(sys.modules, "webview", types.ModuleType("webview"))
+    monkeypatch.setitem(sys.modules, "webview.platforms", platforms)
+    monkeypatch.setitem(sys.modules, "webview.platforms.edgechromium", edge)
+    return FakeEdgeChrome, calls
+
+
+@pytest.mark.parametrize("args", [(), ("w",), ("form", "window", "cache"), ("f", "w", "c", "extra")])
+def test_wrapper_passes_whatever_pywebview_sends(monkeypatch, args):
+    """包装器必须签名无关 —— 参数原样透传，一个都不许少。"""
+    cls, calls = _fake_edge_module(monkeypatch, arity=99)  # 随便什么参数都吃
+    native_zoom.install_hook()
+    cls(*args)
+    assert calls["args"] == args
+
+
+def test_patched_init_accepts_the_real_pywebview_signature(monkeypatch):
+    """v0.3.5 的线上事故回归：真签名是 ``(self, form, window, cache_dir)``，
+    而包装器当时写成了 ``(self, window)`` → 一调就 TypeError，**窗口建不出来**，
+    双击 exe 毫无反应（而且是窗口模式，没有控制台，什么都看不到）。"""
+    cls, calls = _fake_edge_module(monkeypatch, arity=3)
+    native_zoom.install_hook()
+    chrome = cls("form", "window", "cache")
+    assert calls["args"] == ("form", "window", "cache")
+    assert native_zoom._state["chrome"] is chrome, "包装器没能接住后端对象"
+    assert native_zoom._state["signature"], "没把真实签名记下来（诊断要用）"
+    assert native_zoom.capability()["signature"], "capability 里应带上签名"
+
+
+def test_our_bookkeeping_can_never_break_window_creation(monkeypatch):
+    """我们加的记账代码绝不许把建窗口搞挂 —— 例外一律吞掉，原实现照跑。"""
+    cls, calls = _fake_edge_module(monkeypatch)
+    native_zoom.install_hook()
+
+    class Exploding(dict):
+        def __setitem__(self, key, value):  # noqa: ANN001
+            raise RuntimeError("磁盘炸了之类的")
+
+    monkeypatch.setattr(native_zoom, "_state", Exploding(local=1, installed=True))
+    cls("f", "w", "c")          # 不许抛
+    assert calls["args"] == ("f", "w", "c"), "原实现必须照常跑完"
