@@ -99,18 +99,36 @@ def _read(widget: Any) -> float:
     return float(widget.ZoomFactor)
 
 
-def _set_direct(widget: Any, factor: float) -> None:
+def _set_direct(widget: Any, factor: float) -> float:
     widget.ZoomFactor = factor
+    return _read(widget)
 
 
-def _set_via_ui_thread(chrome: Any, widget: Any, factor: float) -> None:
-    """WinForms 控件跨线程改属性会抛 InvalidOperationException，回到 UI 线程再设。"""
+def _on_ui_thread(chrome: Any, action: Any) -> Any:
+    """在宿主窗体（UI 线程）上执行 action —— **读写都算**。
+
+    WinForms 控件的跨线程访问会抛 ``InvalidOperationException``。CI 实测（v0.3.6）：
+    在 uvicorn 线程里读 ``ZoomFactor`` / ``CoreWebView2`` 就是这个错 —— 所以不只
+    「写」要回 UI 线程，「读」和「是否就绪」也一样。
+    异常不扔进 .NET 委托里，而是带回来再抛，便于如实报告原因。
+    """
     from System import Action  # noqa: PLC0415  (pythonnet)
 
     form = getattr(chrome, "form", None)
     if form is None:
-        raise RuntimeError("拿不到宿主窗体，无法回到 UI 线程")
-    form.Invoke(Action(lambda: _set_direct(widget, factor)))
+        return action()  # 没有窗体（非 WinForms 后端）就直着来，失败会如实上报
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = action()
+        except BaseException as exc:  # noqa: BLE001 - 带回去再抛
+            box["error"] = exc
+
+    form.Invoke(Action(run))
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def capability() -> dict[str, Any]:
@@ -119,15 +137,22 @@ def capability() -> dict[str, Any]:
     if widget is None:
         return {"handle": False, "ready": False, "applied": None, "reason": why,
                 "signature": _state.get("signature")}
+    chrome = _state.get("chrome")
+
+    def probe() -> tuple[bool, float]:
+        return (bool(getattr(widget, "CoreWebView2", None)), _read(widget))
+
     try:
-        ready = bool(getattr(widget, "CoreWebView2", None))
-    except Exception:  # noqa: BLE001
-        ready = False
-    try:
-        applied: float | None = _read(widget)
+        ready, applied = _on_ui_thread(chrome, probe)
     except Exception as exc:  # noqa: BLE001
-        return {"handle": True, "ready": ready, "applied": None,
-                "reason": f"读不到 ZoomFactor：{type(exc).__name__}"}
+        # 没有 pythonnet / 没有窗体时上一步会失败，直着再读一次
+        # （非 WinForms 后端不走 UI 线程也没事）
+        try:
+            ready, applied = probe()
+        except Exception:  # noqa: BLE001
+            return {"handle": True, "ready": False, "applied": None,
+                    "reason": f"读不到 ZoomFactor：{type(exc).__name__}",
+                    "signature": _state.get("signature")}
     return {"handle": True, "ready": ready, "applied": applied, "reason": "",
             "signature": _state.get("signature")}
 
@@ -147,11 +172,16 @@ def set_zoom(factor: Any) -> dict[str, Any]:
 
     errors: list[str] = []
     chrome = _state.get("chrome")
-    for label, apply in (("直接", lambda: _set_direct(widget, want)),
-                         ("UI 线程", lambda: _set_via_ui_thread(chrome, widget, want))):
+    attempts = (
+        # UI 线程优先：Windows 上控件的跨线程访问一律抛 InvalidOperationException，
+        # 而 form 为空时 _on_ui_thread 会直接执行（覆盖非 WinForms 后端）。
+        ("UI 线程", lambda: _on_ui_thread(chrome, lambda: _set_direct(widget, want))),
+        # 没有 pythonnet（非 Windows）时上一跳会 ImportError，再直着试一次
+        ("直接", lambda: _set_direct(widget, want)),
+    )
+    for label, apply in attempts:
         try:
-            apply()
-            got = _read(widget)
+            got = float(apply())
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{label}失败：{type(exc).__name__}: {exc}")
             continue

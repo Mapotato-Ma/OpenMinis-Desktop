@@ -27,14 +27,18 @@ class FakeWidget:
         self.on_ui_thread = False
         self.sets: list[float] = []
 
+    def _guard(self) -> None:
+        if self._cross_thread and not self.on_ui_thread:
+            raise RuntimeError("Cross-thread operation not valid")
+
     @property
     def ZoomFactor(self) -> float:
+        self._guard()
         return self._sticky if self._sticky is not None else self._value
 
     @ZoomFactor.setter
     def ZoomFactor(self, value: float) -> None:
-        if self._cross_thread and not self.on_ui_thread:
-            raise RuntimeError("Cross-thread operation not valid")
+        self._guard()
         self.sets.append(value)
         self._value = value
 
@@ -53,6 +57,16 @@ class FakeChrome:
     def __init__(self, widget: FakeWidget):
         self.webview = widget
         self.form = FakeForm([widget])
+
+
+@pytest.fixture(autouse=True)
+def _fake_pythonnet(monkeypatch):
+    """真 pythonnet 只在 Windows 上；测试里给个 ``System.Action`` 替身，
+    这样「回到 UI 线程」这条路径在本地也被真的走到。"""
+    fake = types.ModuleType("System")
+    fake.Action = lambda fn: fn
+    monkeypatch.setitem(sys.modules, "System", fake)
+    yield fake
 
 
 @pytest.fixture(autouse=True)
@@ -109,13 +123,7 @@ def test_cross_thread_falls_back_to_the_ui_thread():
     """WinForms 控件跨线程改属性会抛 —— 要能自己回到 UI 线程再设。"""
     widget = FakeWidget(cross_thread=True)
     _attach(widget)
-    fake_system = types.ModuleType("System")
-    fake_system.Action = lambda fn: fn  # pythonnet 的委托替身
-    sys.modules["System"] = fake_system
-    try:
-        result = native_zoom.set_zoom(1.2)
-    finally:
-        sys.modules.pop("System", None)
+    result = native_zoom.set_zoom(1.2)
     assert result["ok"] is True, result["reason"]
     assert result["applied"] == 1.2
     assert widget.on_ui_thread is True, "没有回到 UI 线程"
@@ -207,3 +215,36 @@ def test_our_bookkeeping_can_never_break_window_creation(monkeypatch):
     monkeypatch.setattr(native_zoom, "_state", Exploding(local=1, installed=True))
     cls("f", "w", "c")          # 不许抛
     assert calls["args"] == ("f", "w", "c"), "原实现必须照常跑完"
+
+
+def test_reads_also_go_through_the_ui_thread():
+    """CI 实测（v0.3.6）：在 uvicorn 线程里**读** ZoomFactor / CoreWebView2 也是
+    InvalidOperationException —— 所以读和「是否就绪」同样得回 UI 线程，
+    不然能力查询永远报 ready:false，界面白白回落 CSS。"""
+    widget = FakeWidget(cross_thread=True)
+    _attach(widget)
+    cap = native_zoom.capability()
+    assert widget.on_ui_thread is True, "读没有回到 UI 线程"
+    assert cap["handle"] is True and cap["ready"] is True, cap
+    assert cap["applied"] == 1.0
+
+
+def test_ui_thread_readback_is_not_a_cross_thread_illusion():
+    """设 + 读回必须在同一次 UI 线程调用里完成，否则读回的是跨线程假象。"""
+    widget = FakeWidget(cross_thread=True)
+    _attach(widget)
+    result = native_zoom.set_zoom(1.44)
+    assert result["ok"] is True and result["applied"] == 1.44, result
+
+
+def test_without_pythonnet_it_falls_back_to_direct_access(monkeypatch):
+    """没有 pythonnet（非 Windows）时「回 UI 线程」那跳会 ImportError —— 那就直着读，
+    不能因为平台差异就永远报「读不到」。"""
+    widget = FakeWidget()
+    chrome = _attach(widget)
+    chrome.form = None                      # 非 WinForms 后端没有窗体
+    monkeypatch.setitem(sys.modules, "System", None)
+    monkeypatch.delitem(sys.modules, "System", raising=False)
+    cap = native_zoom.capability()
+    assert cap["handle"] is True and cap["applied"] == 1.0, cap
+    assert native_zoom.set_zoom(1.2)["ok"] is True

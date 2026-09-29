@@ -202,8 +202,16 @@ jobs:
           $p.Refresh()
           if ($zoom) {
             Write-Host "::notice::windowed zoom capability: $zoom"
-            if ($zoom.StartsWith('{"handle":true')) { Write-Host "native zoom is usable on Windows" }
-            else { Write-Host "::warning::native zoom NOT usable — see reason above" }
+            # 「能不能用」只有真的设一次才知道 —— 而且只有「设进去 + 读回来一致」才算数。
+            # 用 1.0 探（不改变任何视觉）。
+            try {
+              $set = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Method Post `
+                      -ContentType 'application/json' -Body '{"factor":1.0}' `
+                      "http://127.0.0.1:8803/api/desktop/zoom").Content
+              Write-Host "::notice::native zoom set: $set"
+              if ($set.StartsWith('{"ok":true')) { Write-Host "native zoom is usable on Windows" }
+              else { Write-Host "::warning::native zoom NOT usable — see reason above" }
+            } catch { Write-Host "::warning::native zoom set request failed: $_" }
           } elseif ($p.HasExited) {
             Write-Host "::error::windowed exe exited early (exit code $($p.ExitCode)) — 窗口模式的启动路径崩了，别当成“runner 没桌面”"
           } else {

@@ -1,5 +1,24 @@
 # 变更日志
 
+## v0.3.7 — 原生缩放的读写都回到 UI 线程（2026-09-29）
+
+v0.3.6 的 CI 带窗口探针第一次给出了真凭实据：
+`{"handle":true,"ready":false,"reason":"读不到 ZoomFactor：InvalidOperationException"}`
+—— 说明**钩子挂上了、后端对象也接住了**，但控件属性不能从 uvicorn 线程碰：
+WinForms 的跨线程访问一律抛 `InvalidOperationException`。我上一版只给「写」做了
+UI 线程兜底，「读」和「是否就绪」没有，于是能力查询永远报 `ready:false`，
+界面白白回落 CSS。
+
+- `capability()` / `set_zoom()` 的**读、写、就绪判断**全部走同一个
+  `_on_ui_thread()`（`form.Invoke`）；没有 pythonnet / 没有窗体时再退回直连访问，
+  所以非 Windows 平台也不会因为这条路径永远失败。
+- 设 + 读回放在**同一次** UI 线程调用里完成 —— 分开做会读到跨线程的假象。
+- CI 探针不再只看 `handle`：它会真的 `POST {"factor":1.0}`（不改变视觉），
+  只有 `ok:true`（设进去 + 读回来一致）才会打「native zoom is usable on Windows」。
+
+回归测试：`test_native_zoom.py` **22 项**（新增「读也要回 UI 线程」
+「读回不是跨线程假象」「没有 pythonnet 时退回直连」）。
+
 ## v0.3.6 — 修 v0.3.5 打不开（原生缩放的钩子签名写错）（2026-09-29）
 
 **症状**：v0.3.5 的 exe 双击没反应（进程静默退出）。
