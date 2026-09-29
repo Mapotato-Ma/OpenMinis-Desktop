@@ -52,6 +52,10 @@ test('启动画面必须自包含（它渲染时后端还不存在）', () => {
   for (const hook of ['__bootStatus', '__bootFail']) {
     assert.ok(html.includes(hook), `splash.html 里没有 ${hook}`);
   }
+  // 数据目录是内核决定的（Windows 上是 %USERPROFILE%\openminis，不是
+  // %LOCALAPPDATA%\openminis）。页面里写死路径 = 让用户按错的路径去找日志；
+  // 界面里唯一一处该显示它的地方（设置页）是问后端要的。
+  assert.ok(!/%LOCALAPPDATA%|%USERPROFILE%|%APPDATA%/.test(html), 'splash.html 不该硬编码数据目录');
 });
 
 /* 我们自己的代码里唯一允许写成 module 的：它必须 import 组件库的 ESM 注册 API，

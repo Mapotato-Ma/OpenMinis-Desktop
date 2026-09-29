@@ -14,7 +14,7 @@ had its way with us:
 
 ``data_root()``
     Per-user application data. The kernel already resolves this itself
-    (``LOCALAPPDATA`` on Windows, ``XDG_DATA_HOME`` elsewhere) — we only
+    (``~\openminis`` on Windows, ``XDG_DATA_HOME`` elsewhere) — we only
     re-export it so the shell can point a window title at it.
 """
 
@@ -84,8 +84,11 @@ def data_root() -> Path:
     except Exception:  # pragma: no cover - never let a path lookup kill startup
         import os
 
+        # 退路要和内核 ``_default_data_dir()`` 逐字一致，否则一旦上面那条路失败，
+        # 日志就会写到另一个目录 —— 用户按文档找过去什么都没有。
         if sys.platform == "win32":
-            base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        else:
-            base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+            return Path.home() / "openminis"
+        if sys.platform == "darwin":
+            return Path.home() / "Library" / "Application Support" / "openminis"
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
         return base / "openminis"

@@ -90,7 +90,7 @@ jobs:
         run: |
           # A GUI build has no console, so the only sane check is: launch it
           # headless and see whether the backend answers. The app writes its
-          # startup log to %LOCALAPPDATA%\openminis\logs\desktop.log, which is
+          # startup log to %USERPROFILE%\openminis\logs\desktop.log, which is
           # what we dump when it does not come up.
           #
           # Polling is a cheap raw TCP connect with a short timeout, not an
@@ -98,7 +98,7 @@ jobs:
           # Invoke-WebRequest can sit on its own timeout on every attempt and
           # turn a failure into minutes of dead waiting.
           $port = 8799
-          $log = Join-Path $env:LOCALAPPDATA "openminis\logs\desktop.log"
+          $log = Join-Path $env:USERPROFILE "openminis\logs\desktop.log"
           $p = Start-Process -FilePath "dist\OpenMinisDesktop.exe" `
                -ArgumentList "--no-window","--port","$port" -PassThru
 
@@ -188,7 +188,7 @@ jobs:
             Windows 桌面版（原生窗口，基于 OpenMinis 内核）。
 
             下载 `OpenMinisDesktop.exe` 双击运行即可，无需安装 Python 或 Node。
-            首次启动会在 `%LOCALAPPDATA%\openminis` 建数据目录，然后在设置里
+            首次启动会在 `%USERPROFILE%\openminis`（即 `C:\Users\<你的用户名>\openminis`）建数据目录，然后在设置里
             配置模型服务（OpenAI / Anthropic / 任意 OpenAI 兼容网关）。
 
             **嫌启动慢就换便携版**：下载 `OpenMinisDesktop-portable.zip`，解压后双击
@@ -201,7 +201,7 @@ jobs:
               文件树可指向任意目录
             - 首次运行若提示缺少 WebView2，装一次微软的
               [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 较老版本可能需要）
-            - 想知道启动那几秒花在哪：`%LOCALAPPDATA%\openminis\logs\startup.log`
+            - 想知道启动那几秒花在哪：`%USERPROFILE%\openminis\logs\startup.log`
               每次启动写一行（解包 / 内核 / 后端 / 窗口各自的累计毫秒）。
               设环境变量 `OPENMINIS_NO_SPLASH=1` 可以退回旧的启动顺序，用来对比。
 

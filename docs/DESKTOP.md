@@ -44,7 +44,7 @@ pywebview GUI 事件循环                启动期：内核 import → uvicorn
   耗时的对照组。
 
 启动耗时的证据链：`desktop/startup_trace.py` 每次启动往
-`%LOCALAPPDATA%\openminis\logs\startup.log` 追加**一行**（`origin=parent|self|python`
+`%USERPROFILE%\openminis\logs\startup.log` 追加**一行**（`origin=parent|self|python`
 标明 0 点取自哪里 —— 取父进程时刻才能把 onefile 的解包算进去）。
 
 **单实例**：启动时先探测 `host:port` 上是否已有健康的内核，有就直接把新窗口

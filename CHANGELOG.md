@@ -20,7 +20,7 @@
 ### 新增启动时间线（先能测，再谈优化）
 - `desktop/startup_trace.py`：Windows 用 `GetProcessTimes` 取**进程创建时刻**当 0 点
   （这样 onefile 的解包耗时才算得进去；解包发生在父进程，所以父进程是同一个 exe 时用
-  父进程的时刻）。每次启动追加**一行**到 `%LOCALAPPDATA%\openminis\logs\startup.log`。
+  父进程的时刻）。每次启动追加**一行**到 `%USERPROFILE%\openminis\logs\startup.log`。
 - `desktop.log` 补上时间戳 —— 以前没有，用户发日志过来也看不出"几秒"。
 
 ### 顺手

@@ -21,8 +21,23 @@ $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path $ExePath)) { Write-Error "no executable at $ExePath"; exit 1 }
 
-$logDir = Join-Path $env:LOCALAPPDATA "openminis\logs"
-$startupLog = Join-Path $logDir "startup.log"
+# 日志目录**问应用要**，不猜。曾经这里写死 %LOCALAPPDATA%\openminis —— 内核在
+# Windows 上其实用 %USERPROFILE%\openminis（LOCALAPPDATA 只放缓存目录），于是
+# "失败时打印日志"这一步永远打印不出来，白丢了两轮 CI 的现场。
+function Get-AppLogDir([int]$portToTest) {
+    try {
+        $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 "http://127.0.0.1:$portToTest/api/health"
+        if ($health.data_dir) { return (Join-Path $health.data_dir "logs") }
+    } catch { }
+    foreach ($candidate in @(
+            (Join-Path $env:USERPROFILE "openminis\logs"),
+            (Join-Path $env:LOCALAPPDATA "openminis\logs"))) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return (Join-Path $env:USERPROFILE "openminis\logs")
+}
+
+$logDir = $null   # 每次样本健康之后才定得下来
 
 # 参数名刻意不叫 $p：下面 $p 是进程句柄，重名会读到错误的东西。
 function Test-Port([int]$portToTest) {
@@ -48,7 +63,6 @@ function Wait-Health([int]$portToTest, [int]$timeoutSeconds) {
 }
 
 Write-Host "=== startup probe: $ExePath ==="
-Write-Host "log dir: $logDir (exists: $(Test-Path $logDir))"
 $healthy = 0
 
 for ($i = 1; $i -le $Runs; $i++) {
@@ -78,6 +92,7 @@ for ($i = 1; $i -le $Runs; $i++) {
     Write-Host ("run {0} ({1}): port={2}ms health={3}ms exited={4}" -f $i, $label, $portMs, $healthMs, $p.HasExited)
 
     # 应用自己写的那一行（解包 / 内核 / 后端各段累计毫秒）比外面量到的总时长有用得多。
+    if (-not $logDir) { $logDir = Get-AppLogDir $Port }
     $appLog = Join-Path $logDir "desktop.log"
     if (Test-Path $appLog) {
         $timeline = Select-String -Path $appLog -Pattern '\[startup\]' | Select-Object -Last 1
@@ -103,6 +118,8 @@ for ($i = 1; $i -le $Runs; $i++) {
     }
 }
 
+Write-Host "log dir: $logDir"
+$startupLog = Join-Path $logDir "startup.log"
 if (Test-Path $startupLog) {
     Write-Host "--- $startupLog (last $Runs entries) ---"
     Get-Content $startupLog | Select-Object -Last $Runs | ForEach-Object { Write-Host $_ }
