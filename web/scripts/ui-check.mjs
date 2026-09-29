@@ -327,3 +327,48 @@ test('会话必须归入工作区，agent 才会在你看的目录里干活', ()
   assert.ok(read('index.html').includes('id="wsAgentHint"'),
     '界面没告诉用户 agent 到底在哪个目录干活');
 });
+
+test('沙箱/插件/定时/知识库/市场/用量：六个面板都接上了内核 API', () => {
+  // 内核有 14 个路由模块，桌面界面以前只调了 5 个。这几个面板补齐了
+  // 用户会用到的：沙箱（放行）、助理（子代理）、附件上传等。
+  const app = read('app.js');
+  const html = read('index.html');
+  const wired = {
+    guard: ['/guard/events', '/guard/allowlist', 'loadGuard'],
+    plugins: ['/plugins', 'loadPlugins'],
+    scheduled: ['/scheduled/tasks', 'loadScheduled'],
+    knowledge: ['/knowledge', 'loadKnowledge'],
+    marketplace: ['/marketplace', 'loadMarketplace'],
+    usage: ['/usage', 'loadUsage'],
+  };
+  for (const [pane, needles] of Object.entries(wired)) {
+    assert.ok(html.includes(`data-pane="${pane}"`), `缺 ${pane} 面板/导航`);
+    for (const n of needles) assert.ok(app.includes(n), `${pane} 面板没接上 ${n}`);
+  }
+});
+
+test('附件上传：走 /api/upload，消息里只留路径（不塞 base64）', () => {
+  // 一张手机照片 base64 后 ~7MB，进受控 textarea 会卡死主线程、进上下文烧 token。
+  // 内核约定 path-only：上传到工作区，消息里放 markdown 路径引用。
+  const app = read('app.js');
+  assert.ok(app.includes("fetch(API + '/upload'"), '没有走 /api/upload 上传');
+  assert.ok(app.includes('attachmentMarkdown'), '没有把附件拼成 path-only 引用');
+  assert.ok(/!\[\$\{a\.name\}\]\(\$\{a\.path\}\)/.test(app), '图片附件应是 ![name](path) 形式（只留路径）');
+  assert.ok(!/data:image\/[a-z]+;base64/.test(app), 'app.js 不该内联 base64 图片数据');
+  assert.ok(read('index.html').includes('id="fileInput"'), '缺附件选择输入');
+});
+
+test('新面板的控件用组件库、图标用图标库，不手写', () => {
+  // 约束：组件库/图标库有的就不手写。抽查几个高频面板。
+  const html = read('index.html');
+  const paneOf = (name) => {
+    // 定位「面板 <section>」而不是同名的导航 <button>
+    const i = html.indexOf(`<section class="settings-pane" data-pane="${name}"`);
+    return html.slice(i, html.indexOf('</section>', i));
+  };
+  for (const name of ['scheduled', 'marketplace', 'usage', 'guard']) {
+    const seg = paneOf(name);
+    assert.ok(/<wa-button/.test(seg), `${name} 面板应使用 <wa-button> 而非手写 <button class=btn>`);
+    assert.ok(/library="om"/.test(seg), `${name} 面板的图标应来自图标库（library="om"）`);
+  }
+});

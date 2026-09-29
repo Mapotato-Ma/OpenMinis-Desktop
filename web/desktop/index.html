@@ -195,7 +195,8 @@
       </div>
 
       <div class="composer">
-        <div class="composer-box">
+        <div class="attach-bar" id="attachBar" hidden></div>
+        <div class="composer-box" id="composerBox">
           <textarea id="input" rows="1" placeholder="描述你的任务…（Enter 发送 · Shift+Enter 换行）"></textarea>
           <div class="composer-row">
             <div class="composer-left">
@@ -204,6 +205,10 @@
                 <span id="modelPillLabel">未配置模型</span>
                 <wa-icon library="om" name="chevron-right" class="pill-caret"></wa-icon>
               </button>
+              <button class="icon-btn" id="btnAttach" title="添加附件（图片 / 文件）">
+                <wa-icon library="om" name="paperclip"></wa-icon>
+              </button>
+              <input type="file" id="fileInput" multiple hidden />
             </div>
             <div class="composer-right">
               <span class="composer-hint" id="composerHint"></span>
@@ -280,6 +285,12 @@
       <button class="settings-nav-item" data-pane="identity"><wa-icon library="om" name="puzzle" class="ic"></wa-icon>身份与工具</button>
       <button class="settings-nav-item" data-pane="skills"><wa-icon library="om" name="zap" class="ic"></wa-icon>技能</button>
       <button class="settings-nav-item" data-pane="assistants"><wa-icon library="om" name="user-round"></wa-icon>助理</button>
+      <button class="settings-nav-item" data-pane="guard"><wa-icon library="om" name="shield" class="ic"></wa-icon>沙箱</button>
+      <button class="settings-nav-item" data-pane="plugins"><wa-icon library="om" name="plug" class="ic"></wa-icon>插件</button>
+      <button class="settings-nav-item" data-pane="scheduled"><wa-icon library="om" name="clock" class="ic"></wa-icon>定时任务</button>
+      <button class="settings-nav-item" data-pane="knowledge"><wa-icon library="om" name="book-open" class="ic"></wa-icon>知识库</button>
+      <button class="settings-nav-item" data-pane="marketplace"><wa-icon library="om" name="store" class="ic"></wa-icon>技能市场</button>
+      <button class="settings-nav-item" data-pane="usage"><wa-icon library="om" name="chart-column" class="ic"></wa-icon>用量</button>
       <button class="settings-nav-item" data-pane="agent"><wa-icon library="om" name="bot" class="ic"></wa-icon>Agent</button>
       <button class="settings-nav-item" data-pane="about"><wa-icon library="om" name="info" class="ic"></wa-icon>关于</button>
       <button class="settings-nav-item" data-pane="interface"><wa-icon library="om" name="palette" class="ic"></wa-icon>界面</button>
@@ -458,6 +469,106 @@
         <wa-button slot="footer" id="saSave" appearance="filled" variant="brand">保存</wa-button>
       </wa-dialog>
       </section>
+      <!-- 沙箱 -->
+      <section class="settings-pane" data-pane="guard">
+        <div class="pane-head">
+          <div>
+            <h3>沙箱</h3>
+            <p class="pane-sub" id="guardSub">守卫拦下的：目录越界 / 异常删除 / 敏感信息。</p>
+          </div>
+          <div class="pane-head-actions">
+            <wa-button size="small" appearance="outlined" id="btnGuardRefresh"><wa-icon library="om" name="refresh-cw" slot="start"></wa-icon>刷新</wa-button>
+            <wa-button size="small" appearance="outlined" variant="danger" id="btnGuardClear"><wa-icon library="om" name="trash-2" slot="start"></wa-icon>清空记录</wa-button>
+          </div>
+        </div>
+        <div class="settings-block">
+          <div class="block-title"><wa-icon library="om" name="history" class="blk-ic"></wa-icon>拦截记录</div>
+          <div class="list-box" id="guardEvents"></div>
+        </div>
+        <div class="settings-block">
+          <div class="block-title"><wa-icon library="om" name="key-round" class="blk-ic"></wa-icon>永久放行白名单</div>
+          <div class="list-box" id="guardAllowlist"></div>
+        </div>
+      </section>
+
+      <!-- 插件 -->
+      <section class="settings-pane" data-pane="plugins">
+        <div class="pane-head">
+          <div>
+            <h3>插件</h3>
+            <p class="pane-sub" id="pluginsSub">扩展 agent 的对外连接（如 QQ 机器人）。</p>
+          </div>
+          <wa-button size="small" appearance="outlined" id="btnPluginsRefresh"><wa-icon library="om" name="refresh-cw" slot="start"></wa-icon>刷新</wa-button>
+        </div>
+        <div class="list-box" id="pluginsList"></div>
+      </section>
+
+      <!-- 定时任务 -->
+      <section class="settings-pane" data-pane="scheduled">
+        <div class="pane-head">
+          <div>
+            <h3>定时任务</h3>
+            <p class="pane-sub" id="scheduledSub">到点自动发一条提示词。</p>
+          </div>
+          <wa-button size="small" variant="brand" id="btnNewTask"><wa-icon library="om" name="plus" slot="start"></wa-icon>新建任务</wa-button>
+        </div>
+        <wa-callout variant="warning" size="small" class="pane-callout">
+          <wa-icon library="om" name="info" slot="icon"></wa-icon>
+          桌面进程被系统挂起时定时器不保证触发；需要严格准时请配合系统级计划任务。
+        </wa-callout>
+        <div class="list-box" id="scheduledList"></div>
+      </section>
+
+      <!-- 知识库 -->
+      <section class="settings-pane" data-pane="knowledge">
+        <div class="pane-head">
+          <div>
+            <h3>知识库</h3>
+            <p class="pane-sub" id="knowledgeSub">技能 / 记忆 / 知识条目的统一检索。</p>
+          </div>
+          <wa-button size="small" appearance="outlined" id="btnKnowledgeRefresh"><wa-icon library="om" name="refresh-cw" slot="start"></wa-icon>刷新</wa-button>
+        </div>
+        <wa-input id="knowledgeQuery" placeholder="搜索关键词…" size="small" class="pane-search">
+          <wa-icon library="om" name="search" slot="start"></wa-icon>
+        </wa-input>
+        <div class="list-box" id="knowledgeList"></div>
+      </section>
+
+      <!-- 技能市场 -->
+      <section class="settings-pane" data-pane="marketplace">
+        <div class="pane-head">
+          <div>
+            <h3>技能市场</h3>
+            <p class="pane-sub">从社区技能广场复制 .zip 直链安装。</p>
+          </div>
+        </div>
+        <div class="settings-block">
+          <div class="block-title"><wa-icon library="om" name="download" class="blk-ic"></wa-icon>用链接安装</div>
+          <div class="field-row">
+            <wa-input id="mktUrl" placeholder="粘贴技能包 .zip 直链…" size="small"></wa-input>
+            <wa-button size="small" variant="brand" id="btnMktInstall"><wa-icon library="om" name="download" slot="start"></wa-icon>安装</wa-button>
+          </div>
+          <div class="field-hint" id="mktHint"></div>
+        </div>
+        <div class="settings-block">
+          <div class="block-title"><wa-icon library="om" name="store" class="blk-ic"></wa-icon>社区来源</div>
+          <div class="list-box" id="marketplaceList"></div>
+        </div>
+      </section>
+
+      <!-- 用量 -->
+      <section class="settings-pane" data-pane="usage">
+        <div class="pane-head">
+          <div>
+            <h3>用量</h3>
+            <p class="pane-sub" id="usageSub">token 消耗统计。</p>
+          </div>
+          <wa-button size="small" appearance="outlined" id="btnUsageRefresh"><wa-icon library="om" name="refresh-cw" slot="start"></wa-icon>刷新</wa-button>
+        </div>
+        <div class="usage-total" id="usageTotal"></div>
+        <div class="list-box" id="usageGroups"></div>
+      </section>
+
       <!-- Agent -->
       <section class="settings-pane" data-pane="agent">
         <h2>Agent</h2>

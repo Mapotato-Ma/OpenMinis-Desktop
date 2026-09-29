@@ -1,5 +1,32 @@
 # 变更日志
 
+## v0.4.0 — 补齐 6 个设置面板 + 附件上传（内核接口大量接通）（2026-09-29）
+
+内核有 14 个路由模块，桌面界面之前只调了 5 个。这一版把用户会用到的接上：
+
+- **助理**（子代理）：列出/新建/编辑/删除、让模型起草。`subagent_delegate` 报错时
+  指向的「助理页」以前根本不存在 —— 现在有了，派活用的 id 直接标在每一项上。
+- **沙箱**：守卫拦下的（目录越界/异常删除/敏感信息）在这里能看到原因、手动放行
+  （本次/本会话/永久）、撤销永久白名单、清空记录。
+- **插件 / 定时任务 / 知识库 / 技能市场 / 用量**：分别接 `/api/plugins`、
+  `/api/scheduled`、`/api/knowledge`、`/api/marketplace`、`/api/usage`。
+  定时任务面板带一条醒目提示：桌面进程被系统挂起时定时器不保证触发。
+- **附件上传**：输入区加回形针按钮 + 拖拽 + 粘贴。走 `/api/upload` 落到工作区，
+  消息里**只留路径**（`![name](path)`）——不把图片读成 base64 塞进上下文
+  （一张手机照片 base64 后 ~7MB，会卡死输入框、按体积烧 token）。
+
+实现约束：**组件一律用组件库、图标一律用图标库，不手写**。为此扩容 vendor：
+Web Awesome 组件 +27（button/input/textarea/checkbox/switch/tab/popover/dropdown/
+toast/badge/callout/card/…），Lucide 图标 +44（shield/plug/clock/book-open/store/
+paperclip/chart-column/…）。修了 wa-dialog 用法（标题走 `setAttribute('label')`，
+关闭补 `inner.close()` 兜底）。前端检查 `ui-check.mjs` 22 → 25 项。
+
+## v0.3.9 — 测试平台感知修复（2026-09-29）
+
+v0.3.8 的 Verify 在 windows-latest 上红了 1 项：Git Bash 路径用例把 POSIX 的预期
+写死了，而 Windows 上 `/c/Users/…` 本来就该翻成 `C:/Users/…`。改成按 `os.name`
+分两支各自断言。只改测试，exe 内容与 v0.3.8 相同。CI：**846 passed**（Windows）。
+
 ## v0.3.8 — 沙箱误判自己的工作区 + 界面把会话绑到工作区 + 修流式光标（2026-09-29）
 
 ### 内核（`src/openminis/sandbox/guard.py`，走 PORT-FIX 三件套，见 NOTICE.md 偏离表）

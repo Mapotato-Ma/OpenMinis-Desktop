@@ -503,6 +503,34 @@ kbd {
    一体式输入框：文本域和控件在**同一个**圆角容器里 —— 左边是当前模型胶囊，
    右边是提示/用量/发送。以前控件（勾选框、用量）单挂在框外一行。 */
 .composer { flex: 0 0 auto; padding: 10px 20px 12px; border-top: 1px solid var(--border); background: var(--bg); }
+
+/* 附件预览条：发送前的候选附件，缩略图 + 文件芯片 */
+.attach-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px 4px 4px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--bg-soft); max-width: 220px;
+}
+.attach-thumb { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; flex: 0 0 auto; }
+.attach-ic { width: 18px; height: 18px; margin: 0 2px; color: var(--fg-faint); }
+.attach-name { font-size: 12px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-size { font-size: 11px; color: var(--fg-faint); flex: 0 0 auto; }
+.attach-rm {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--fg-faint); cursor: pointer; flex: 0 0 auto;
+}
+.attach-rm:hover { background: var(--bg-hover); color: var(--fg-strong); }
+.attach-rm wa-icon { width: 13px; height: 13px; }
+/* 已发送消息里的附件 */
+.msg-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg-attach-thumb { width: 96px; max-height: 96px; border-radius: 8px; object-fit: cover; }
+.msg-attach-file {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+  font-size: 12px; color: var(--fg); background: var(--bg-soft);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.msg-attach-file wa-icon { width: 14px; height: 14px; }
 .composer-box {
   max-width: 900px; margin: 0 auto;
   display: flex; flex-direction: column; gap: 8px;
@@ -1091,6 +1119,36 @@ kbd {
   font-size: 12px;
   color: var(--fg-faint);
 }
+
+/* ── 新面板通用（沙箱/插件/定时/知识库/市场/用量）─────────────────────── */
+.pane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.pane-head h3 { margin: 0 0 2px; font-size: 15px; color: var(--fg-strong); }
+.pane-head-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.pane-callout { display: block; margin-bottom: 14px; }
+.pane-search { display: block; margin-bottom: 12px; }
+.block-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--fg-muted); margin-bottom: 8px; }
+.blk-ic { width: 15px; height: 15px; color: var(--fg-faint); }
+.list-box { display: flex; flex-direction: column; }
+.list-desc.mono { font-family: var(--mono); font-size: 11px; }
+.list-desc.dim { color: var(--fg-faint); }
+.field-row { display: flex; gap: 8px; align-items: center; }
+.field-row wa-input { flex: 1 1 auto; }
+/* 沙箱事件行的语义色 */
+.guard-row.blocked .guard-fam-ic { color: var(--danger, #e5484d); width: 15px; height: 15px; vertical-align: -2px; }
+.guard-row.allowed .guard-fam-ic { color: var(--ok, #46a758); width: 15px; height: 15px; vertical-align: -2px; }
+.guard-actions { flex-wrap: wrap; }
+/* 用量总计卡 */
+.usage-total { display: flex; flex-wrap: wrap; gap: 18px; padding: 14px 16px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft); }
+.usage-total .ut-item { display: flex; flex-direction: column; gap: 2px; }
+.usage-total .ut-num { font-size: 20px; font-weight: 700; color: var(--fg-strong); font-family: var(--mono); }
+.usage-total .ut-lab { font-size: 11px; color: var(--fg-faint); }
+/* 定时任务对话框表单 */
+.form-grid { display: flex; flex-direction: column; gap: 2px; }
+.form-grid .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.form-grid .field > span { font-size: 12px; color: var(--fg-muted); }
+.field-row2 { display: flex; gap: 12px; }
+.field-row2 .field { flex: 1 1 0; }
+.dialog-foot { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ── theme switch (title bar) ──────────────────────────────────────────── */
 .theme-btn {

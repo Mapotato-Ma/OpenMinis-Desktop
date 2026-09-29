@@ -519,9 +519,13 @@ function handleFrame(f) {
 /* ── send ────────────────────────────────────────────────────────────── */
 function send() {
   const box = $('input');
-  const text = box.value.trim();
-  if (!text) return;
+  const typed = box.value.trim();
+  const attachMd = attachmentMarkdown();
+  if (!typed && !attachMd) return;
   if (state.streaming) { toast('上一条还在处理中'); return; }
+
+  // 发给内核的文本 = 输入 + 附件路径引用（path-only，内核据此解析附件）。
+  const text = [typed, attachMd].filter(Boolean).join('\n\n');
 
   emptyNode().style.display = 'none';
   const node = el('div', 'msg user');
@@ -529,11 +533,29 @@ function send() {
   role.appendChild(el('span', 'avatar', '你'));
   role.appendChild(document.createTextNode('你'));
   node.appendChild(role);
-  node.appendChild(el('div', 'msg-body', text));
+  node.appendChild(el('div', 'msg-body', typed || '(附件)'));
+  if (state.attachments.length) {
+    const strip = el('div', 'msg-attachments');
+    for (const a of state.attachments) {
+      if (a.kind === 'image') {
+        const img = el('img', 'msg-attach-thumb');
+        img.src = a.url;  // upload 已返回 /api/... 前缀，别再加
+        img.alt = a.name;
+        strip.appendChild(img);
+      } else {
+        const f = el('span', 'msg-attach-file');
+        f.appendChild(ic('file')); f.appendChild(document.createTextNode(a.name));
+        strip.appendChild(f);
+      }
+    }
+    node.appendChild(strip);
+  }
   $('messages').appendChild(node);
   scrollChat(true);
 
   box.value = '';
+  state.attachments = [];
+  renderAttachments();
   autoGrow();
   state.streaming = true;
   $('btnStop').hidden = false;
@@ -1701,6 +1723,471 @@ function closeThemeMenu() {
 }
 
 
+/* ── 附件（图片 / 文件）：上传到工作区，消息里只留路径 ────────────────────
+   为什么不把图读成 base64 塞进消息：一张手机照片 base64 后 ~7MB，进受控
+   <textarea> 会卡死主线程，进上下文按 token 烧钱。内核 /api/upload 落到
+   <workspace>/uploads 并回一个路径，消息里带 markdown 引用即可。 */
+state.attachments = [];   // [{name, path, url, mime, size, kind}]
+
+function renderAttachments() {
+  const bar = $('attachBar');
+  bar.innerHTML = '';
+  bar.hidden = state.attachments.length === 0;
+  for (const a of state.attachments) {
+    const chip = el('div', 'attach-chip');
+    if (a.kind === 'image') {
+      const img = el('img', 'attach-thumb');
+      img.src = a.url;  // upload 已返回 /api/... 前缀，别再加
+      img.alt = a.name;
+      chip.appendChild(img);
+    } else {
+      chip.appendChild(ic('file', 'attach-ic'));
+    }
+    chip.appendChild(el('span', 'attach-name', a.name));
+    const size = el('span', 'attach-size', humanSize(a.size));
+    chip.appendChild(size);
+    const rm = el('button', 'attach-rm');
+    rm.type = 'button';
+    rm.title = '移除';
+    rm.appendChild(ic('x'));
+    rm.addEventListener('click', () => {
+      state.attachments = state.attachments.filter((x) => x !== a);
+      renderAttachments();
+    });
+    chip.appendChild(rm);
+    bar.appendChild(chip);
+  }
+}
+
+function humanSize(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+async function uploadFiles(files) {
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      // 不能用 api()：它给 body 自动加 application/json，会毁掉 multipart 边界。
+      const res = await fetch(API + '/upload', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
+      state.attachments.push(data);
+    } catch (e) {
+      toast('上传失败：' + (e.message || e), 'err');
+    }
+  }
+  renderAttachments();
+}
+
+/** 把附件拼成 path-only 的 markdown 引用，与内核 attachments 解析器同格式。 */
+function attachmentMarkdown() {
+  return state.attachments
+    .map((a) => (a.kind === 'image' ? `![${a.name}](${a.path})` : `[附件: ${a.name}](${a.path})`))
+    .join('\n');
+}
+
+$('btnAttach').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length) uploadFiles(files);
+  e.target.value = '';   // 允许再次选同一个文件
+});
+// 拖拽 + 粘贴：把图片/文件直接丢进输入区
+(function bindComposerDrop() {
+  const box = $('composerBox') || $('input');
+  if (!box) return;
+  ['dragover', 'drop'].forEach((ev) =>
+    box.addEventListener(ev, (e) => { e.preventDefault(); }));
+  box.addEventListener('drop', (e) => {
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (files.length) uploadFiles(files);
+  });
+  $('input').addEventListener('paste', (e) => {
+    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+    const files = items.filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter(Boolean);
+    if (files.length) { e.preventDefault(); uploadFiles(files); }
+  });
+})();
+
+/* ── 沙箱页：拦截记录 / 实时流水 / 放行白名单 ─────────────────────────────
+   守卫拦下的都在这里：目录越界 / 异常删除 / 敏感信息。能看到为什么被拦、
+   手动放行（本次 / 本会话 / 永久）、撤销永久白名单。走内核 /api/guard。 */
+const GUARD_FAMILY = { escape: '目录越界', delete: '异常删除', secret: '敏感信息' };
+
+async function loadGuard() {
+  await Promise.all([loadGuardEvents(), loadGuardAllowlist()]);
+}
+
+async function loadGuardEvents() {
+  const box = $('guardEvents');
+  try {
+    const data = await api('/guard/events?limit=100');
+    const sub = $('guardSub');
+    const c = data.counts || {};
+    sub.textContent = `拦截 ${data.blocked || 0} 条 · 越界 ${c.escape || 0} · 删除 ${c.delete || 0} · 敏感 ${c.secret || 0}`;
+    box.innerHTML = '';
+    if (!data.events.length) {
+      box.appendChild(el('div', 'empty-note', '还没有拦截记录 —— 守卫很安静。'));
+      return;
+    }
+    for (const ev of data.events) box.appendChild(guardEventRow(ev));
+  } catch (e) {
+    box.innerHTML = '';
+    box.appendChild(el('div', 'empty-note', '加载失败：' + e.message));
+  }
+}
+
+function guardEventRow(ev) {
+  const row = el('div', 'list-row guard-row' + (ev.status === 'blocked' ? ' blocked' : ' allowed'));
+  const main = el('div', 'list-main');
+  const title = el('div', 'list-title');
+  const fam = ev.status === 'blocked' ? 'shield-alert' : 'shield-check';
+  title.appendChild(ic(fam, 'guard-fam-ic'));
+  title.appendChild(document.createTextNode(' ' + (ev.familyLabel || GUARD_FAMILY[ev.family] || ev.family)));
+  const st = el('span', 'tag', ev.status === 'blocked' ? '已拦截' : ('已放行' + (ev.scope ? '·' + ev.scope : '')));
+  title.appendChild(st);
+  main.appendChild(title);
+  if (ev.command) main.appendChild(el('div', 'list-desc mono', ev.command));
+  if (ev.reasons && ev.reasons.length) main.appendChild(el('div', 'list-desc', ev.reasons.join('；')));
+  if (ev.cwd) main.appendChild(el('div', 'list-desc dim', 'cwd: ' + ev.cwd));
+  row.appendChild(main);
+
+  if (ev.status === 'blocked') {
+    const acts = el('div', 'list-actions guard-actions');
+    const mkAllow = (scope, label) => {
+      const b = document.createElement('wa-button');
+      b.setAttribute('size', 's'); b.setAttribute('appearance', 'outlined');
+      b.textContent = label;
+      b.addEventListener('click', async () => {
+        try { await api(`/guard/events/${encodeURIComponent(ev.id)}/allow`, { method: 'POST', body: JSON.stringify({ scope }) });
+          toast('已放行（' + label + '）'); await loadGuard();
+        } catch (e) { toast('放行失败：' + e.message, 'err'); }
+      });
+      return b;
+    };
+    acts.appendChild(mkAllow('once', '放行本次'));
+    acts.appendChild(mkAllow('session', '本会话'));
+    acts.appendChild(mkAllow('always', '永久'));
+    row.appendChild(acts);
+  }
+  return row;
+}
+
+async function loadGuardAllowlist() {
+  const box = $('guardAllowlist');
+  try {
+    const data = await api('/guard/allowlist');
+    const al = data.allowlist || {};
+    box.innerHTML = '';
+    const entries = Object.entries(al).flatMap(([fam, keys]) => (keys || []).map((k) => [fam, k]));
+    if (!entries.length) {
+      box.appendChild(el('div', 'empty-note', '没有永久白名单。'));
+      return;
+    }
+    for (const [fam, key] of entries) {
+      const row = el('div', 'list-row');
+      const main = el('div', 'list-main');
+      const t = el('div', 'list-title');
+      t.appendChild(el('span', 'tag', GUARD_FAMILY[fam] || fam));
+      main.appendChild(t);
+      main.appendChild(el('div', 'list-desc mono', key));
+      row.appendChild(main);
+      const acts = el('div', 'list-actions');
+      const rm = document.createElement('wa-button');
+      rm.setAttribute('size', 's'); rm.setAttribute('appearance', 'outlined'); rm.setAttribute('variant', 'danger');
+      rm.textContent = '撤销';
+      rm.addEventListener('click', async () => {
+        try { await api(`/guard/allowlist/revoke?family=${encodeURIComponent(fam)}&key=${encodeURIComponent(key)}`, { method: 'POST' });
+          toast('已撤销'); await loadGuardAllowlist();
+        } catch (e) { toast('撤销失败：' + e.message, 'err'); }
+      });
+      acts.appendChild(rm);
+      row.appendChild(acts);
+    }
+  } catch (e) {
+    box.innerHTML = '';
+    box.appendChild(el('div', 'empty-note', '加载失败：' + e.message));
+  }
+}
+
+$('btnGuardRefresh').addEventListener('click', loadGuard);
+$('btnGuardClear').addEventListener('click', async () => {
+  const ok = await confirmDialog('清空所有拦截记录？（不影响永久白名单）', { okText: '清空', danger: true });
+  if (!ok) return;
+  try { await api('/guard/events/clear', { method: 'POST' }); toast('已清空'); await loadGuardEvents(); }
+  catch (e) { toast('清空失败：' + e.message, 'err'); }
+});
+
+/* ── 插件 / 定时任务 / 知识库 / 技能市场 / 用量 ───────────────────────────
+   都是只读或轻量操作，走各自的内核 API。列表用 .list-row，按钮用 wa-button，
+   图标用 Lucide 库，不手写控件。 */
+
+/* —— 插件 —— */
+async function loadPlugins() {
+  const box = $('pluginsList');
+  try {
+    const data = await api('/plugins');
+    $('pluginsSub').textContent = `${data.plugins.length} 个插件 · 目录 ${data.dir}`;
+    box.innerHTML = '';
+    if (!data.plugins.length) { box.appendChild(el('div', 'empty-note', '没有可用插件。')); return; }
+    for (const p of data.plugins) box.appendChild(pluginRow(p));
+  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+}
+
+function pluginRow(p) {
+  const row = el('div', 'list-row');
+  const main = el('div', 'list-main');
+  const title = el('div', 'list-title');
+  title.textContent = `${p.icon || ''} ${p.name || p.id}`.trim() + ' ';
+  const state = p.running ? '运行中' : (p.enabled ? '已启用' : (p.installed ? '已安装' : '未安装'));
+  title.appendChild(el('span', 'tag', state));
+  if (p.version) title.appendChild(el('span', 'tag', 'v' + p.version));
+  main.appendChild(title);
+  if (p.detail || p.error) main.appendChild(el('div', 'list-desc' + (p.error ? ' dim' : ''), p.error || p.detail));
+  if (p.toolCount) main.appendChild(el('div', 'list-desc dim', `工具 ${p.toolCount}`));
+  row.appendChild(main);
+
+  const acts = el('div', 'list-actions');
+  if (p.installed) {
+    const toggle = document.createElement('wa-button');
+    toggle.setAttribute('size', 's'); toggle.setAttribute('appearance', 'outlined');
+    toggle.setAttribute('variant', p.enabled ? 'neutral' : 'brand');
+    toggle.textContent = p.enabled ? '停用' : '启用';
+    toggle.addEventListener('click', async () => {
+      try { await api(`/plugins/${encodeURIComponent(p.id)}/${p.enabled ? 'disable' : 'enable'}`, { method: 'POST' });
+        toast('已' + (p.enabled ? '停用' : '启用')); await loadPlugins();
+      } catch (e) { toast('操作失败：' + e.message, 'err'); }
+    });
+    acts.appendChild(toggle);
+  } else {
+    const inst = document.createElement('wa-button');
+    inst.setAttribute('size', 's'); inst.setAttribute('variant', 'brand');
+    inst.textContent = '安装';
+    inst.addEventListener('click', async () => {
+      try { await api('/plugins/install', { method: 'POST', body: JSON.stringify({ id: p.id }) });
+        toast('已安装'); await loadPlugins();
+      } catch (e) { toast('安装失败：' + e.message, 'err'); }
+    });
+    acts.appendChild(inst);
+  }
+  row.appendChild(acts);
+  return row;
+}
+$('btnPluginsRefresh').addEventListener('click', loadPlugins);
+
+/* —— 定时任务 —— */
+async function loadScheduled() {
+  const box = $('scheduledList');
+  try {
+    const data = await api('/scheduled/tasks');
+    $('scheduledSub').textContent = `${data.tasks.length} 个任务`;
+    box.innerHTML = '';
+    if (!data.tasks.length) { box.appendChild(el('div', 'empty-note', '还没有定时任务。')); return; }
+    for (const t of data.tasks) box.appendChild(taskRow(t));
+  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+}
+
+const REPEAT_LABEL = { ONCE: '一次', DAILY: '每天', WEEKDAYS: '工作日', CUSTOM: '自定义' };
+function taskRow(t) {
+  const row = el('div', 'list-row');
+  const main = el('div', 'list-main');
+  const title = el('div', 'list-title');
+  title.textContent = (t.label || '(未命名任务)') + ' ';
+  title.appendChild(el('span', 'tag', t.enabled ? '已启用' : '已停用'));
+  title.appendChild(el('span', 'tag', REPEAT_LABEL[t.repeatMode] || t.repeatMode));
+  main.appendChild(title);
+  const hh = String(t.hour ?? 0).padStart(2, '0');
+  const mm = String(t.minute ?? 0).padStart(2, '0');
+  main.appendChild(el('div', 'list-desc', `${hh}:${mm} · 下次 ${t.nextTriggerMs ? relTime(t.nextTriggerMs) : '—'} · 已跑 ${t.runCount || 0} 次`));
+  if (t.prompt) main.appendChild(el('div', 'list-desc dim', t.prompt.slice(0, 80)));
+  row.appendChild(main);
+
+  const acts = el('div', 'list-actions');
+  const toggle = document.createElement('wa-button');
+  toggle.setAttribute('size', 's'); toggle.setAttribute('appearance', 'outlined');
+  toggle.textContent = t.enabled ? '停用' : '启用';
+  toggle.addEventListener('click', async () => {
+    try { await api(`/scheduled/tasks/${encodeURIComponent(t.id)}/toggle`, { method: 'POST', body: JSON.stringify({ enabled: !t.enabled }) });
+      await loadScheduled();
+    } catch (e) { toast('操作失败：' + e.message, 'err'); }
+  });
+  const del = document.createElement('wa-button');
+  del.setAttribute('size', 's'); del.setAttribute('appearance', 'outlined'); del.setAttribute('variant', 'danger');
+  del.textContent = '删除';
+  del.addEventListener('click', async () => {
+    if (!(await confirmDialog(`删除任务「${t.label || t.id}」？`, { okText: '删除', danger: true }))) return;
+    try { await api(`/scheduled/tasks/${encodeURIComponent(t.id)}`, { method: 'DELETE' }); toast('已删除'); await loadScheduled(); }
+    catch (e) { toast('删除失败：' + e.message, 'err'); }
+  });
+  acts.appendChild(toggle); acts.appendChild(del);
+  row.appendChild(acts);
+  return row;
+}
+$('btnNewTask').addEventListener('click', () => openTaskDialog());
+
+/* —— 知识库 —— */
+let knowledgeTimer = 0;
+async function loadKnowledge() {
+  const box = $('knowledgeList');
+  const q = $('knowledgeQuery').value.trim();
+  try {
+    const data = await api('/knowledge?limit=60&q=' + encodeURIComponent(q));
+    $('knowledgeSub').textContent = `${data.items.length} 条`;
+    box.innerHTML = '';
+    if (!data.items.length) { box.appendChild(el('div', 'empty-note', q ? '没有匹配。' : '知识库为空。')); return; }
+    for (const it of data.items) {
+      const row = el('div', 'list-row');
+      const main = el('div', 'list-main');
+      const title = el('div', 'list-title');
+      title.textContent = (it.title || it.source) + ' ';
+      title.appendChild(el('span', 'tag', it.kindLabel || it.kind));
+      main.appendChild(title);
+      if (it.source) main.appendChild(el('div', 'list-desc dim mono', it.source));
+      row.appendChild(main);
+      box.appendChild(row);
+    }
+  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+}
+$('knowledgeQuery').addEventListener('input', () => { clearTimeout(knowledgeTimer); knowledgeTimer = setTimeout(loadKnowledge, 250); });
+$('btnKnowledgeRefresh').addEventListener('click', loadKnowledge);
+
+/* —— 技能市场 —— */
+async function loadMarketplace() {
+  const box = $('marketplaceList');
+  try {
+    const data = await api('/marketplace');
+    box.innerHTML = '';
+    for (const src of (data.sources || [])) {
+      const row = el('div', 'list-row');
+      const main = el('div', 'list-main');
+      const title = el('div', 'list-title');
+      title.textContent = (src.name || src.id) + ' ';
+      title.appendChild(el('span', 'tag', src.kind || 'skill'));
+      main.appendChild(title);
+      if (src.description) main.appendChild(el('div', 'list-desc', src.description));
+      row.appendChild(main);
+      if (src.url) {
+        const acts = el('div', 'list-actions');
+        const open = document.createElement('wa-button');
+        open.setAttribute('size', 's'); open.setAttribute('appearance', 'outlined');
+        open.innerHTML = '打开';
+        open.addEventListener('click', () => window.open(src.url, '_blank'));
+        acts.appendChild(open);
+        row.appendChild(acts);
+      }
+      box.appendChild(row);
+    }
+  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+}
+$('btnMktInstall').addEventListener('click', async () => {
+  const url = $('mktUrl').value.trim();
+  if (!url) { $('mktHint').textContent = '先粘贴一个 .zip 直链'; return; }
+  $('mktHint').textContent = '安装中…';
+  try {
+    const r = await api('/marketplace/install-url', { method: 'POST', body: JSON.stringify({ url }) });
+    $('mktHint').textContent = '已安装：' + (r.name || r.id || 'ok');
+    $('mktUrl').value = '';
+    if (typeof loadSkills === 'function') { settings.skillsLoaded = false; }
+  } catch (e) { $('mktHint').textContent = '安装失败：' + e.message; }
+});
+
+/* —— 用量 —— */
+async function loadUsage() {
+  const box = $('usageGroups');
+  try {
+    const data = await api('/usage');
+    const g = data.grandTotal || {};
+    const total = $('usageTotal');
+    total.innerHTML = '';
+    const items = [['输入', g.formattedInput], ['输出', g.formattedOutput], ['缓存读', g.formattedCacheRead], ['缓存写', g.formattedCacheCreation]];
+    for (const [lab, num] of items) {
+      const it = el('div', 'ut-item');
+      it.appendChild(el('div', 'ut-num', num || '0'));
+      it.appendChild(el('div', 'ut-lab', lab));
+      total.appendChild(it);
+    }
+    box.innerHTML = '';
+    if (!(data.groups || []).length) { box.appendChild(el('div', 'empty-note', '还没有用量记录。')); return; }
+    for (const grp of data.groups) {
+      const row = el('div', 'list-row');
+      const main = el('div', 'list-main');
+      main.appendChild(el('div', 'list-title', grp.name || '(未分组)'));
+      main.appendChild(el('div', 'list-desc', `输入 ${grp.formattedInput || 0} · 输出 ${grp.formattedOutput || 0} · 模型 ${(grp.models || []).length}`));
+      row.appendChild(main);
+      box.appendChild(row);
+    }
+  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+}
+$('btnUsageRefresh').addEventListener('click', loadUsage);
+
+/* —— 定时任务：新建/编辑对话框（组件库 wa-dialog + wa-input/select/textarea）—— */
+function closeTaskDialog() {
+  const dlg = $('taskDialog');
+  if (!dlg) return;
+  dlg.open = false;
+  const inner = dlg.shadowRoot && dlg.shadowRoot.querySelector('dialog');
+  setTimeout(() => { if (inner && inner.open) inner.close(); if (dlg.open) dlg.open = false; }, 400);
+}
+
+function ensureTaskDialog() {
+  let dlg = $('taskDialog');
+  if (dlg) return dlg;
+  dlg = document.createElement('wa-dialog');
+  dlg.id = 'taskDialog';
+  dlg.setAttribute('label', '新建定时任务');
+  dlg.innerHTML =
+    '<div class="form-grid">' +
+    '<label class="field"><span>名称</span><wa-input id="tkLabel" placeholder="每天早报"></wa-input></label>' +
+    '<div class="field-row2">' +
+    '<label class="field"><span>小时 (0-23)</span><wa-input id="tkHour" type="number" min="0" max="23" value="9"></wa-input></label>' +
+    '<label class="field"><span>分钟 (0-59)</span><wa-input id="tkMinute" type="number" min="0" max="59" value="0"></wa-input></label>' +
+    '</div>' +
+    '<label class="field"><span>重复</span><wa-select id="tkRepeat" value="DAILY">' +
+    '<wa-option value="ONCE">一次</wa-option><wa-option value="DAILY">每天</wa-option>' +
+    '<wa-option value="WEEKDAYS">工作日</wa-option></wa-select></label>' +
+    '<label class="field"><span>提示词</span><wa-textarea id="tkPrompt" rows="4" placeholder="到点要 agent 做什么…"></wa-textarea></label>' +
+    '<div class="field-hint" id="tkHint"></div>' +
+    '</div>' +
+    '<div slot="footer" class="dialog-foot">' +
+    '<wa-button id="tkCancel" appearance="outlined">取消</wa-button>' +
+    '<wa-button id="tkSave" variant="brand">保存</wa-button>' +
+    '</div>';
+  document.body.appendChild(dlg);
+  $('tkCancel').addEventListener('click', closeTaskDialog);
+  $('tkSave').addEventListener('click', saveTask);
+  return dlg;
+}
+
+function openTaskDialog() {
+  const dlg = ensureTaskDialog();
+  $('tkLabel').value = ''; $('tkHour').value = '9'; $('tkMinute').value = '0';
+  $('tkRepeat').value = 'DAILY'; $('tkPrompt').value = ''; $('tkHint').textContent = '';
+  dlg.open = true;
+}
+
+async function saveTask() {
+  const prompt = $('tkPrompt').value.trim();
+  if (!prompt) { $('tkHint').textContent = '提示词不能为空'; return; }
+  const payload = {
+    label: $('tkLabel').value.trim() || '定时任务',
+    hour: Number($('tkHour').value) || 0,
+    minute: Number($('tkMinute').value) || 0,
+    repeatMode: $('tkRepeat').value,
+    prompt,
+    enabled: true,
+  };
+  try {
+    await api('/scheduled/tasks', { method: 'POST', body: JSON.stringify(payload) });
+    closeTaskDialog();
+    toast('已创建');
+    await loadScheduled();
+  } catch (e) { $('tkHint').textContent = '保存失败：' + e.message; }
+}
+
 /* ── composer autogrow ───────────────────────────────────────────────── */
 function autoGrow() {
   const t = $('input');
@@ -2442,6 +2929,12 @@ function switchSettingsPane(name) {
   if (name === 'identity' && settings.model) { renderIdentities(); renderIdentityTools(); }
   if (name === 'skills' && !settings.skillsLoaded) loadSkills();
   if (name === 'assistants' && !settings.subagentsLoaded) loadSubagents();
+  if (name === 'guard') loadGuard();
+  if (name === 'plugins') loadPlugins();
+  if (name === 'scheduled') loadScheduled();
+  if (name === 'knowledge' && !settings.knowledgeLoaded) { settings.knowledgeLoaded = true; loadKnowledge(); }
+  if (name === 'marketplace' && !settings.marketplaceLoaded) { settings.marketplaceLoaded = true; loadMarketplace(); }
+  if (name === 'usage') loadUsage();
   if (name === 'about') loadAbout();
   if (name === 'interface') renderInterfacePane();
 }
