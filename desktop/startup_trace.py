@@ -124,16 +124,12 @@ def _is_our_own_image(pid: int) -> bool:
         from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.QueryFullProcessImageNameW.argtypes = [
-            wintypes.HANDLE,
-            wintypes.DWORD,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        # 这里**故意不声明 argtypes**：缓冲区用 create_unicode_buffer 传，交给 ctypes
+        # 自己转是 v0.3.1 里已经验证可用的写法。声明之后这条路径在 CI 上就不再命中
+        # （异常被下面 except 吞了），而它一旦失效，onefile 就会退化成 origin=self ——
+        # 恰好把"解包那几百毫秒"从总数里抹掉，而那正是办公电脑上最可疑的一段。
         handle = kernel32.OpenProcess(0x1000, False, int(pid))
         if not handle:
             return False
@@ -166,7 +162,11 @@ def _resolve_origin() -> tuple[float | None, str]:
         import os
 
         ppid = os.getppid()
-        if ppid > 0 and _is_our_own_image(ppid):
+        # PyInstaller 的 onefile 是「父进程解包 → 子进程跑 Python」，子进程环境里带着
+        # _PYI_PARENT_PROCESS_LEVEL。这个信号比"父进程的 exe 路径和我们一样"稳
+        # （路径在 Windows 上可能长短名不同）。不冻结时不看它。
+        parent_is_bootloader = bool(os.environ.get("_PYI_PARENT_PROCESS_LEVEL"))
+        if ppid > 0 and (parent_is_bootloader or _is_our_own_image(ppid)):
             parent_epoch = _process_creation_epoch(ppid)
             if parent_epoch is not None and 0 <= now - parent_epoch < _PARENT_MAX_AGE_S:
                 _ORIGIN_EPOCH, _ORIGIN_SOURCE = parent_epoch, "parent"
