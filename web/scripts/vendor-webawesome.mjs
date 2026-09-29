@@ -28,6 +28,36 @@ const ENTRIES = [
   'components/icon/icon.js',
   'components/icon/library.js',   // registerIconLibrary：给本地图标库用
   'components/dialog/dialog.js',  // 应用内确认框/弹层：别再用浏览器原生 confirm
+  // —— 表单控件：一律用库里的，别再手写 input / button / switch ——
+  'components/button/button.js',
+  'components/button-group/button-group.js',
+  'components/input/input.js',
+  'components/textarea/textarea.js',
+  'components/checkbox/checkbox.js',
+  'components/switch/switch.js',
+  'components/radio/radio.js',
+  'components/radio-group/radio-group.js',
+  // —— 信息呈现 ——
+  'components/badge/badge.js',
+  'components/tag/tag.js',
+  'components/callout/callout.js',
+  'components/card/card.js',
+  'components/details/details.js',
+  'components/divider/divider.js',
+  'components/spinner/spinner.js',
+  'components/skeleton/skeleton.js',
+  'components/progress-bar/progress-bar.js',
+  'components/avatar/avatar.js',
+  'components/relative-time/relative-time.js',
+  // —— 容器与菜单 ——
+  'components/tab/tab.js',
+  'components/tab-group/tab-group.js',
+  'components/tab-panel/tab-panel.js',
+  'components/popover/popover.js',
+  'components/dropdown/dropdown.js',
+  'components/dropdown-item/dropdown-item.js',
+  'components/toast/toast.js',
+  'components/toast-item/toast-item.js',
 ];
 
 const CDN = path.join(SRC, 'dist-cdn');

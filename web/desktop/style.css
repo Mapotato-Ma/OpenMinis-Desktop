@@ -1433,3 +1433,13 @@ wa-dialog.import-dialog { --width: min(680px, 94vw); }
 .import-sub { font-family: var(--mono); font-size: 11px; color: var(--fg-faint); margin-top: 2px; }
 .import-note { font-size: 11px; color: var(--warn, #e0a458); margin-top: 2px; }
 .import-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* 助理页：表单排布 —— 控件外观一律交给 Web Awesome，这里只负责间隔与分栏 */
+.wa-form { display: grid; gap: 12px; margin: 4px 0 6px; }
+.wa-row { display: flex; gap: 10px; align-items: end; }
+.wa-row > * { flex: 1 1 auto; }
+.wa-row > .wa-narrow { flex: 0 0 auto; width: 130px; }
+.sa-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 0 2px; }
+.list-title { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.list-desc { font-size: 11.5px; line-height: 1.45; color: var(--fg-faint); margin-top: 2px; }
+.sa-hint { margin-top: 4px; }

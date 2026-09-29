@@ -20,6 +20,33 @@
 <script type="module" src="./vendor/webawesome/components/option/option.js"></script>
 <script type="module" src="./vendor/webawesome/components/tooltip/tooltip.js"></script>
 <script type="module" src="./vendor/webawesome/components/dialog/dialog.js"></script>
+<script type="module" src="./vendor/webawesome/components/button/button.js"></script>
+<script type="module" src="./vendor/webawesome/components/button-group/button-group.js"></script>
+<script type="module" src="./vendor/webawesome/components/input/input.js"></script>
+<script type="module" src="./vendor/webawesome/components/textarea/textarea.js"></script>
+<script type="module" src="./vendor/webawesome/components/checkbox/checkbox.js"></script>
+<script type="module" src="./vendor/webawesome/components/switch/switch.js"></script>
+<script type="module" src="./vendor/webawesome/components/radio/radio.js"></script>
+<script type="module" src="./vendor/webawesome/components/radio-group/radio-group.js"></script>
+<script type="module" src="./vendor/webawesome/components/badge/badge.js"></script>
+<script type="module" src="./vendor/webawesome/components/tag/tag.js"></script>
+<script type="module" src="./vendor/webawesome/components/callout/callout.js"></script>
+<script type="module" src="./vendor/webawesome/components/card/card.js"></script>
+<script type="module" src="./vendor/webawesome/components/details/details.js"></script>
+<script type="module" src="./vendor/webawesome/components/divider/divider.js"></script>
+<script type="module" src="./vendor/webawesome/components/spinner/spinner.js"></script>
+<script type="module" src="./vendor/webawesome/components/skeleton/skeleton.js"></script>
+<script type="module" src="./vendor/webawesome/components/progress-bar/progress-bar.js"></script>
+<script type="module" src="./vendor/webawesome/components/avatar/avatar.js"></script>
+<script type="module" src="./vendor/webawesome/components/relative-time/relative-time.js"></script>
+<script type="module" src="./vendor/webawesome/components/tab/tab.js"></script>
+<script type="module" src="./vendor/webawesome/components/tab-group/tab-group.js"></script>
+<script type="module" src="./vendor/webawesome/components/tab-panel/tab-panel.js"></script>
+<script type="module" src="./vendor/webawesome/components/popover/popover.js"></script>
+<script type="module" src="./vendor/webawesome/components/dropdown/dropdown.js"></script>
+<script type="module" src="./vendor/webawesome/components/dropdown-item/dropdown-item.js"></script>
+<script type="module" src="./vendor/webawesome/components/toast/toast.js"></script>
+<script type="module" src="./vendor/webawesome/components/toast-item/toast-item.js"></script>
 </head>
 <body>
 <div id="app">
@@ -252,6 +279,7 @@
       <button class="settings-nav-item" data-pane="soul"><wa-icon library="om" name="user" class="ic"></wa-icon>人格</button>
       <button class="settings-nav-item" data-pane="identity"><wa-icon library="om" name="puzzle" class="ic"></wa-icon>身份与工具</button>
       <button class="settings-nav-item" data-pane="skills"><wa-icon library="om" name="zap" class="ic"></wa-icon>技能</button>
+      <button class="settings-nav-item" data-pane="assistants"><wa-icon library="om" name="user-round"></wa-icon>助理</button>
       <button class="settings-nav-item" data-pane="agent"><wa-icon library="om" name="bot" class="ic"></wa-icon>Agent</button>
       <button class="settings-nav-item" data-pane="about"><wa-icon library="om" name="info" class="ic"></wa-icon>关于</button>
       <button class="settings-nav-item" data-pane="interface"><wa-icon library="om" name="palette" class="ic"></wa-icon>界面</button>
@@ -382,6 +410,54 @@
         </div>
       </section>
 
+      <section class="settings-pane" data-pane="assistants">
+        <h2>助理</h2>
+        <p class="pane-sub">
+          助理（子代理）= 主 agent 可以派活的成员。它们的 <code>id</code> 是模型唯一看得见的
+          「派给谁」线索 —— 这里不建，模型就只能瞎猜 id。
+        </p>
+        <div class="settings-block">
+          <h3>已配置的助理</h3>
+          <p class="block-sub" id="subagentsSub">加载中…</p>
+          <div id="subagentsList"></div>
+          <wa-button id="btnNewSubagent" appearance="filled" variant="brand" size="s">
+            <wa-icon library="om" name="plus" slot="start"></wa-icon>新建助理
+          </wa-button>
+        </div>
+        <wa-dialog id="subagentDialog" label="助理" light-dismiss>
+        <div class="wa-form">
+          <div class="wa-row">
+            <wa-input id="saName" label="名称" placeholder="代码助手" autocomplete="off" maxlength="40"></wa-input>
+            <wa-input id="saEmoji" label="表情" placeholder="🧑‍💻" class="wa-narrow"></wa-input>
+          </div>
+          <wa-input id="saId" label="id（派活时用的名字，小写字母/数字/-/_）" placeholder="coder"></wa-input>
+          <wa-input id="saDesc" label="一句话描述" placeholder="读代码、改代码、跑测试"></wa-input>
+          <wa-textarea id="saPersona" label="人设 / 工作方式" rows="3"
+            placeholder="你是一个严谨的实现者：先看现场再动手，改完自己验证"></wa-textarea>
+          <div class="wa-row">
+            <wa-select id="saProvider" label="模型服务"></wa-select>
+            <wa-input id="saModel" label="模型 id" placeholder="deepseek/deepseek-v4.1-flash"></wa-input>
+          </div>
+          <wa-input id="saRounds" type="number" label="最多轮次（1–12）" value="6" class="wa-narrow"></wa-input>
+          <wa-details summary="工具 / 技能（留空 = 全部可用）">
+            <p class="block-sub">工具</p>
+            <div class="sa-checks" id="saTools"></div>
+            <p class="block-sub">技能</p>
+            <div class="sa-checks" id="saSkills"></div>
+          </wa-details>
+          <div class="wa-row">
+            <wa-input id="saDraftRequest" label="让模型起草" placeholder="我要一个写文档的助理"></wa-input>
+            <wa-button id="saDraft" appearance="outlined" size="s">
+              <wa-icon library="om" name="sparkles" slot="start"></wa-icon>起草
+            </wa-button>
+          </div>
+          <wa-callout id="saHint" variant="danger" hidden></wa-callout>
+        </div>
+        <wa-button slot="footer" id="saCancel" appearance="plain">取消</wa-button>
+        <wa-button slot="footer" id="saDelete" appearance="plain" variant="danger" hidden>删除</wa-button>
+        <wa-button slot="footer" id="saSave" appearance="filled" variant="brand">保存</wa-button>
+      </wa-dialog>
+      </section>
       <!-- Agent -->
       <section class="settings-pane" data-pane="agent">
         <h2>Agent</h2>

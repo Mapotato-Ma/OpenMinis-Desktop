@@ -2175,6 +2175,261 @@ function closeSettings() {
   $('settingsOverlay').hidden = true;
 }
 
+
+/* ── 助理（子代理）───────────────────────────────────────────────────────
+   内核把「可以被派活的成员」存在 subagents 里；agent 的工具说明只列得出这些 id，
+   所以这个面板不是装饰 —— 不在这里建，模型就只能瞎猜 id（用户实测报「subagent 不存在」）。
+   契约（src/openminis/server/subagents_api.py）：
+     GET    /api/subagents           → {subagents:[…], registry:{…}}
+     POST   /api/subagents           → 新建（body 就是 subagent 字段）
+     PUT    /api/subagents/{id}      → 更新（id 以路径为准）
+     DELETE /api/subagents/{id}      → 删除
+     POST   /api/subagents/plan      → 让主模型起草一份配置（不落盘）
+   控件一律用组件库（wa-input / wa-select / wa-textarea / wa-dialog / wa-button /
+   wa-checkbox / wa-callout…），图标一律走 icons.js 里的 Lucide 名字。不做手写控件。
+   ─────────────────────────────────────────────────────────────────────── */
+
+function saSlug(s) {
+  return String(s || '').toLowerCase().trim()
+    .replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+async function loadSubagents() {
+  const box = $('subagentsList');
+  box.innerHTML = '';
+  box.appendChild(el('div', 'empty-note', '加载中…'));
+  try {
+    const d = await api('/subagents');
+    settings.subagents = (d && d.subagents) || [];
+    settings.subagentRegistry = (d && d.registry) || {};
+    settings.subagentsLoaded = true;
+    renderSubagents();
+  } catch (e) {
+    box.innerHTML = '';
+    box.appendChild(el('div', 'empty-note', '助理加载失败：' + e.message));
+  }
+}
+
+function renderSubagents() {
+  const box = $('subagentsList');
+  const list = settings.subagents || [];
+  box.innerHTML = '';
+  const sub = $('subagentsSub');
+  if (!list.length) {
+    sub.textContent = '还没有助理 —— 主 agent 现在无人可派（subagent_delegate 会报 id 不存在）。';
+    box.appendChild(el('div', 'empty-note', '点下面的「新建助理」建一个。'));
+    return;
+  }
+  sub.textContent = `${list.length} 个。派活用的 id：` + list.map((s) => s.id).join('、');
+  for (const s of list) {
+    const row = el('div', 'list-row');
+    const main = el('div', 'list-main');
+    const title = el('div', 'list-title');
+    title.appendChild(document.createTextNode(`${s.emoji || '🤖'} ${s.name || s.id} `));
+    title.appendChild(el('span', 'tag', s.id));
+    if (s.model) title.appendChild(el('span', 'tag', s.model));
+    main.appendChild(title);
+    if (s.description) main.appendChild(el('div', 'list-desc', s.description));
+    const meta = [];
+    if (s.providerId) meta.push('服务 ' + s.providerId);
+    if (s.tools && s.tools.length) meta.push(`工具 ${s.tools.length}`);
+    if (s.skills && s.skills.length) meta.push(`技能 ${s.skills.length}`);
+    meta.push(`轮次 ≤${s.maxRounds || 6}`);
+    main.appendChild(el('div', 'list-desc', meta.join(' · ')));
+    row.appendChild(main);
+    const actions = el('div', 'list-actions');
+    const edit = document.createElement('wa-button');
+    edit.setAttribute('size', 's');
+    edit.setAttribute('appearance', 'outlined');
+    edit.appendChild(ic('pencil'));
+    edit.appendChild(document.createTextNode('编辑'));
+    edit.addEventListener('click', () => openSubagentDialog(s));
+    actions.appendChild(edit);
+    row.appendChild(actions);
+    box.appendChild(row);
+  }
+}
+
+/** 关掉助理对话框。WA 的关闭动画依赖事件，WebKit 下有时不来 —— 跟确认框一样兜底。 */
+function closeSubagentDialog() {
+  const dlg = $('subagentDialog');
+  dlg.open = false;
+  const inner = dlg.shadowRoot && dlg.shadowRoot.querySelector('dialog');
+  setTimeout(() => {
+    if (inner && inner.open) inner.close();
+    if (dlg.open) dlg.open = false;
+  }, 400);
+}
+
+function ensureSubagentDialog() {
+  const dlg = $('subagentDialog');
+  if (dlg.dataset.bound) return dlg;
+  dlg.dataset.bound = '1';
+  $('saCancel').addEventListener('click', closeSubagentDialog);
+  $('saSave').addEventListener('click', saveSubagent);
+  $('saDelete').addEventListener('click', deleteSubagent);
+  $('saDraft').addEventListener('click', draftSubagent);
+  $('saName').addEventListener('input', () => {
+    if (settings.subagentEditing) return;   // 编辑时不跟着名字改 id（id 是身份）
+    $('saId').value = saSlug($('saName').value);
+  });
+  return dlg;
+}
+
+/** 工具 / 技能勾选：都用 wa-checkbox（组件库的），不手写勾选框。 */
+function renderSaChecks(boxId, items, selected) {
+  const box = $(boxId);
+  box.innerHTML = '';
+  if (!items || !items.length) {
+    box.appendChild(el('div', 'empty-note', '（没有可选项）'));
+    return;
+  }
+  const sel = new Set(selected || []);
+  for (const it of items) {
+    const id = typeof it === 'string' ? it : (it.id || it.name);
+    const cb = document.createElement('wa-checkbox');
+    cb.className = 'sa-check';
+    cb.setAttribute('value', id);
+    if (sel.has(id)) cb.setAttribute('checked', '');
+    cb.textContent = id;
+    const desc = typeof it === 'object' && it.description;
+    if (desc) cb.title = desc;
+    box.appendChild(cb);
+  }
+}
+
+function saChecked(boxId) {
+  return Array.from($(boxId).querySelectorAll('wa-checkbox'))
+    .filter((c) => c.checked)
+    .map((c) => c.value);
+}
+
+function saHint(msg) {
+  const hint = $('saHint');
+  if (!msg) { hint.hidden = true; return; }
+  hint.hidden = false;
+  hint.textContent = msg;
+}
+
+function openSubagentDialog(existing) {
+  const dlg = ensureSubagentDialog();
+  const reg = settings.subagentRegistry || {};
+  settings.subagentEditing = existing || null;
+  saHint('');
+  $('saName').value = (existing && existing.name) || '';
+  $('saEmoji').value = (existing && existing.emoji) || '';
+  $('saId').value = existing ? existing.id : '';
+  $('saId').disabled = !!existing;
+  $('saDesc').value = (existing && existing.description) || '';
+  $('saPersona').value = (existing && existing.persona) || '';
+  $('saRounds').value = String((existing && existing.maxRounds) || 6);
+  $('saDraftRequest').value = '';
+  const prov = $('saProvider');
+  prov.innerHTML = '';
+  const providers = reg.providers || [];
+  for (const p of providers) {
+    const o = document.createElement('wa-option');
+    o.value = p.id;
+    o.textContent = `${p.label || p.id}${p.type ? '（' + p.type + '）' : ''}`;
+    prov.appendChild(o);
+  }
+  prov.value = (existing && existing.providerId) || (providers[0] && providers[0].id) || '';
+  $('saModel').value = (existing && existing.model) || '';
+  renderSaChecks('saTools', reg.tools || [], (existing && existing.tools) || []);
+  renderSaChecks('saSkills', reg.skills || [], (existing && existing.skills) || []);
+  $('saDelete').hidden = !existing;
+  dlg.setAttribute('label', existing ? `编辑助理 · ${existing.id}` : '新建助理');
+  dlg.open = true;
+}
+
+/** 「让模型起草」：POST /api/subagents/plan（就是模型自己写一份配置，不含保存）。 */
+async function draftSubagent() {
+  const request = $('saDraftRequest').value.trim();
+  if (!request) return saHint('先写一句你要什么样的助理');
+  const btn = $('saDraft');
+  btn.disabled = true;
+  saHint('正在让模型起草…');
+  try {
+    const resp = await api('/subagents/plan', { method: 'POST', body: JSON.stringify({ request, autoSave: false }) });
+    const draft = resp && (resp.subagent || resp.candidate || resp);
+    if (!draft || (!draft.name && !draft.id)) {
+      saHint('模型返回的内容看不懂：' + JSON.stringify(resp).slice(0, 200));
+      return;
+    }
+    $('saName').value = draft.name || '';
+    $('saEmoji').value = draft.emoji || '';
+    $('saId').value = saSlug(draft.id || draft.name);
+    $('saDesc').value = draft.description || '';
+    $('saPersona').value = draft.persona || '';
+    if (draft.providerId) $('saProvider').value = draft.providerId;
+    $('saModel').value = draft.model || '';
+    if (draft.maxRounds) $('saRounds').value = String(draft.maxRounds);
+    if (draft.tools) {
+      const want = new Set(draft.tools);
+      for (const c of $('saTools').querySelectorAll('wa-checkbox')) c.checked = want.has(c.value);
+    }
+    saHint('起草好了 —— 检查一下再保存');
+  } catch (e) {
+    saHint('起草失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveSubagent() {
+  const editing = settings.subagentEditing;
+  const name = $('saName').value.trim();
+  const id = saSlug($('saId').value || name);
+  const payload = {
+    name,
+    emoji: $('saEmoji').value.trim(),
+    description: $('saDesc').value.trim(),
+    persona: $('saPersona').value.trim(),
+    providerId: $('saProvider').value || '',
+    model: $('saModel').value.trim(),
+    tools: saChecked('saTools'),
+    skills: saChecked('saSkills'),
+    maxRounds: Number($('saRounds').value) || 6,
+  };
+  if (!name) return saHint('名称不能为空');
+  if (!id) return saHint('id 不能为空（只能小写字母、数字、- 和 _）');
+  if (!payload.providerId) return saHint('先选一个模型服务 —— 没有的话去「模型服务」加一个');
+  if (!payload.model) return saHint('模型 id 不能为空');
+  const btn = $('saSave');
+  btn.disabled = true;
+  try {
+    if (editing) {
+      await api('/subagents/' + encodeURIComponent(editing.id), { method: 'PUT', body: JSON.stringify(payload) });
+    } else {
+      await api('/subagents', { method: 'POST', body: JSON.stringify({ ...payload, id }) });
+    }
+    closeSubagentDialog();
+    toast(editing ? '助理已更新' : `助理 ${id} 已创建`);
+    await loadSubagents();
+  } catch (e) {
+    saHint('保存失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteSubagent() {
+  const cur = settings.subagentEditing;
+  if (!cur) return;
+  const ok = await confirmDialog(`删除助理「${cur.name || cur.id}」？`, { okText: '删除', danger: true });
+  if (!ok) return;
+  try {
+    await api('/subagents/' + encodeURIComponent(cur.id), { method: 'DELETE' });
+    closeSubagentDialog();
+    toast('已删除');
+    await loadSubagents();
+  } catch (e) {
+    saHint('删除失败：' + e.message);
+  }
+}
+
+$('btnNewSubagent').addEventListener('click', () => openSubagentDialog(null));
+
 function switchSettingsPane(name) {
   settings.pane = name;
   document.querySelectorAll('.settings-nav-item').forEach((b) => {
@@ -2186,6 +2441,7 @@ function switchSettingsPane(name) {
   if (name === 'soul' && !settings.soulLoaded) loadSoul();
   if (name === 'identity' && settings.model) { renderIdentities(); renderIdentityTools(); }
   if (name === 'skills' && !settings.skillsLoaded) loadSkills();
+  if (name === 'assistants' && !settings.subagentsLoaded) loadSubagents();
   if (name === 'about') loadAbout();
   if (name === 'interface') renderInterfacePane();
 }
