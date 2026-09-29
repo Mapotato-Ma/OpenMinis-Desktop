@@ -1,5 +1,45 @@
 # 变更日志
 
+## v0.3.1 — 启动更快（2026-09-29）
+
+用户反馈：公司电脑上双击 exe 到窗口出来要等好几秒。真因不是"Python 慢"，而是启动
+**严格串行**：onefile 解包 → 内核 import → uvicorn 起好（0.53 是**先跑完 lifespan 的
+文件 I/O 才 bind 端口**）→ 然后才 create_window、初始化 WebView2、加载页面。窗口只在
+最后一段的末尾出现，前面几秒屏幕上什么都没有。
+
+### 启动顺序改成「窗口先行」
+- 主线程立刻建窗口并渲染 `web/desktop/splash.html`（内联、不依赖后端），内核交给后台
+  线程 boot，好了再 `load_url` 到真实界面 —— WebView2 的初始化和内核 import 并行，
+  「窗口出现」不再包含内核那几秒。
+- splash 显示真实阶段文案与已等待秒数（**不做假进度条**）；**启动失败把错误写进窗口**
+  并指向 `logs\desktop.log`，不会让人对着一个永远转圈的窗口干等。
+- 启动期间关窗：boot 线程不是 daemon（避免把正在写盘的会话库硬杀），关窗立刻打标记、
+  健康检查放弃、已起的服务收掉，进程干净退出。
+- `OPENMINIS_NO_SPLASH=1` 退回老顺序 —— 出问题时第一个该试的开关，也是 A/B 的对照组。
+
+### 新增启动时间线（先能测，再谈优化）
+- `desktop/startup_trace.py`：Windows 用 `GetProcessTimes` 取**进程创建时刻**当 0 点
+  （这样 onefile 的解包耗时才算得进去；解包发生在父进程，所以父进程是同一个 exe 时用
+  父进程的时刻）。每次启动追加**一行**到 `%LOCALAPPDATA%\openminis\logs\startup.log`。
+- `desktop.log` 补上时间戳 —— 以前没有，用户发日志过来也看不出"几秒"。
+
+### 顺手
+- `wait_for_health` 前 3 秒改 25ms 轮询（原来固定 150ms，平均白等 ~75ms）。
+
+### 打包：多一个免解包版本
+- CI 新增 `portable` 任务，把同一份代码打成 onedir，产出
+  `OpenMinisDesktop-portable.zip`。onefile **每次启动都要把载荷解到 `%TEMP%`**，
+  办公电脑上还要过一遍杀软实时扫描；onedir 没有这一步，代价是要先解压一次。
+- 两个包一起发，配 `scripts/startup_probe.ps1` 在 CI 上量冷/热两次启动耗时 ——
+  CI 机器没有企业杀软，真正决定性的数字得在用户那台机器上取（`startup.log`）。
+
+### 验证
+- `desktop/tests` 30 → 47 项：新增 launcher 的顺序/状态机/兜底契约、startup_trace、
+  以及"页面里的函数名必须和壳层推的 JS 一致"的契约测试。
+- 前端检查 11 → 12 项：splash 必须自包含（它渲染时后端还不存在，任何外链都是 404）。
+- 本地没有 GUI/pywebview，窗口路径用注入的假 `webview` 模块验顺序；真窗口靠 CI 冒烟
+  （`--no-window`）与真机实测。
+
 ## v0.3.0 — 编辑器式界面（2026-09-29）
 
 这一版把界面往「像 VS Code」推了一步：菜单栏、面包屑、多标签、状态栏信息、目录树的

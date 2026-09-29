@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>OpenMinis Desktop</title>
+<!--
+  启动画面。它由壳层（desktop/launcher.py）以 html= 直接塞进 WebView，**不依赖后端**
+  —— 因为它的全部意义就是在后端还不存在的那几秒里给用户一个窗口。
+
+  两个约定，壳层按名字调它们（改名字要同时改 launcher.py）：
+    window.__bootStatus(text)  ← 换一行进度文案
+    window.__bootFail(text)    ← 显示错误（换成错误态，不再转圈）
+
+  配色与 web/desktop/style.css 的暗色主题一致：同一进程里两个页面，色偏差一眼能看出来。
+  这里不引任何外部资源（字体/图标/脚本），加载它时还没有 HTTP 服务。
+-->
+<style>
+  :root {
+    --bg: #141517;
+    --bg-raised: #1f2023;
+    --border: #2a2c31;
+    --fg: #d8dade;
+    --fg-strong: #f2f4f6;
+    --fg-muted: #8b9096;
+    --fg-faint: #63686f;
+    --accent: #5b8cff;
+    --err: #f0616d;
+    --mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.6 var(--sans);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  main { width: 420px; max-width: calc(100vw - 48px); text-align: center; }
+  .mark {
+    width: 46px; height: 46px; margin: 0 auto 18px;
+    border-radius: 12px;
+    background: linear-gradient(145deg, var(--accent), #2f5cc4);
+    display: flex; align-items: center; justify-content: center;
+    font: 700 20px/1 var(--mono); color: #fff;
+    letter-spacing: -1px;
+  }
+  h1 { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--fg-strong); letter-spacing: .2px; }
+  .status { color: var(--fg-muted); font-size: 12.5px; min-height: 20px; }
+  .bar {
+    margin: 18px auto 0; height: 3px; width: 220px;
+    background: var(--bg-raised); border-radius: 2px; overflow: hidden;
+  }
+  .bar i {
+    display: block; height: 100%; width: 40%; border-radius: 2px;
+    background: var(--accent);
+    animation: slide 1.15s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
+  .hint { margin-top: 14px; color: var(--fg-faint); font-size: 11.5px; }
+  .fail { display: none; margin-top: 16px; text-align: left; }
+  .fail.show { display: block; }
+  .fail pre {
+    margin: 0; padding: 10px 12px; max-height: 180px; overflow: auto;
+    background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--err); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word;
+  }
+  body.failed .bar { display: none; }
+  body.failed .status { color: var(--err); }
+  body.failed .mark { background: linear-gradient(145deg, var(--err), #a33); }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark">OM</div>
+  <h1>OpenMinis Desktop</h1>
+  <div class="status" id="status">正在启动…</div>
+  <div class="bar"><i></i></div>
+  <div class="hint" id="hint">首次启动要初始化数据目录，可能稍慢</div>
+  <div class="fail" id="fail"><pre id="failText"></pre></div>
+</main>
+<script>
+  (function () {
+    var statusEl = document.getElementById('status');
+    var started = Date.now();
+
+    // 秒表：不用假进度条，只报真实等待时间 —— 用户能据此判断是"慢"还是"卡死"。
+    setInterval(function () {
+      if (document.body.classList.contains('failed')) return;
+      var s = (Date.now() - started) / 1000;
+      if (s < 2.5) return;
+      var hint = document.getElementById('hint');
+      if (hint && !hint.dataset.timed) {
+        hint.dataset.timed = '1';
+      }
+      if (s >= 10) {
+        statusEl.textContent = statusEl.dataset.base + '（已等待 ' + s.toFixed(0) + ' 秒）';
+      }
+    }, 500);
+
+    window.__bootStatus = function (text) {
+      statusEl.dataset.base = text;
+      statusEl.textContent = text;
+    };
+    window.__bootFail = function (text) {
+      document.body.classList.add('failed');
+      statusEl.textContent = '启动失败';
+      document.getElementById('fail').classList.add('show');
+      document.getElementById('failText').textContent = text;
+      document.getElementById('hint').textContent =
+        '详情见 %LOCALAPPDATA%\\openminis\\logs\\desktop.log';
+    };
+  })();
+</script>
+</body>
+</html>

@@ -20,6 +20,12 @@ for _p in (str(_ROOT), str(_ROOT / "src")):
 
 from desktop.stdio import ensure_console_streams  # noqa: E402
 
+# 最早的一次打点：此刻还没 import 任何重型依赖。它和"进程创建时刻"的差就是
+# bootloader 解包 + 解释器启动 —— 办公电脑上最可疑的那一段。
+from desktop.startup_trace import mark as _trace_mark  # noqa: E402
+
+_trace_mark("python")
+
 # Must run before anything imports rich/uvicorn/logging: a windowed build has
 # no console, and the first log call would otherwise kill startup.
 _LOG_PATH = ensure_console_streams()

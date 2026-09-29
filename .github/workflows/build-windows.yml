@@ -162,6 +162,12 @@ jobs:
           Write-Host "frozen exe is healthy and serving the desktop UI"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 
+      - name: Report startup timeline (onefile)
+        shell: pwsh
+        # 只报告、不判定：绝对值会随 runner 波动，有意义的是同一个 runner 上两个
+        # 打包形状的对比，以及应用自己写进 logs\startup.log 的分段耗时。
+        run: pwsh -File scripts/startup_probe.ps1 -ExePath dist\OpenMinisDesktop.exe -Port 8801
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -185,9 +191,74 @@ jobs:
             首次启动会在 `%LOCALAPPDATA%\openminis` 建数据目录，然后在设置里
             配置模型服务（OpenAI / Anthropic / 任意 OpenAI 兼容网关）。
 
+            **嫌启动慢就换便携版**：下载 `OpenMinisDesktop-portable.zip`，解压后双击
+            文件夹里的 `OpenMinisDesktop.exe`。单文件版每次启动都要把内容解到临时目录
+            （办公电脑上还会被杀软逐个扫描），便携版没有这一步。
+
             - 快捷键：`Ctrl+K` 命令面板、`Ctrl+\`` 终端、`Ctrl+B` 左侧面板、`Ctrl+N` 新会话、
               `Ctrl+O` 打开文件夹、`Ctrl+,` 设置、`Esc` 关闭当前文件
             - 界面：菜单栏（文件/视图/帮助）、活动栏、可多标签看代码（同时最多 10 个）、
               文件树可指向任意目录
             - 首次运行若提示缺少 WebView2，装一次微软的
               [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 较老版本可能需要）
+            - 想知道启动那几秒花在哪：`%LOCALAPPDATA%\openminis\logs\startup.log`
+              每次启动写一行（解包 / 内核 / 后端 / 窗口各自的累计毫秒）。
+              设环境变量 `OPENMINIS_NO_SPLASH=1` 可以退回旧的启动顺序，用来对比。
+
+  # 同一个 exe 的"免解包"版本。onefile 每次启动都要把载荷解到 %TEMP%，办公电脑上
+  # 还要过一遍杀软实时扫描；onedir 没有这一步，代价是得先解压一次、双击的是文件夹里
+  # 的 exe。两个都发出去，让用户在**自己那台机器**上对比 —— CI 机器没有企业杀软，
+  # 它给不出那个决定性数字。
+  portable:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pywebview>=5.0" "pyinstaller>=6.6"
+
+      - name: Generate icon
+        shell: pwsh
+        run: python scripts/make_icon.py
+
+      - name: Build portable (onedir) app
+        shell: pwsh
+        env:
+          OPENMINIS_ONEFILE: '0'
+          OPENMINIS_CONSOLE: '0'
+        run: python -m PyInstaller --noconfirm --clean packaging/OpenMinisDesktop.spec
+
+      - name: Report startup timeline (portable)
+        shell: pwsh
+        run: pwsh -File scripts/startup_probe.ps1 -ExePath dist\OpenMinisDesktop\OpenMinisDesktop.exe -Port 8802
+
+      - name: Package the folder
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\OpenMinisDesktop -DestinationPath dist\OpenMinisDesktop-portable.zip
+          Get-Item dist\OpenMinisDesktop-portable.zip | Select-Object Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMinisDesktop-windows-portable
+          path: dist/OpenMinisDesktop-portable.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/OpenMinisDesktop-portable.zip

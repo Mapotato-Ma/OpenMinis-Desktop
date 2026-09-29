@@ -9,11 +9,13 @@
 一个 exe，两个线程，一个 GUI 事件循环：
 
 ```
-主线程                         后台线程（daemon）
-──────────────────────────     ────────────────────────────────
-pywebview GUI 事件循环          uvicorn (FastAPI + WebSocket)
-  └─ WebView2 (Windows)           └─ openminis.server.main:app
-       └─ http://127.0.0.1:8765/_desktop/   ← 同一个进程内
+主线程                                boot 线程（非 daemon）
+──────────────────────────────        ────────────────────────────────
+pywebview GUI 事件循环                启动期：内核 import → uvicorn
+  ├─ WebView2 (Windows)                 └─ openminis.server.main:app
+  │    ├─ 先渲染自带 splash               （uvicorn 先跑完 lifespan 的
+  │    └─ 就绪后 load_url 到 ────────────┐   文件 I/O 才 bind 端口）
+  └─ http://127.0.0.1:8765/_desktop/ ←──┘
 ```
 
 - 窗口加载的是 `http://127.0.0.1:<port>/_desktop/`，不是 `file://`。
@@ -21,6 +23,29 @@ pywebview GUI 事件循环          uvicorn (FastAPI + WebSocket)
 - `--port` 默认 8765。端口被占则自动挑一个空闲端口（`find_free_port`）。
 - 关窗口 → `webview.start()` 返回 → `server.shutdown()` 把 uvicorn 的
   `should_exit` 置位并 join，进程干净退出。
+
+### 启动顺序是「窗口先行」（v0.3.1）
+
+```
+解包 exe → 建窗口（渲染自带 splash）→ ┬─ WebView2 初始化 ┐ 并行
+                                      └─ 内核 import + uvicorn ┘
+                                      → load_url 到真实界面
+```
+
+串行的老顺序（起内核 → 健康 → 才建窗口）会让用户盯着桌面等好几秒，见
+`desktop/launcher.py` 的模块注释。三条约束：
+
+- **boot 线程不是 daemon**：关窗时内核可能正写在盘上（会话库、JSON 配置），
+  硬杀比多活几百毫秒危险得多。主线程关窗后 join 它，再收服务。
+- **启动失败必须看得见**：错误通过 `window.__bootFail(...)` 写进窗口并指向
+  `logs\desktop.log`（`web/desktop/splash.html` 提供这两个钩子，前端检查里钉住了
+  「页面里的名字必须和壳层推的一致」）。
+- **`OPENMINIS_NO_SPLASH=1`** 退回串行顺序：出问题时第一个该试的开关，也是量启动
+  耗时的对照组。
+
+启动耗时的证据链：`desktop/startup_trace.py` 每次启动往
+`%LOCALAPPDATA%\openminis\logs\startup.log` 追加**一行**（`origin=parent|self|python`
+标明 0 点取自哪里 —— 取父进程时刻才能把 onefile 的解包算进去）。
 
 **单实例**：启动时先探测 `host:port` 上是否已有健康的内核，有就直接把新窗口
 指过去。否则会出现两个内核、两套 SQLite 会话库，用户看到的是「会话丢了」。
@@ -323,6 +348,17 @@ v0.1.0 的「模型服务」页**没有保存按钮**，于是出现了一个非
 | `web/desktop/**` | 桌面界面是数据不是代码 |
 
 `console=False` 是默认值（真正的 GUI 应用行为），调试时设 `OPENMINIS_CONSOLE=1`。
+
+打包形状由 `OPENMINIS_ONEFILE` 决定，**两个都发**：
+
+| 形状 | 启动 | 用法 |
+|---|---|---|
+| onefile（`OpenMinisDesktop.exe`） | 每次启动都要把载荷解到 `%TEMP%\_MEIxxxxx`，办公电脑上还要过一遍杀软实时扫描 | 双击即用，最省事 |
+| onedir（`OpenMinisDesktop-portable.zip`） | 没有解包这一步 | 解压一次，双击文件夹里的 exe |
+
+哪个更快要在**用户自己的机器**上量：CI 的 runner 没有企业杀软。`scripts/startup_probe.ps1`
+在 CI 上量冷/热两次（`--no-window`，报"进程起来 → 端口通 → `/api/health` 200"），
+真机上则看 `logs\startup.log` 那一行。
 
 CI 里的验证步骤很关键：**GUI 构建没有控制台**，所以唯一的判据是
 `Start-Process --no-window --port 8799` 之后 `/api/health` 是否 200、

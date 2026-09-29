@@ -42,6 +42,18 @@ test('index.html 引的脚本都存在（少一个就是 404 + 界面半死）',
   }
 });
 
+test('启动画面必须自包含（它渲染时后端还不存在）', () => {
+  const html = read('splash.html');
+  // splash 由壳层以 html= 直接塞进 WebView，那一刻没有任何 HTTP 服务：
+  // 任何外链（脚本/样式/字体/图片）都会 404，表现是白屏一把。
+  const external = [...html.matchAll(/\s(?:src|href)="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(external, [], `splash.html 不能引用外部资源：${external.join(', ')}`);
+  // 这两个名字是壳层（desktop/launcher.py）推 JS 时用的约定，改一边忘另一边就是转圈转到天荒地老。
+  for (const hook of ['__bootStatus', '__bootFail']) {
+    assert.ok(html.includes(hook), `splash.html 里没有 ${hook}`);
+  }
+});
+
 /* 我们自己的代码里唯一允许写成 module 的：它必须 import 组件库的 ESM 注册 API，
    classic script 做不到这件事。白名单长度被钉在 1 —— 它是例外，不是新惯例。 */
 const MODULE_ALLOWLIST = ['icons.js'];

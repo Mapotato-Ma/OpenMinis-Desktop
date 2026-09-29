@@ -125,6 +125,57 @@ def pywebview_available() -> bool:
     return True
 
 
+def create_window(
+    *,
+    title: str = "OpenMinis",
+    url: str | None = None,
+    html: str | None = None,
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
+    app_root: Path | None = None,
+) -> tuple[Any, WindowAPI]:
+    """Create (but do not show) the window; returns ``(window, api)``.
+
+    ``html`` 和 ``url`` 二选一。给 ``html`` 时窗口先渲染一段自带页面，等后端起来了
+    再 ``window.load_url(...)`` —— 这是 ``desktop.launcher`` 的"窗口先行"用法：
+    建窗口不需要后端，于是 WebView2 的初始化能和内核 import 并行。
+    """
+    import webview  # noqa: PLC0415
+
+    api = WindowAPI(None, app_root=app_root or Path.cwd())
+    window = webview.create_window(
+        title,
+        url,
+        html=html,
+        width=width,
+        height=height,
+        min_size=(MIN_WIDTH, MIN_HEIGHT),
+        js_api=api,
+        text_select=True,
+    )
+    api._window = window
+    return window, api
+
+
+def start_gui(*, storage_path: Path | None = None, debug: bool = False) -> None:
+    """Run the GUI loop until the last window closes."""
+    import webview  # noqa: PLC0415
+
+    kwargs: dict[str, Any] = {"debug": debug}
+    if storage_path is not None:
+        storage_path.mkdir(parents=True, exist_ok=True)
+        kwargs["private_mode"] = False
+        kwargs["storage_path"] = str(storage_path)
+
+    try:
+        webview.start(**kwargs)
+    except TypeError:
+        # Older pywebview builds reject private_mode/storage_path. Losing
+        # persisted UI state is better than not starting at all.
+        logger.warning("pywebview ignored storage options (older version?)")
+        webview.start(debug=debug)
+
+
 def run_window(
     url: str,
     *,
@@ -142,35 +193,15 @@ def run_window(
     fall back to a browser tab instead of dying.
     """
     try:
-        import webview  # noqa: PLC0415
+        import webview  # noqa: F401, PLC0415
     except Exception as exc:  # pragma: no cover - depends on optional dep
         raise RuntimeError("pywebview is not installed") from exc
 
-    api = WindowAPI(None, app_root=app_root or Path.cwd())
-    window = webview.create_window(
-        title,
-        url,
-        width=width,
-        height=height,
-        min_size=(MIN_WIDTH, MIN_HEIGHT),
-        js_api=api,
-        text_select=True,
+    window, _api = create_window(
+        title=title, url=url, width=width, height=height, app_root=app_root
     )
-    api._window = window
 
     if on_closed is not None:
         window.events.closed += on_closed
 
-    start_kwargs: dict[str, Any] = {"debug": debug}
-    if storage_path is not None:
-        storage_path.mkdir(parents=True, exist_ok=True)
-        start_kwargs["private_mode"] = False
-        start_kwargs["storage_path"] = str(storage_path)
-
-    try:
-        webview.start(**start_kwargs)
-    except TypeError:
-        # Older pywebview builds reject private_mode/storage_path. Losing
-        # persisted UI state is better than not starting at all.
-        logger.warning("pywebview ignored storage options (older version?)")
-        webview.start(debug=debug)
+    start_gui(storage_path=storage_path, debug=debug)

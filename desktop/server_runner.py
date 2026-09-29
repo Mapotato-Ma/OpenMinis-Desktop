@@ -17,14 +17,28 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import startup_trace as trace
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 _HEALTH_PATH = "/api/health"
+
+#: 前几秒用这个间隔轮询。uvicorn 是「lifespan 跑完才 bind 端口」，所以从"端口通"
+#: 到"我们能拿到 200"通常只差一个轮询周期 —— 150ms 的固定间隔平均白等 75ms，
+#: 而这正是用户唯一能感知的那一小段。
+_FAST_POLL_S = 0.025
+_SLOW_POLL_S = 0.15
+_FAST_WINDOW_S = 3.0
+
+
+class BootCancelled(RuntimeError):
+    """内核启动被主动取消（用户在 boot 期间把窗口关了）。"""
 
 
 def find_free_port(host: str = DEFAULT_HOST, preferred: int = DEFAULT_PORT) -> int:
@@ -59,18 +73,35 @@ def port_in_use(host: str, port: int) -> bool:
         return probe.connect_ex((host, port)) == 0
 
 
-def wait_for_health(host: str, port: int, timeout: float = 40.0) -> bool:
-    """Poll ``/api/health`` until the server answers or ``timeout`` elapses."""
+def wait_for_health(
+    host: str,
+    port: int,
+    timeout: float = 40.0,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> bool:
+    """Poll ``/api/health`` until the server answers or ``timeout`` elapses.
+
+    ``should_stop`` 是给"窗口先行"用的：用户在启动期间关掉窗口时，我们不该继续
+    干等一个没人要的后端。
+    """
     url = f"http://{host}:{port}{_HEALTH_PATH}"
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    started = time.monotonic()
+    deadline = started + timeout
+    while True:
+        if should_stop is not None and should_stop():
+            return False
         try:
             with urllib.request.urlopen(url, timeout=1.0) as resp:
                 if resp.status == 200:
                     return True
         except (urllib.error.URLError, OSError, TimeoutError):
-            time.sleep(0.15)
-    return False
+            pass
+        now = time.monotonic()
+        if now >= deadline:
+            return False
+        elapsed = now - started
+        time.sleep(_FAST_POLL_S if elapsed < _FAST_WINDOW_S else _SLOW_POLL_S)
 
 
 @dataclass
@@ -123,12 +154,14 @@ def start_server(
     desktop_dir: Path | None = None,
     ui_active: bool = False,
     log_level: str = "info",
+    should_stop: Callable[[], bool] | None = None,
 ) -> DesktopServer:
     """Start uvicorn in a daemon thread and block until it is healthy."""
     import uvicorn  # noqa: PLC0415
 
     chosen = find_free_port(host) if port in (None, 0) else port
     app = build_app(desktop_dir=desktop_dir, ui_active=ui_active)
+    trace.mark("kernel-import")
 
     config = uvicorn.Config(
         app,
@@ -144,10 +177,13 @@ def start_server(
     thread = threading.Thread(target=server.run, name="openminis-uvicorn", daemon=True)
     thread.start()
 
-    if not wait_for_health(host, chosen):
+    if not wait_for_health(host, chosen, should_stop=should_stop):
         server.should_exit = True
+        if should_stop is not None and should_stop():
+            raise BootCancelled("startup cancelled before the backend became healthy")
         raise RuntimeError(
             f"OpenMinis backend did not become healthy on http://{host}:{chosen} within 40s"
         )
+    trace.mark("backend-ready")
     logger.info("backend ready on http://%s:%s", host, chosen)
     return DesktopServer(host=host, port=chosen, _server=server, _thread=thread)
