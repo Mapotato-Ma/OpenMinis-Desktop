@@ -352,6 +352,7 @@ function scrollChat(force) {
 }
 
 function beginTurn() {
+  clearStreamCursor();   // 兜底：上一轮万一没清干净
   emptyNode().style.display = 'none';
   const root = el('div', 'msg assistant');
   const role = el('div', 'msg-role');
@@ -375,6 +376,12 @@ function turnTextBlock() {
   return t.textBlock;
 }
 
+/** 流式光标只属于「正在流式输出的那一个块」。以前只插不删 → 每轮都在页面上
+    留下一个永远在闪的光标（用户实测：「多个闪烁的蓝色光标，会话结束还在闪」）。 */
+function clearStreamCursor() {
+  for (const c of $('messages').querySelectorAll('.cursor-blink')) c.remove();
+}
+
 let deltaRaf = 0;
 function appendDelta(text) {
   if (!state.turn) beginTurn();
@@ -384,6 +391,7 @@ function appendDelta(text) {
   deltaRaf = requestAnimationFrame(() => {
     deltaRaf = 0;
     const block = turnTextBlock();
+    clearStreamCursor();   // 先清旧的，否则每来一段新文本就多留一个在闪
     if (block) block.innerHTML = renderMarkdown(t.text) + '<span class="cursor-blink"></span>';
     scrollChat();
   });
@@ -394,6 +402,7 @@ function addToolCardToTurn(id, name, input) {
   // A tool call ends the current text run: the next delta starts a new block
   // *below* the card, which is what the agent's ordering actually means.
   t.textBlock = null;
+  clearStreamCursor();   // 文本说完了，光标跟着收掉
   const card = makeToolCard(name, input);
   t.body.appendChild(card);
   if (id) t.toolCards.set(id, card);
@@ -413,6 +422,7 @@ function endTurn() {
     t.body.appendChild(body);
   }
   if (t.text) addMessageActions(t.root, t.text);
+  clearStreamCursor();
   state.turn = null;
   state.streaming = false;
   $('btnStop').hidden = true;
@@ -585,6 +595,7 @@ async function newSession() {
     const id = s && (s.id || (s.session && s.session.id));
     if (id) {
       state.sessionId = id;
+      await bindSessionWorkspace(currentWorkspace);   // 新会话也归到面板当前的工作区
       state.messages = [];
       state.changes = [];
       $('messages').innerHTML = '';
@@ -601,6 +612,8 @@ async function newSession() {
 async function selectSession(id) {
   if (id === state.sessionId) return;
   state.sessionId = id;
+  // 文件面板跟着会话走：面板看的目录 = agent 干活的目录
+  syncWorkspaceToSession(state.sessions.find((x) => x.id === id));
   state.changes = [];
   updateSessionHeader();
   $('messages').innerHTML = '';
@@ -748,6 +761,40 @@ function renderWorkspacePicker() {
   const shown = (cur && cur.path) || '';
   $('wsCurrentPath').textContent = shown || '（内核默认工作区）';
   $('wsCurrentPath').title = shown || '内核默认工作区';
+  const hint = $('wsAgentHint');
+  if (hint) {
+    hint.textContent = shown
+      ? 'agent 的 shell 就在这个目录里启动'
+      : '未绑定目录：agent 只在内核默认沙箱里活动，看不到你自己的项目';
+  }
+}
+
+/** 把当前会话归入某个工作区 —— **这一步才决定 agent 的 shell 在哪个目录里启动**。
+    内核给没归入工作区的会话只在默认沙箱（`<data>/workspace/db-<会话id>`）里活动，
+    所以文件面板里看到的项目它一个也够不着（用户实测：面板里有文件，agent 说工作区是空的）。
+    桌面界面以前从来没调过这个接口 —— 面板换了根，agent 的 cwd 原地不动。 */
+async function bindSessionWorkspace(folderId) {
+  const sid = state.sessionId;
+  if (!sid) return;
+  try {
+    await api(`/chats/sessions/${encodeURIComponent(sid)}/workspace`, {
+      method: 'PATCH',
+      body: JSON.stringify({ folderId: folderId || null }),
+    });
+  } catch (e) {
+    toast('把会话放进工作区失败：' + e.message, 'err');
+  }
+}
+
+/** 反向同步：切会话时把文件面板切到那个会话所属的工作区（两边永远是同一个根）。 */
+function syncWorkspaceToSession(session) {
+  const want = (session && session.folderId) || '';
+  if (want === currentWorkspace) return;
+  if (want && !workspaces.some((w) => w.id === want)) return;  // 工作区已被删：别指向不存在的根
+  currentWorkspace = want;
+  try { localStorage.setItem(WS_KEY, currentWorkspace); } catch { /* private mode */ }
+  renderWorkspacePicker();
+  loadTree();
 }
 
 /** 「指定目录」：给文件树换一个根。走内核的工作区接口，界面不直接读盘。 */
@@ -800,6 +847,7 @@ function promptForRoot() {
       try { localStorage.setItem(WS_KEY, currentWorkspace); } catch { /* private mode */ }
       $('modalOverlay').hidden = true;
       await loadWorkspaces();
+      await bindSessionWorkspace(currentWorkspace);
       await loadTree();
       toast('文件树的根已切换');
     } catch (e) { toast('设置失败: ' + e.message, 'err'); }
@@ -1822,6 +1870,7 @@ function wire() {
     closeFileView();   // 换了根，编辑器里不该留着旧工作区的文件
     try { localStorage.setItem(WS_KEY, currentWorkspace); } catch { /* private mode */ }
     renderWorkspacePicker();
+    await bindSessionWorkspace(currentWorkspace);   // 选了新根，会话跟着搬过去
     await loadTree();
   });
   $('btnCopyFile').addEventListener('click', copyCurrentFile);

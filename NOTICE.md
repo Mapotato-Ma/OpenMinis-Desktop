@@ -16,7 +16,7 @@
 `src/`、`web/dist/`、`tests/`、`PORTING.md`、`PORTING_MAP.md`、`trace.md`、
 `app.py`、`run.bat`、`stop.bat`、`setup.bat`、`tui.bat`、`build.bat`、
 `pyproject.toml`、`uv.lock`、`LICENSE` 均原样来自 `littlhub/PythonOpenMinis`，
-**除下面「与上游的偏离」一节列出的两处外**未作修改。
+**除下面「与上游的偏离」一节列出的八处外**未作修改。
 
 ## 与上游的偏离（PORT-FIX）
 
@@ -32,6 +32,8 @@
 | `tests/test_plugins.py`（`test_bridge_does_not_top_up_when_nothing_was_delivered`） | 把夹具文件的 mtime 钉到过去 | 原用例依赖「刚写的文件早于随后取的 `time.time()`」，而 Windows 的 `time.time()` 只有约 15.6ms 时钟粒度、文件时间戳更细 → 旧图被当成新增补发。**这是用例的时钟赛跑，不是产品 bug**（产品侧那个 ≤1 tick 的窗口可以忽略） |
 | `tests/test_perf_and_freshness.py`（并发两项） | 断言从「总耗时 < 0.55s」改成**屏障**：每个工具进门先登记、再等「所有人到齐」；另加三项变体检测隐性并发上限。同时把「结果顺序」断言从**完成顺序**改成**回填顺序**（对外契约） | 总耗时是**机器负载的代理**：空载 0.31s、忙时会超过 0.55s → 正确的实现被报成红。中途试过「时间区间有交集」，但那只是把「总时长敏感」换成「启动偏移敏感」；屏障完全不依赖计时。完成顺序取决于调度、不是契约，断言它本身就是偶发红的来源 |
 | `tests/test_plugin_process.py`（两项） | 加 `skipif(os.name != "nt")` | 两项断言的是 Windows 专有行为：`.cmd/.bat` 需要 `cmd.exe` 套壳、盘符下的 node 候选目录。在 POSIX 上它们不可能成立 |
+| `src/openminis/sandbox/guard.py`（`_resolve_outside()`） | 额外把**会话自己的工作目录**算作沙箱根（`cwd` 有父目录时才加） | 工作区可以绑一个真实目录（桌面版：把项目目录设为工作区），此时 shell 的 cwd 就是那个项目。原实现允许根只有 `<data>/workspace` + 技能库，于是**访问自己的工作区**也被判「目录越界」（实测：cwd 已经是项目目录、命令照拦；白名单也救不了 —— 它的键是精确目录，子目录不匹配）。`cwd=/` 这类没有父目录的路径不当根，避免一次放行整台机器 |
+| `src/openminis/sandbox/guard.py`（`_git_bash_drive_path()`） | Windows 上把 `/c/Users/…` 形态翻成 `C:/Users/…` 再判越界 | Windows 上内核的 shell 是 **Git Bash**（`persistent_shell.py` 优先找 Git 自带的 bash），模型于是写 `/c/Users/…`；而 Windows 语义里 `ntpath.abspath('/c/x')` 是 `'\\c\\x'`（当前盘根下的 c 目录）→ 访问**自己的工作区根**也被判越界（用户实测拦截编号 `g-179067946811-c46651`）。只在 `os.name == "nt"` 时生效，POSIX 上 `/c/...` 是普通路径 |
 | `pyproject.toml`（`[tool.pytest.ini_options]`） | `testpaths` 加上 `desktop/tests` | 桌面壳自己的测试（`desktop/` 是本项目新增的代码）不该混进上游的 `tests/` 目录里 |
 
 上游修好之后删掉这些改动即可回到「一行未改」——判据是 `curl` 一份上游 `main`
@@ -74,7 +76,7 @@ README.md                       本文档重写为桌面版说明
 `src/openminis/**` 默认一行不改。桌面路由是通过 `desktop/ui_mount.py` 在运行时
 插入到 FastAPI 路由表前端的，这样上游更新可以直接 merge。
 
-目前有**六处**例外（都是上游自身的问题，见上面「与上游的偏离」一节），
+目前有**八处**例外（都是上游自身的问题，见上面「与上游的偏离」一节），
 一旦上游修好就可以删掉。规矩是：任何对 `src/` 的改动都必须
 
 1. 在代码里打 `# PORT-FIX:` 标记并写清原因，

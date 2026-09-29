@@ -300,3 +300,30 @@ test('缩放优先交给宿主原生（WebView2），拿不到才回落 CSS', ()
   assert.ok(app.includes('fallbackToCssZoom'), '没有回落函数');
   assert.ok(read('index.html').includes('id="uiZoomMode"'), '界面面板没有显示当前缩放方式');
 });
+
+test('流式光标只许有一个，回合结束要收掉（否则每轮留一个还在闪）', () => {
+  // 用户实测：「会话里面会出现多个闪烁的蓝色光标，会话结束还在闪」——
+  // 旧实现只往块里插入 `<span class="cursor-blink">`，**从来没人删它**。
+  const app = read('app.js');
+  assert.ok(app.includes('function clearStreamCursor'), '没有清光标的函数');
+  assert.match(app, /function endTurn\(\)[\s\S]*?clearStreamCursor\(\)[\s\S]*?state\.turn = null/,
+    '回合结束时没收掉光标 → 它会在页面上一直闪');
+  assert.match(app, /clearStreamCursor\(\);\s*\/\/ 先清旧的[\s\S]{0,200}cursor-blink/,
+    '每次重渲染前没清旧的 → 每段文本都会留一个');
+});
+
+test('会话必须归入工作区，agent 才会在你看的目录里干活', () => {
+  // 内核只让「已归入工作区」的会话把 shell 起在工作区目录里；没归入的只有默认
+  // 沙箱 `<data>/workspace/db-<会话id>`。桌面界面以前从不调这个接口 → 用户在文件
+  // 面板里明明看着自己的项目，agent 却说「工作区是空的、外面被沙箱拦了」。
+  const app = read('app.js');
+  assert.ok(app.includes('/workspace`'), '没有把会话归入工作区的调用');
+  assert.ok(app.includes("method: 'PATCH'"), '归入工作区应该用 PATCH');
+  assert.ok(app.includes('folderId'), 'PATCH 体里必须带 folderId');
+  assert.ok(app.includes('bindSessionWorkspace(currentWorkspace)'), '选工作区时没把会话搬过去');
+  assert.match(app, /state\.sessionId = id;\s*\n\s*await bindSessionWorkspace/,
+    '新建的会话没归入面板当前的工作区');
+  assert.ok(app.includes('syncWorkspaceToSession'), '切会话时没把面板切到那个会话的工作区');
+  assert.ok(read('index.html').includes('id="wsAgentHint"'),
+    '界面没告诉用户 agent 到底在哪个目录干活');
+});

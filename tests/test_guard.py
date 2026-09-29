@@ -510,3 +510,63 @@ def test_scan_escape_still_blocks_real_absolutes(env):
     assert scan_escape(f"cd {OUTSIDE}").risky
     assert scan_escape(f'cat "{Path.home() / "Desktop" / "x.txt"}').risky
     assert scan_escape("rm -rf /tmp/xyz").risky
+
+
+# ---------------------------------------------------------------------------
+# 会话自己的工作目录 = 它的沙箱根（工作区绑了真实目录时）
+# ---------------------------------------------------------------------------
+def test_session_workspace_dir_is_its_own_sandbox_root(env, tmp_path):
+    """工作区绑真实目录时（桌面版：把项目目录设为工作区），shell 的 cwd 就是那个
+    项目 —— 访问它必须放行。原来允许根只有 ``<data>/workspace`` + 技能库，于是
+    「访问自己的工作区」被判越界（用户实测：文字面板里明明有文件，agent 却说越界）。"""
+    proj = tmp_path / "proj"
+    (proj / "src" / "deep").mkdir(parents=True)
+    cwd = str(proj)
+    assert scan_escape(f"cd {proj} && ls", cwd).reasons == []
+    assert scan_escape(f"ls {proj}/src", cwd).reasons == []
+    assert scan_escape(f"grep -rn foo {proj}/src/deep", cwd).reasons == []
+    assert scan_escape("ls -la", cwd).reasons == []
+    assert check_shell_command(f"ls {proj}/src", session_id="s1", cwd=cwd) is None
+
+
+def test_session_workspace_does_not_swallow_escapes(env, tmp_path):
+    """放行的是「cwd 之下」，不是「一切」：跳出 cwd、访问别的目录照样拦。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    cwd = str(proj)
+    assert scan_escape(f"cd {proj}/../other && ls", cwd).reasons
+    assert scan_escape(f"cat {other}/x.txt", cwd).reasons
+
+
+def test_ungrouped_session_still_cannot_reach_another_project(env, tmp_path):
+    """没归入工作区的会话，cwd 还是默认沙箱目录 —— 外面的项目照拦。"""
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    cwd = str(tmp_path / "workspace" / "db-abc")
+    assert scan_escape(f"ls {proj}/src", cwd).reasons
+
+
+def test_filesystem_root_is_never_a_sandbox_root(env):
+    """安全阀：cwd 若没有父目录（``/`` 或 ``C:\\``），不许拿它当沙箱根 —— 否则
+    ``cwd=/`` 会把整台机器放行。"""
+    assert scan_escape("cat /etc/passwd", "/").reasons
+
+
+def test_git_bash_drive_paths_translate_only_on_windows(env):
+    """Windows 上内核的 shell 是 Git Bash，模型写 ``/c/Users/…``；而 Windows 语义里
+    ``ntpath.abspath('/c/x')`` 是 ``'\\c\\x'``（当前盘根下的 c 目录）→ 访问**自己的
+    工作区**也被判越界（用户实测拦截编号 g-179067946811-c46651）。只在 win32 上翻。"""
+    from openminis.sandbox import guard as g
+
+    assert g._git_bash_drive_path("/c/Users/me/x") == "/c/Users/me/x"  # POSIX 原样
+    old = g.os.name
+    g.os.name = "nt"
+    try:
+        assert g._git_bash_drive_path("/c/Users/me/x") == "C:/Users/me/x"
+        assert g._git_bash_drive_path("/e/code/company/app") == "E:/code/company/app"
+        # 沙箱写法不能被误认成盘符
+        assert g._git_bash_drive_path("/var/minis/workspace") == "/var/minis/workspace"
+    finally:
+        g.os.name = old

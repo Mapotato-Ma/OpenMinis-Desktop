@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -214,25 +215,51 @@ def _looks_like_path(token: str) -> bool:
     return True
 
 
+# PORT-FIX: Git Bash 形态的盘符路径（``/c/Users/me/x``）。
+# Windows 上内核用的 shell 是 Git Bash（见 sandbox/persistent_shell.py：优先找
+# Git 自带的 bash），模型于是写 ``/c/Users/me/openminis/workspace``。而 Python 的
+# Windows 语义里 ``/c/...`` **不是** C 盘 —— ``ntpath.abspath('/c/x')`` 得到
+# ``'\\c\\x'``（当前盘根下的 c 目录）。结果模型访问**自己的工作区**也被判
+# 「目录越界」（用户实测，拦截编号 g-179067946811-c46651）。只在 Windows 上翻；
+# POSIX 上 ``/c/...`` 就是普通路径，不能动。见 NOTICE.md 偏离表。
+_GIT_BASH_DRIVE_RE = re.compile(r"^/([A-Za-z])/(.*)$")
+
+
+def _git_bash_drive_path(token: str) -> str:
+    """``/c/Users/x`` → ``C:/Users/x``（仅 Windows；其它平台原样返回）。"""
+    if os.name != "nt":
+        return token
+    m = _GIT_BASH_DRIVE_RE.match(token)
+    if not m:
+        return token
+    return f"{m.group(1).upper()}:/{m.group(2)}"
+
+
 def _resolve_outside(token: str, cwd: str = "") -> bool:
     """``token``（含相对路径，按会话 ``cwd`` 解析）是否落在工作区之外。"""
-    raw = token.strip().strip("\"'")
+    raw = _git_bash_drive_path(token.strip().strip("\"'"))
     if not _looks_like_path(raw):
         return False
     try:
         from ..tools.path_utils import readonly_roots, workspace_root
 
         root = workspace_root().resolve()
+        # PORT-FIX: 会话自己的工作目录也是它的沙箱根。
+        # 工作区可以绑一个真实目录（桌面版：把项目目录设为工作区），这时 shell 的
+        # cwd 就是那个项目 —— 用户的意图正是「agent 在我的项目里干活」，可原来的
+        # 允许根只有 `<data>/workspace` + 技能库，于是「访问自己的工作区」被判越界
+        # （实测：cwd 已经是项目目录，命令照拦）。见 NOTICE.md 偏离表。
         base = Path(cwd).resolve() if cwd else root
+        allowed = [root]
+        if base != base.parent:  # 别把文件系统根当成沙箱根
+            allowed.append(base)
+        allowed.extend(extra.resolve() for extra in readonly_roots())
         if not Path(raw).is_absolute() and not raw.startswith("~"):
             candidate = (base / raw).resolve()
         else:
             candidate = Path(raw).expanduser().resolve()
-        if candidate == root or root in candidate.parents:
-            return False
-        for extra in readonly_roots():
-            er = extra.resolve()
-            if candidate == er or er in candidate.parents:
+        for r in allowed:
+            if candidate == r or r in candidate.parents:
                 return False
         return True
     except Exception:  # pragma: no cover - 路径层坏掉不该放行
