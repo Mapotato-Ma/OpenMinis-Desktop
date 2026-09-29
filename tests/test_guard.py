@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -557,8 +558,17 @@ def test_filesystem_root_is_never_a_sandbox_root(env):
 def test_git_bash_drive_paths_translate_only_on_windows(env):
     """Windows 上内核的 shell 是 Git Bash，模型写 ``/c/Users/…``；而 Windows 语义里
     ``ntpath.abspath('/c/x')`` 是 ``'\\c\\x'``（当前盘根下的 c 目录）→ 访问**自己的
-    工作区**也被判越界（用户实测拦截编号 g-179067946811-c46651）。只在 win32 上翻。"""
+    工作区**也被判越界（用户实测拦截编号 g-179067946811-c46651）。只在 win32 上翻。
+
+    注意这台机器是哪种平台会变，**两边的预期不一样**（CI 在 Windows 上跑同一套：
+    第一版我把 POSIX 的预期写死了 → Windows 上必红）。"""
     from openminis.sandbox import guard as g
+
+    if os.name == "nt":  # Windows：本来就是这股形态，只验翻译本身
+        assert g._git_bash_drive_path("/c/Users/me/x") == "C:/Users/me/x"
+        assert g._git_bash_drive_path("/e/code/company/app") == "E:/code/company/app"
+        assert g._git_bash_drive_path("/var/minis/workspace") == "/var/minis/workspace"
+        return
 
     assert g._git_bash_drive_path("/c/Users/me/x") == "/c/Users/me/x"  # POSIX 原样
     old = g.os.name
