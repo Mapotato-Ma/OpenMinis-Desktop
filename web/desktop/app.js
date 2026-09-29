@@ -616,7 +616,7 @@ async function selectSession(id) {
 }
 
 async function deleteSession(id) {
-  if (!confirm('删除这个会话？')) return;
+  if (!(await confirmDialog('删除这个会话？', { okText: '删除' }))) return;
   try {
     await api(`/chats/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (state.sessionId === id) {
@@ -1239,14 +1239,24 @@ function initSplitters() {
     const saved = (() => { try { return localStorage.getItem('om.' + cfg.varName); } catch { return null; } })();
     if (saved) document.documentElement.style.setProperty(cfg.varName, saved + 'px');
 
+    /* CSS zoom 语义：getBoundingClientRect 返回「放大后」的 CSS px，而 --*-w 和 style.width
+       都是布局 px。两者比值就是当前倍率（实测 WebKit zoom=1.44 → 275.16/191 = 1.441）。
+       不换算的话：鼠标位移被当成布局 px，每拖一次面板都变大一圈。 */
+    const zoomRatio = () => {
+      const el = $(cfg.pane);
+      const r = el.getBoundingClientRect().width;
+      return el.offsetWidth > 0 && r > 0 ? r / el.offsetWidth : 1;
+    };
+
     node.addEventListener('pointerdown', (ev) => {
       ev.preventDefault();
       node.classList.add('dragging');
       node.setPointerCapture(ev.pointerId);
+      const zr = zoomRatio();
       const startX = ev.clientX;
-      const startW = $(cfg.pane).getBoundingClientRect().width;
+      const startW = $(cfg.pane).getBoundingClientRect().width / zr;
       const move = (e) => {
-        const delta = cfg.invert ? startX - e.clientX : e.clientX - startX;
+        const delta = (cfg.invert ? startX - e.clientX : e.clientX - startX) / zr;
         const w = Math.max(cfg.min, Math.min(cfg.max, startW + delta));
         document.documentElement.style.setProperty(cfg.varName, w + 'px');
       };
@@ -1255,7 +1265,7 @@ function initSplitters() {
         node.removeEventListener('pointermove', move);
         node.removeEventListener('pointerup', up);
         try {
-          const w = $(cfg.pane).getBoundingClientRect().width;
+          const w = $(cfg.pane).getBoundingClientRect().width / zr;
           localStorage.setItem('om.' + cfg.varName, String(Math.round(w)));
         } catch { /* ignore */ }
         e.preventDefault();
@@ -1388,12 +1398,19 @@ const MENUS = {
     { label: '终端', hint: 'Ctrl+`', run: () => toggleTerminal() },
     { label: '侧栏', hint: 'Ctrl+B', run: () => toggleInspector() },
     { sep: true },
+    { label: '放大界面', hint: 'Ctrl+=', disabled: !UiPrefs.zoomCanIn(), run: () => UiPrefs.zoomIn() },
+    { label: '缩小界面', hint: 'Ctrl+-', disabled: !UiPrefs.zoomCanOut(), run: () => UiPrefs.zoomOut() },
+    { label: '重置界面缩放', hint: 'Ctrl+0', run: () => UiPrefs.zoomReset() },
+    { sep: true },
     { label: '主题：跟随系统', theme: 'system' },
     { label: '主题：浅色', theme: 'light' },
     { label: '主题：深色', theme: 'dark' },
   ],
   // 注意页签名：设置页里叫 about（'info' 是左侧栏那个「信息」面板，两者不是一回事）
-  help: () => [{ label: '关于', run: () => openSettings('about') }],
+  help: () => [
+    { label: '键盘快捷键', run: () => openSettings('about') },
+    { label: '关于', run: () => openSettings('about') },
+  ],
 };
 
 let openMenu = null;        // { name, pop, btn }
@@ -1570,7 +1587,8 @@ function openWorkspace() {
 // Three modes, not two: "system" is the default and tracks the OS setting
 // live, so the app follows a machine that flips to light at sunrise without
 // the user touching anything.
-const THEME_KEY = 'om.themeMode';
+// 注意：这个键由 web/desktop/ui-prefs.js 拥有（PREFS.theme.storageKey）。
+// 界面这边不再直接读写它，避免出现第二个真相源。
 const THEME_MODES = [
   { id: 'system', label: '跟随系统', icon: 'sun-moon' },
   { id: 'light', label: '浅色', icon: 'sun' },
@@ -1595,12 +1613,12 @@ function applyTheme() {
   const mode = THEME_MODES.find((m) => m.id === themeMode) || THEME_MODES[0];
   $('themeIcon').setAttribute('name', mode.icon);
   $('themeLabel').textContent = mode.label;
-  try { localStorage.setItem(THEME_KEY, themeMode); } catch { /* private mode */ }
+  // 不再自己写盘：主题的存取归 UiPrefs（唯一真相源，见 web/desktop/ui-prefs.js）
 }
 
+/* 唯一的主题写入口。落盘与广播都在 UiPrefs 里，这里只负责「改了就应用」。 */
 function setThemeMode(mode) {
-  themeMode = THEME_MODES.some((m) => m.id === mode) ? mode : 'system';
-  applyTheme();
+  UiPrefs.set('theme', mode);
 }
 
 function cycleTheme() {
@@ -1652,6 +1670,10 @@ function onKeydown(ev) {
   if (mod && ev.key.toLowerCase() === 'b') { ev.preventDefault(); toggleInspector(); return; }
   if (mod && ev.key.toLowerCase() === 'n') { ev.preventDefault(); newSession(); return; }
   if (mod && ev.key === ',') { ev.preventDefault(); openSettings(); return; }
+  // 界面缩放：VS Code 键位。判 ev.code 不判 ev.key —— Shift 下 ev.key 会变成 '+'
+  if (mod && (ev.code === 'Equal' || ev.code === 'NumpadAdd')) { ev.preventDefault(); UiPrefs.zoomIn(); return; }
+  if (mod && (ev.code === 'Minus' || ev.code === 'NumpadSubtract')) { ev.preventDefault(); UiPrefs.zoomOut(); return; }
+  if (mod && (ev.code === 'Digit0' || ev.code === 'Numpad0')) { ev.preventDefault(); UiPrefs.zoomReset(); return; }
   if (mod && ev.shiftKey && ev.key.toLowerCase() === 'l') { ev.preventDefault(); cycleTheme(); return; }
   // 菜单是最上层浮层 —— Esc 先关它（评审指出：排在文件预览后面会关错东西）
   if (openMenu && menuKeydown(ev)) return;
@@ -1666,7 +1688,11 @@ function onKeydown(ev) {
     }
     if (state.streaming) { stopTurn(); return; }
   }
-  if (ev.key === 'Enter' && !ev.shiftKey && document.activeElement === $('input')) {
+  // 发送方式可切换：回车发送 / Ctrl+回车发送（见设置 → 界面）
+  const wantSend = UiPrefs.get('enterToSend')
+    ? (ev.key === 'Enter' && !ev.shiftKey)
+    : (ev.key === 'Enter' && mod);
+  if (wantSend && document.activeElement === $('input')) {
     ev.preventDefault();
     send();
     return;
@@ -1738,6 +1764,8 @@ function wire() {
     b.addEventListener('click', () => switchSettingsPane(b.dataset.pane));
   });
   $('btnAddProvider').addEventListener('click', addProvider);
+  const imp = $('btnImportCcSwitch');
+  if (imp) imp.addEventListener('click', importFromCcSwitch);
   $('btnSaveModels').addEventListener('click', () => saveSettings());
   $('btnReloadModels').addEventListener('click', async () => {
     await loadSettings();
@@ -1816,29 +1844,157 @@ function wire() {
   document.addEventListener('keydown', onKeydown);
 }
 
+/* ── 应用内确认框（组件库的 <wa-dialog>）────────────────────────────────
+   为什么不用浏览器原生 confirm：WebView2 会弹系统对话框，标题是页面地址
+   （127.0.0.1:8765 显示）、位置贴顶、样式完全不受控。
+   为什么不用手搓的 div：组件库已经有 dialog，居中定位、焦点圈定、ESC/遮罩关闭、
+   动效都跟其它弹层一致，不必自己维护一份。返回 Promise<boolean>。 */
+let confirmDlg = null;
+
+function confirmDialog(message, opts = {}) {
+  return new Promise((resolve) => {
+    if (!confirmDlg) {
+      const dlg = document.createElement('wa-dialog');
+      dlg.className = 'confirm-dialog';
+      dlg.innerHTML =
+        '<p class="confirm-msg"></p>' +
+        '<div slot="footer" class="confirm-actions">' +
+        '<button class="btn ghost confirm-cancel" type="button"></button>' +
+        '<button class="btn confirm-ok" type="button"></button>' +
+        '</div>';
+      document.body.appendChild(dlg);
+      confirmDlg = {
+        dlg,
+        msg: dlg.querySelector('.confirm-msg'),
+        ok: dlg.querySelector('.confirm-ok'),
+        cancel: dlg.querySelector('.confirm-cancel'),
+      };
+    }
+    const E = confirmDlg;
+    E.dlg.label = opts.title || '确认';
+    E.msg.textContent = message;
+    E.ok.textContent = opts.okText || '确定';
+    E.cancel.textContent = opts.cancelText || '取消';
+    E.ok.classList.toggle('danger', opts.danger === true);
+
+    /* 关闭。组件内部是 open=false → requestClose()，但它的收尾挂在隐藏动画的
+       animationend 上；我们 vendored 的 Web Awesome 子集里没引到 dialog 的动画 CSS，
+       动画永远不会结束 → requestClose 停在半路、open 一直是 true（实测 1s 后仍开着）。
+       所以：走正常路径，再加一个 400ms 兜底强关，保证界面一定能收回去。 */
+    const closeDlg = () => {
+      E.dlg.open = false;
+      const inner = E.dlg.shadowRoot && E.dlg.shadowRoot.querySelector('dialog');
+      setTimeout(() => {
+        if (inner && inner.open) inner.close();
+        if (E.dlg.open) E.dlg.open = false;
+      }, 400);
+    };
+
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      E.dlg.removeEventListener('wa-after-hide', onHide);
+      E.ok.removeEventListener('click', onOk);
+      E.cancel.removeEventListener('click', onCancel);
+      document.removeEventListener('keydown', onKey, true);
+      closeDlg();
+      resolve(v);
+    };
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    /* ESC：自己接（捕获阶段 + stopPropagation）。理由有二 ——
+       ① 合成按键测不出原生 <dialog> 的 ESC，不能靠「应该会关」；
+       ② 不拦的话 ESC 会同时把下面的设置面板也关掉，等于一次按键干两件事。 */
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+    };
+    /* 点遮罩、右上角关闭按钮走组件自己的隐藏流程 → 一律当「取消」 */
+    const onHide = () => finish(false);
+    E.ok.addEventListener('click', onOk);
+    E.cancel.addEventListener('click', onCancel);
+    E.dlg.addEventListener('wa-after-hide', onHide);
+    document.addEventListener('keydown', onKey, true);
+    E.dlg.open = true;
+    E.cancel.focus();
+  });
+}
+
+/* ── 界面 pane（桌面本地偏好）──────────────────────────────────────────
+   控件都是 UiPrefs 的薄壳：落盘与广播在 UiPrefs，订阅回调负责把值刷回控件。
+   这些字段不进内核 settings payload —— 那边是全量替换，未知字段会被拒。 */
+function renderInterfacePane() {
+  const val = (id, v) => { const el = $(id); if (el) el.value = v; };
+  const chk = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  const z = $('uiZoomValue');
+  if (z) z.textContent = UiPrefs.zoomLabel();
+  const zin = $('uiZoomIn'); if (zin) zin.disabled = !UiPrefs.zoomCanIn();
+  const zout = $('uiZoomOut'); if (zout) zout.disabled = !UiPrefs.zoomCanOut();
+  val('uiTheme', UiPrefs.get('theme'));
+  val('uiFontSans', UiPrefs.get('fontSans'));
+  val('uiFontMono', UiPrefs.get('fontMono'));
+  val('uiEnterSend', UiPrefs.get('enterToSend') ? '1' : '0');
+  chk('uiCompact', UiPrefs.get('compact'));
+  chk('uiReduceMotion', UiPrefs.get('reduceMotion'));
+  chk('uiStatusbar', UiPrefs.get('showStatusbar'));
+  chk('uiRestoreSession', UiPrefs.get('restoreLastSession'));
+}
+
+function wireInterfacePane() {
+  const on = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
+  on('uiZoomIn', 'click', () => UiPrefs.zoomIn());
+  on('uiZoomOut', 'click', () => UiPrefs.zoomOut());
+  on('uiZoomReset', 'click', () => UiPrefs.zoomReset());
+  on('uiTheme', 'change', (e) => UiPrefs.set('theme', e.target.value));
+  on('uiFontSans', 'change', (e) => UiPrefs.set('fontSans', e.target.value));
+  on('uiFontMono', 'change', (e) => UiPrefs.set('fontMono', e.target.value));
+  on('uiCompact', 'change', (e) => UiPrefs.set('compact', e.target.checked));
+  on('uiReduceMotion', 'change', (e) => UiPrefs.set('reduceMotion', e.target.checked));
+  on('uiStatusbar', 'change', (e) => UiPrefs.set('showStatusbar', e.target.checked));
+  on('uiRestoreSession', 'change', (e) => UiPrefs.set('restoreLastSession', e.target.checked));
+  on('uiEnterSend', 'change', (e) => UiPrefs.set('enterToSend', e.target.value === '1'));
+  renderInterfacePane();
+}
+
 /* ── boot ────────────────────────────────────────────────────────────── */
 async function boot() {
-  try { themeMode = localStorage.getItem(THEME_KEY) || 'system'; } catch { themeMode = 'system'; }
+  themeMode = UiPrefs.get('theme');   // 解析/夹取/落盘都在 UiPrefs
   applyTheme();
+  // 桌面本地偏好的唯一广播出口：主题、缩放、各开关都从这里回流到界面，
+  // 所以「视图」菜单、顶栏主题按钮、设置里的「界面」pane 永远不会各说各话。
+  UiPrefs.subscribe((key) => {
+    if (key === 'theme') { themeMode = UiPrefs.get('theme'); applyTheme(); }
+    renderInterfacePane();
+  });
   // Track the OS live while in "system" mode.
   if (mql) {
     const onScheme = () => { if (themeMode === 'system') applyTheme(); };
     if (mql.addEventListener) mql.addEventListener('change', onScheme);
     else if (mql.addListener) mql.addListener(onScheme);
   }
-  try { if (localStorage.getItem('om.inspector') === '0') toggleInspector(false); } catch { /* ignore */ }
+  // 「启动时恢复上次会话」关掉时，面板与页签都回默认，工作目录也回默认
+  const restore = UiPrefs.get('restoreLastSession');
+  try { if (restore && localStorage.getItem('om.inspector') === '0') toggleInspector(false); } catch { /* ignore */ }
   // 存下来的页签名可能是已撤掉的 code / diff → 落到文件面板
   try {
-    const saved = localStorage.getItem('om.tab');
+    const saved = restore ? localStorage.getItem('om.tab') : null;
     switchTab(['files', 'sessions', 'info'].includes(saved) ? saved : 'files');
   } catch { switchTab('files'); }
 
   wire();
+  // Ctrl+滚轮 = 缩放档位（VS Code 同款）。这里同时 preventDefault：pywebview 把
+  // WebView2 的 IsZoomControlEnabled 设成了 True，不拦就会和我们的 CSS zoom 相乘。
+  window.addEventListener('wheel', (ev) => {
+    if (!ev.ctrlKey) return;
+    ev.preventDefault();
+    if (ev.deltaY < 0) UiPrefs.zoomIn(); else UiPrefs.zoomOut();
+  }, { passive: false });
   initSplitters();
+  wireInterfacePane();
   connect();
   termLine('OpenMinis Desktop — 终端已就绪（命令在本机 shell 中执行）', 'sys');
 
-  try { currentWorkspace = localStorage.getItem(WS_KEY) || ''; } catch { currentWorkspace = ''; }
+  try { currentWorkspace = (restore && localStorage.getItem(WS_KEY)) || ''; } catch { currentWorkspace = ''; }
   await loadSessions();
   await loadWorkspaces();   // 顺便校正「选中的工作区已被删掉」这种情况
   loadTree();
@@ -1914,6 +2070,7 @@ function switchSettingsPane(name) {
   if (name === 'identity' && settings.model) { renderIdentities(); renderIdentityTools(); }
   if (name === 'skills' && !settings.skillsLoaded) loadSkills();
   if (name === 'about') loadAbout();
+  if (name === 'interface') renderInterfacePane();
 }
 
 /** 设置页所有面板的重画 —— 只有这一处知道「一次改动要重画哪几块」。 */
@@ -2492,10 +2649,10 @@ function addProvider() {
   updateDirtyUI();
 }
 
-function removeProvider(id) {
+async function removeProvider(id) {
   const p = sview().providers.find((x) => x.id === id);
   if (!p) return;
-  if (!confirm(`删除服务商「${p.label || p.type}」？`)) return;
+  if (!(await confirmDialog(`删除服务商「${p.label || p.type}」？`, { danger: true }))) return;
   // 模块同时会清掉指向它的槽位 —— 漏了这一步服务端会以「指向未配置的厂商」
   // 整单拒绝保存。
   dispatch({ type: 'provider/remove', id });
@@ -2598,8 +2755,8 @@ function renderAgentForm() {
   }
 }
 
-function confirmCloseSettings() {
-  if (sdirty().any && !confirm('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）')) return;
+async function confirmCloseSettings() {
+  if (sdirty().any && !(await confirmDialog('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）'))) return;
   if (sdirty().any) loadSettings();   // 丢掉草稿，回到服务端那份
   closeSettings();
 }
@@ -2668,7 +2825,7 @@ async function saveSoul() {
 }
 
 async function resetSoul() {
-  if (!confirm('恢复默认人格？当前内容会被覆盖。')) return;
+  if (!(await confirmDialog('恢复默认人格？当前内容会被覆盖。', { danger: true }))) return;
   try {
     await api('/system/soul/restore-default', { method: 'POST', body: JSON.stringify({}) });
     await loadSoul();
@@ -2754,4 +2911,164 @@ async function loadAbout() {
     r.appendChild(el('span', 'kv-v', v));
     box.appendChild(r);
   }
+}
+
+/* ── 从 cc-switch 导入供应商 ────────────────────────────────────────────
+   清单接口只给掩码；明文密钥只在用户点「导入选中项」那一次取回，然后直接进草稿，
+   和手输密钥走同一条路（只进 keys 表，从不渲染、不落 localStorage）。 */
+function normalizeUrl(u) {
+  try {
+    const x = new URL(String(u).trim());
+    const host = x.host.replace(/:443$/, '').replace(/:80$/, '');
+    return (x.protocol + '//' + host + x.pathname).replace(/\/+$/, '').toLowerCase();
+  } catch { return String(u || '').trim().toLowerCase(); }
+}
+
+function existingBaseUrls() {
+  const out = new Set();
+  try {
+    for (const p of (sview().providers || [])) {
+      const u = normalizeUrl(p.baseUrl);
+      if (u) out.add(u);
+    }
+  } catch { /* 还没加载完就当没有，反正用的人自己会看 */ }
+  return out;
+}
+
+/* 勾选弹层。返回选中的 id 数组；关掉弹层 = null（不导入）。 */
+function pickCcSwitchItems(items) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('wa-dialog');
+    dlg.className = 'import-dialog';
+    dlg.label = '从 cc-switch 导入';
+    const list = document.createElement('div');
+    list.className = 'import-list';
+    const has = existingBaseUrls();
+    items.forEach((it) => {
+      const dup = it.baseUrl && has.has(normalizeUrl(it.baseUrl));
+      const row = document.createElement('label');
+      row.className = 'import-row' + (it.suggestedType ? '' : ' is-off');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = String(it.id);
+      // 预览时默认勾上「能用的」；已存在 / 认不出类型 / 没抠到地址的不勾
+      cb.checked = !dup && !!it.suggestedType && !!it.baseUrl;
+      cb.disabled = !it.suggestedType;
+      row.appendChild(cb);
+      const info = document.createElement('div');
+      info.className = 'import-info';
+      const title = document.createElement('div');
+      title.className = 'import-name';
+      title.textContent = it.name || ('#' + it.id);
+      info.appendChild(title);
+      const sub = document.createElement('div');
+      sub.className = 'import-sub';
+      const bits = [it.appType, it.suggestedType || '无对应类型', it.baseUrl || '地址缺失'];
+      if (it.mask) bits.push(it.mask);
+      if (it.isCurrent) bits.push('cc-switch 当前');
+      if (dup) bits.push('已存在');
+      sub.textContent = bits.join(' · ');
+      info.appendChild(sub);
+      if (it.notes && it.notes.length) {
+        const n = document.createElement('div');
+        n.className = 'import-note';
+        n.textContent = it.notes.join('；');
+        info.appendChild(n);
+      }
+      row.appendChild(info);
+      list.appendChild(row);
+    });
+    dlg.appendChild(list);
+    document.body.appendChild(dlg);
+    const footer = document.createElement('div');
+    footer.className = 'import-actions';
+    footer.setAttribute('slot', 'footer');
+    const cancel = document.createElement('button');
+    cancel.className = 'btn ghost';
+    cancel.type = 'button';
+    cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'btn primary';
+    ok.type = 'button';
+    const sync = () => {
+      const n = list.querySelectorAll('input:checked').length;
+      ok.textContent = n ? `导入选中项（${n}）` : '导入选中项';
+      ok.disabled = n === 0;
+    };
+    list.addEventListener('change', sync);
+    sync();
+    let settled = false;
+    // 关闭兜底：隐藏动画的 CSS 不在 vendored 子集里，open=false 会卡在半路
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      dlg.open = false;
+      const inner = dlg.shadowRoot && dlg.shadowRoot.querySelector('dialog');
+      setTimeout(() => {
+        if (inner && inner.open) inner.close();
+        if (dlg.open) dlg.open = false;
+        dlg.remove();
+      }, 400);
+      resolve(v);
+    };
+    cancel.addEventListener('click', () => finish(null));
+    ok.addEventListener('click', () => {
+      // id 是字符串（真实库里是 UUID），不要 Number() 转
+      const ids = [...list.querySelectorAll('input:checked')].map((c) => c.value);
+      finish(ids);
+    });
+    dlg.addEventListener('wa-after-hide', () => finish(null));
+    footer.appendChild(cancel);
+    footer.appendChild(ok);
+    dlg.appendChild(footer);
+    dlg.open = true;
+  });
+}
+
+/* 取清单 → 勾选 → 取明文 → 写进草稿（不自动保存）。 */
+async function importFromCcSwitch() {
+  let res;
+  try {
+    res = await api('/desktop/import/cc-switch');
+  } catch (e) {
+    toast('读取 cc-switch 失败：' + e.message, 'err');
+    return;
+  }
+  if (!res.available) {
+    await confirmDialog(`${res.reason}\n\n找过这些位置：\n${(res.searched || []).join('\n')}`,
+      { title: '没找到 cc-switch', okText: '知道了', cancelText: '关闭' });
+    return;
+  }
+  if (!res.items || !res.items.length) {
+    toast('cc-switch 里没有可导入的供应商');
+    return;
+  }
+  const picked = await pickCcSwitchItems(res.items);
+  if (!picked || !picked.length) return;
+  let got;
+  try {
+    got = await api('/desktop/import/cc-switch', {
+      method: 'POST',
+      body: JSON.stringify({ ids: picked }),
+    });
+  } catch (e) {
+    toast('导入失败：' + e.message, 'err');
+    return;
+  }
+  let n = 0;
+  for (const it of (got.items || [])) {
+    const type = it.suggestedType;
+    if (!type) continue;
+    const id = newProviderId(type);
+    dispatch({ type: 'provider/add', id, provider: { type, baseUrl: it.baseUrl || '' }, meta: providerTypeMeta(type) });
+    dispatch({ type: 'provider/patch', id, patch: { label: it.name || 'cc-switch', baseUrl: it.baseUrl || '', model: it.model || '' } });
+    // 密钥走和手输完全同一条路：settings-model 的 keys 表 +「空串=保持已存密文」规则
+    if (it.apiKey) dispatch({ type: 'provider/setKey', id, key: it.apiKey });
+    n += 1;
+  }
+  renderProviders();
+  renderSlots();
+  renderModelsHealth();
+  updateDirtyUI();
+  toast(n ? `已导入 ${n} 个供应商 —— 确认后点「保存」才生效` : '没有导入任何项');
 }

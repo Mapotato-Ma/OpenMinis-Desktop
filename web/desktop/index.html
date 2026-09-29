@@ -8,6 +8,9 @@
 <!-- 组件库（vendored 子集，见 web/scripts/vendor-webawesome.mjs）与主题映射 -->
 <link rel="stylesheet" href="./vendor/webawesome/styles/webawesome.css">
 <link rel="stylesheet" href="./wa-theme.css">
+<!-- 桌面本地偏好（缩放/字体/密度/动效）。必须在首次绘制前同步跑完：
+     放到 app.js 里做会让高缩放档先闪一帧 100%。 -->
+<script src="./ui-prefs.js"></script>
 <script src="./window-bootstrap.js"></script>
 <script src="./settings-model.js"></script>
 <!-- 只引我们真正用到的组件；每个 module 都会自己注册 custom element -->
@@ -16,6 +19,7 @@
 <script type="module" src="./vendor/webawesome/components/select/select.js"></script>
 <script type="module" src="./vendor/webawesome/components/option/option.js"></script>
 <script type="module" src="./vendor/webawesome/components/tooltip/tooltip.js"></script>
+<script type="module" src="./vendor/webawesome/components/dialog/dialog.js"></script>
 </head>
 <body>
 <div id="app">
@@ -249,6 +253,7 @@
       <button class="settings-nav-item" data-pane="skills"><wa-icon library="om" name="zap" class="ic"></wa-icon>技能</button>
       <button class="settings-nav-item" data-pane="agent"><wa-icon library="om" name="bot" class="ic"></wa-icon>Agent</button>
       <button class="settings-nav-item" data-pane="about"><wa-icon library="om" name="info" class="ic"></wa-icon>关于</button>
+      <button class="settings-nav-item" data-pane="interface"><wa-icon library="om" name="palette" class="ic"></wa-icon>界面</button>
     </nav>
 
     <div class="settings-body">
@@ -268,6 +273,7 @@
           <div id="providerList"></div>
           <div class="btn-row">
             <button class="btn primary" id="btnAddProvider">＋ 添加服务商</button>
+            <button class="btn" id="btnImportCcSwitch">从 cc-switch 导入</button>
           </div>
         </div>
 
@@ -421,6 +427,96 @@
           <div class="kv"><span class="kv-k">Ctrl+N</span><span class="kv-v">新会话</span></div>
           <div class="kv"><span class="kv-k">Ctrl+,</span><span class="kv-v">设置</span></div>
           <div class="kv"><span class="kv-k">Ctrl+Shift+L</span><span class="kv-v">切换主题</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+=</span><span class="kv-v">放大界面</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+-</span><span class="kv-v">缩小界面</span></div>
+          <div class="kv"><span class="kv-k">Ctrl+0</span><span class="kv-v">界面缩放回 100%</span></div>
+        </div>
+      </section>
+
+      <!-- 界面：桌面本地偏好。这些值不进内核 settings payload，
+           见 .scratch/plan-ui-scale-ccswitch.md 的 A 段。 -->
+      <section class="settings-pane" data-pane="interface">
+        <h2>界面</h2>
+        <p class="pane-sub">
+          这些设置只保存在这台机器上，不会写进 OpenMinis 的配置，也不随供应商设置一起保存。
+        </p>
+
+        <div class="settings-block">
+          <h3>缩放</h3>
+          <div class="pref-row">
+            <div class="pref-label">界面缩放
+              <div class="pref-hint">Ctrl+= 放大 · Ctrl+- 缩小 · Ctrl+0 重置 · Ctrl+滚轮 连续调</div>
+            </div>
+            <div class="pref-control">
+              <button class="btn" id="uiZoomOut" title="缩小">−</button>
+              <span class="pref-value" id="uiZoomValue">100%</span>
+              <button class="btn" id="uiZoomIn" title="放大">+</button>
+              <button class="btn ghost" id="uiZoomReset">重置</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-block">
+          <h3>外观</h3>
+          <div class="pref-row">
+            <div class="pref-label">主题<div class="pref-hint">与「视图」菜单里的同一个值</div></div>
+            <div class="pref-control">
+              <select class="pref-select" id="uiTheme">
+                <option value="system">跟随系统</option>
+                <option value="light">浅色</option>
+                <option value="dark">深色</option>
+              </select>
+            </div>
+          </div>
+          <div class="pref-row">
+            <div class="pref-label">界面字体<div class="pref-hint">留空 = 跟随系统</div></div>
+            <div class="pref-control">
+              <input class="pref-input" id="uiFontSans" placeholder="例如 微软雅黑" spellcheck="false">
+            </div>
+          </div>
+          <div class="pref-row">
+            <div class="pref-label">等宽字体<div class="pref-hint">代码、路径、日志</div></div>
+            <div class="pref-control">
+              <input class="pref-input" id="uiFontMono" placeholder="例如 Consolas" spellcheck="false">
+            </div>
+          </div>
+          <div class="pref-row">
+            <div class="pref-label">界面密度<div class="pref-hint">紧凑会收紧行高与内边距</div></div>
+            <div class="pref-control">
+              <label class="pref-check"><input type="checkbox" id="uiCompact"> 紧凑</label>
+            </div>
+          </div>
+          <div class="pref-row">
+            <div class="pref-label">减少动效<div class="pref-hint">关掉过渡与动画</div></div>
+            <div class="pref-control">
+              <label class="pref-check"><input type="checkbox" id="uiReduceMotion"> 开启</label>
+            </div>
+          </div>
+          <div class="pref-row">
+            <div class="pref-label">显示状态栏</div>
+            <div class="pref-control">
+              <label class="pref-check"><input type="checkbox" id="uiStatusbar"> 显示</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-block">
+          <h3>行为</h3>
+          <div class="pref-row">
+            <div class="pref-label">启动时恢复上次会话<div class="pref-hint">关掉则每次进默认工作目录</div></div>
+            <div class="pref-control">
+              <label class="pref-check"><input type="checkbox" id="uiRestoreSession"> 恢复</label>
+            </div>
+          </div>
+          <div class="pref-row">
+            <div class="pref-label">发送方式<div class="pref-hint">回车发送 / 回车换行</div></div>
+            <div class="pref-control">
+              <select class="pref-select" id="uiEnterSend">
+                <option value="1">回车发送</option>
+                <option value="0">Ctrl+回车发送</option>
+              </select>
+            </div>
+          </div>
         </div>
       </section>
     </div>

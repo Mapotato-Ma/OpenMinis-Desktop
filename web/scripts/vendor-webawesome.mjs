@@ -27,6 +27,7 @@ const ENTRIES = [
   'components/tooltip/tooltip.js',
   'components/icon/icon.js',
   'components/icon/library.js',   // registerIconLibrary：给本地图标库用
+  'components/dialog/dialog.js',  // 应用内确认框/弹层：别再用浏览器原生 confirm
 ];
 
 const CDN = path.join(SRC, 'dist-cdn');

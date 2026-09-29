@@ -192,3 +192,75 @@ test('界面依赖的内核接口都真的被调用了（避免「画了但没�
     assert.ok(app.includes(endpoint), `app.js 里没有再调用 ${endpoint}`);
   }
 });
+
+test('ui-prefs.js 只往外放一个全局名字，且 head 里同步跑不会抛', () => {
+  // 它在 <head> 里同步执行，那时 <body> 还不存在 —— 所以开关只许碰 <html>。
+  const classes = new Set();
+  const props = {};
+  const documentEl = {
+    style: {
+      setProperty: (k, v) => { props[k] = v; },
+      removeProperty: (k) => { delete props[k]; },
+    },
+    classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
+  };
+  const fake = {};
+  new Function('module', 'window', 'document', 'localStorage', 'getComputedStyle',
+    sourceOf('ui-prefs.js'))(
+    undefined,
+    fake,
+    { documentElement: documentEl },
+    { getItem: () => null, setItem: () => {} },
+    () => ({ getPropertyValue: () => 'sans-serif' }),
+  );
+  assert.deepEqual(Object.keys(fake), ['UiPrefs'],
+    `ui-prefs.js 往 window 上放了：${Object.keys(fake).join(', ')}`);
+  assert.equal(typeof fake.UiPrefs.set, 'function');
+  assert.equal(typeof fake.UiPrefs.zoomLabel, 'function');
+});
+
+test('桌面本地偏好：head 里同步加载，且在 app.js 之前', () => {
+  const html = read('index.html');
+  const i = html.indexOf('<script src="./ui-prefs.js"></script>');
+  const j = html.indexOf('<script src="./app.js"></script>');
+  assert.ok(i > 0, 'index.html 里没有引入 ui-prefs.js');
+  assert.ok(j > i, 'ui-prefs.js 必须在 app.js 之前');
+  assert.ok(html.indexOf('<body>') > i,
+    'ui-prefs.js 要放在 <head> 里同步执行，否则高缩放档会先闪一帧 100%');
+});
+
+test('界面缩放只有一个出口：写 style.zoom 的只许是 ui-prefs.js', () => {
+  for (const s of classicScripts()) {
+    if (s === 'ui-prefs.js') {
+      assert.ok(sourceOf(s).includes('style.zoom'), 'ui-prefs.js 不再写 style.zoom');
+      continue;
+    }
+    assert.ok(!/\.style\.zoom\s*=/.test(sourceOf(s)),
+      `${s} 里也在写 style.zoom —— 缩放出现第二个出口`);
+  }
+  // 快捷键判 ev.code，不判 ev.key：Shift 下 ev.key 会变成 '+'，小键盘也对不上
+  const app = read('app.js');
+  for (const code of ["'Equal'", "'Minus'", "'Digit0'"]) {
+    assert.ok(app.includes(`ev.code === ${code}`), `app.js 缺少 ev.code === ${code} 的缩放分支`);
+  }
+});
+
+test('桌面本地偏好不进内核 payload（那边全量替换、未知字段会被拒）', () => {
+  const model = read('settings-model.js');
+  for (const bad of ['UiPrefs', 'uiZoomLevel', 'fontSans', 'showStatusbar']) {
+    assert.ok(!model.includes(bad),
+      `settings-model.js 里出现了本地偏好 ${bad} —— 会被当成内核设置提交，整单被拒`);
+  }
+});
+
+
+test('桌面界面不许再用原生 confirm/alert（WebView2 会弹系统框、标题是页面地址）', () => {
+  for (const s of classicScripts()) {
+    const src = sourceOf(s);
+    assert.ok(!/(?<!Dialog)\bconfirm\(/.test(src), `${s} 里还有原生 confirm()，请改用 confirmDialog()`);
+    assert.ok(!/[^.\w]alert\(/.test(src), `${s} 里还有原生 alert()`);
+  }
+  // 确认框基于组件库的 wa-dialog，别再手搓遮罩
+  assert.ok(read('app.js').includes("document.createElement('wa-dialog')"), '确认框不再基于 wa-dialog');
+  assert.ok(read('index.html').includes('components/dialog/dialog.js'), 'index.html 没有加载 dialog 组件');
+});

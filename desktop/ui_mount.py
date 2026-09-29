@@ -39,7 +39,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.3.3"
+DESKTOP_UI_VERSION = "0.3.4"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -123,6 +123,31 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
 
         return JSONResponse(await chat_readiness())
 
+    # ── 从 cc-switch 导入供应商 ──────────────────────────────────────────
+    # 两条路由必须紧邻注册（GET 列清单、POST 取明文），并进 desktop_routes() 的
+    # 顺序契约测试。清单里只有掩码；明文只在用户显式点「导入」的那一次返回。
+    _NO_STORE = {"Cache-Control": "no-store"}
+
+    async def _import_scan(request: Any) -> JSONResponse:  # noqa: ARG001
+        from . import ccswitch_import  # noqa: PLC0415
+
+        return JSONResponse(ccswitch_import.scan(), headers=_NO_STORE)
+
+    async def _import_entries(request: Any) -> JSONResponse:
+        from . import ccswitch_import  # noqa: PLC0415
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - 客户端发什么都有可能
+            body = {}
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if not isinstance(ids, list):
+            return JSONResponse({"error": "ids 必须是数组"}, status_code=400, headers=_NO_STORE)
+        # 只收字符串 id（实测真实库里 id 是 UUID 这类 TEXT），限长限量：
+        # 别让这一个接口变成「整库导出」
+        clean = [str(i).strip()[:128] for i in ids[:50] if isinstance(i, str) and str(i).strip()]
+        return JSONResponse(ccswitch_import.entries(clean), headers=_NO_STORE)
+
     routes.extend(
         [
             # 壳层与界面之间那点小事：界面靠 /api/desktop/info 画窗口 chrome，
@@ -135,6 +160,8 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             # 配置，所以界面上点「测试连接」会先保存再测 —— 测的和看到的是同一份。
             Route("/api/desktop/test-provider", _test_provider, methods=["POST"], include_in_schema=False),
             Route("/api/desktop/chat-readiness", _readiness, methods=["GET"], include_in_schema=False),
+            Route("/api/desktop/import/cc-switch", _import_scan, methods=["GET"], include_in_schema=False),
+            Route("/api/desktop/import/cc-switch", _import_entries, methods=["POST"], include_in_schema=False),
         ]
     )
 

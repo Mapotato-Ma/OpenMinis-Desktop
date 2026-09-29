@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "check:ws": "esbuild scripts/ws-reconnect.check.ts --bundle --platform=node --format=esm --outfile=scripts/.ws-check.mjs --log-level=warning && node scripts/.ws-check.mjs",
     "check:settings": "node --test scripts/settings-model.check.mjs",
-    "check": "npm run check:ui && npm run check:ws && npm run check:settings && npm run check:banner",
+    "check:ui-prefs": "node --test scripts/ui-prefs.check.mjs",
+    "check": "npm run check:ui && npm run check:ws && npm run check:settings && npm run check:ui-prefs && npm run check:banner",
     "check:e2e": "node scripts/settings-e2e.check.mjs",
     "check:banner": "node --test scripts/banner-check.mjs",
     "check:ui": "node --test scripts/ui-check.mjs"
