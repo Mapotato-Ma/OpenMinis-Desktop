@@ -61,11 +61,20 @@ def install_hook() -> None:
         _state["installed"] = True
 
 
+def _why_no_control() -> str:
+    """把「没控件」拆成三种情况 —— 否则日志里只能看到一句没法定位的话。"""
+    if not _state["installed"]:
+        return "壳层还没走建窗口的路径（挂钩未安装）"
+    if _state["patch_error"]:
+        return _state["patch_error"]
+    return "挂钩已装，但 Edge 后端还没创建窗口"
+
+
 def control() -> tuple[Any | None, str]:
     """返回 (WebView2 控件, 失败原因)。"""
     chrome = _state.get("chrome")
     if chrome is None:
-        return None, _state.get("patch_error") or "窗口还没建好（非 WebView2 后端？）"
+        return None, _why_no_control()
     widget = getattr(chrome, "webview", None)
     if widget is None:
         return None, "拿不到 WebView2 控件"

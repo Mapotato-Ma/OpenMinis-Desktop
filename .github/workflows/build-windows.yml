@@ -179,6 +179,34 @@ jobs:
         # 打包形状的对比，以及应用自己写进 logs\startup.log 的分段耗时。
         run: pwsh -File scripts/startup_probe.ps1 -ExePath dist\OpenMinisDesktop.exe -Port 8801
 
+      - name: Probe native zoom capability (windowed)
+        shell: pwsh
+        # 上面那次探活是 --no-window 起的：进程里根本没有窗口，所以 /api/desktop/zoom
+        # 只会回答「没有控件」，**证明不了原生缩放能不能用**。这一步带窗口再起一次
+        # （Start-Process 不带 --no-window），只打印不判定 —— runner 上桌面会话未必
+        # 可用，失败也只是降级（界面会回落 CSS zoom），别把流水线染红。
+        continue-on-error: true
+        run: |
+          $p = Start-Process -FilePath dist\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
+          $zoom = $null
+          for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "http://127.0.0.1:8803/api/desktop/zoom").Content
+              if ($zoom) { break }
+            } catch { }
+          }
+          if ($zoom) {
+            Write-Host "::notice::windowed zoom capability: $zoom"
+            $banner = '{"handle":true'
+            if ($zoom.StartsWith($banner)) { Write-Host "native zoom is usable on Windows" }
+            else { Write-Host "::warning::native zoom NOT usable — see reason above" }
+          } else {
+            Write-Host "::warning::windowed probe got no answer (runner has no usable desktop?)"
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          exit 0
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

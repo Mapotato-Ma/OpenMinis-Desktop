@@ -136,3 +136,14 @@ def test_out_of_range_is_refused(factor):
     _attach(widget)
     assert native_zoom.set_zoom(factor)["ok"] is False
     assert widget.sets == []
+
+
+def test_reason_distinguishes_not_installed_from_no_window():
+    """「没控件」有三种来路，日志里必须能分清 —— 别只报一句没法定位的话。"""
+    fresh = native_zoom.capability()
+    assert "挂钩未安装" in fresh["reason"], fresh["reason"]
+
+    native_zoom.install_hook()          # 装了挂钩，但窗口还没建
+    after = native_zoom.capability()
+    assert "挂钩未安装" not in after["reason"]
+    assert after["reason"], "装了挂钩也得说清为什么还没接住控件"
