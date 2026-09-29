@@ -1,5 +1,23 @@
 # 变更日志
 
+## v0.3.2 — 启动诊断 + 一处数据目录路径写错了（2026-09-29）
+
+v0.3.1 的启动优化本身没问题，这一版修的是"出问题时看不到内部发生了什么"：
+用户要在自己那台（有企业杀软的）电脑上给出启动耗时的证据，工具得先靠得住。
+
+- **`startup.log` 改成界面一出来就写**（原来要等退出才写），启动失败时也留一行 ——
+  用户说"起不来"时，我们至少知道它走到哪一步、用了多久。
+- **Windows 取进程创建时刻的 ctypes 调用补上 `argtypes`**：`GetCurrentProcess` 返回的伪句柄
+  是 `(HANDLE)-1`，不声明类型会被当 32 位截断，`GetProcessTimes` 于是静默失败 ——
+  CI 上 onedir 版的 `origin=` 一直退化成 `python`（量得到别处，量不到自己）。
+- **数据目录路径写错了**：内核在 Windows 用 `%USERPROFILE%\openminis`（`LOCALAPPDATA` 只放缓存），
+  而我在文档 / 发布说明 / CI 探针里写成了 `%LOCALAPPDATA%\openminis` —— 后果是探针
+  "失败时打印日志"永远打印不出来。现在探针**问应用要**（`/api/health` 的 `data_dir`），
+  启动画面不再硬编码路径（`ui-check` 加了断言），`desktop/paths.py` 的退路与内核
+  `_default_data_dir()` 对齐。
+- 顺手：`scripts/check.py` 新增 `ruff --select F821,F811` 门禁（这个门禁本来能拦住 v0.3.1
+  那次 `NameError`），CI 探针改用它原来的、可信的杀进程方式（`taskkill /T`）。
+
 ## v0.3.1 — 启动更快（2026-09-29）
 
 用户反馈：公司电脑上双击 exe 到窗口出来要等好几秒。真因不是"Python 慢"，而是启动

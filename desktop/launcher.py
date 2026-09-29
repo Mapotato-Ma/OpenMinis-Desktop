@@ -197,6 +197,8 @@ def _boot_once(state: BootState, plan: BootPlan, window: Any) -> None:
             _fail(window, state, exc)
         except Exception:  # pragma: no cover - 报错动作本身不能炸
             logger.debug("could not report the failure to the window", exc_info=True)
+        # 失败也要留一行：不然用户报"起不来"时，我们连它走到哪一步都不知道。
+        trace.report(version=__version__)
     finally:
         state.done.set()
 
@@ -234,6 +236,9 @@ def run_window_first(
         else:
             # load_url 之后真实界面加载完 —— 这才是「用户能用了」。
             trace.mark("ui-loaded")
+            # 在这里落盘，不等退出：用户拿文件时它得已经有内容，而且 total 该是
+            # 「启动用了多久」，不是「这次开了多久」。
+            trace.report(version=__version__)
 
     window.events.loaded += _on_loaded
     window.events.shown += lambda *_a, **_k: trace.mark("window-shown")
