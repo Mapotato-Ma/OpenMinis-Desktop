@@ -713,6 +713,31 @@ _BG_TASKS: set[asyncio.Task[Any]] = set()
 _TOOL_RUN_OUTPUT_MAX = 8000
 
 
+def append_timeline_text(timeline: list[dict[str, Any]], delta: str) -> None:
+    """把一段正文接到回合时间线上：紧邻上一段正文就并进去，否则另起一段。
+
+    [T-turn-timeline-order] 时间线是"正文段 ↔ 工具卡"交替的有序片段，
+    界面重放历史按它来画，工具卡才会停在原来的位置。
+    """
+    if timeline and timeline[-1].get("type") == "text":
+        timeline[-1]["text"] += delta
+    else:
+        timeline.append({"type": "text", "text": delta})
+
+
+def timeline_with_image_refs(
+    timeline: list[dict[str, Any]], text_before: str, text_after: str
+) -> None:
+    """``append_image_refs`` 补写的那一段也要进时间线。
+
+    界面在有时间线时**不再渲染 ``m.text``**，所以漏掉这里的话，生图回合
+    （它必然带工具调用 → 必然有 timeline）重放时图片引用就没了 —— 正好废掉
+    ``append_image_refs`` 存在的唯一理由（保证刷新/切会话后图片还能渲染）。
+    """
+    if text_after != text_before:
+        append_timeline_text(timeline, text_after[len(text_before):])
+
+
 def _clip_tool_output(text: str) -> str:
     """工具输出落库前的收口（超出上限只留开头，并说明截断）。"""
     if len(text) <= _TOOL_RUN_OUTPUT_MAX:
@@ -991,9 +1016,18 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
     #: 依然在、依然能展开看原文；而它们**不会进模型上下文**（那条路只读 text
     #: part，见 ``chat_store.parts_to_text``）。
     tool_runs: dict[str, dict[str, Any]] = {}
+    #: [T-turn-timeline-order] 本回合的**可视时间线**，按发生顺序记：
+    #: 正文段与工具卡交替。落库后界面重放历史才能还原"说一句 → 调工具 →
+    #: 再说一句"的顺序；否则工具卡全被堆到会话底部（用户实测：重启后重开
+    #: 会话，所有工具执行都排在最下面）。
+    turn_timeline: list[dict[str, Any]] = []
+
+    def _timeline_text(delta: str) -> None:
+        append_timeline_text(turn_timeline, delta)
 
     async def sink(chunk: object) -> None:
         if isinstance(chunk, LLMStreamChunk.Text):
+            _timeline_text(chunk.text)
             await _safe_send(
                 client_id, {"type": "delta", "text": chunk.text, "sessionId": sid}
             )
@@ -1008,6 +1042,13 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                 "name": chunk.name,
                 "input": chunk.args or {},
             }
+            # 时间线上也插一张卡：它把"正文段"切开，后续正文会另起一段。
+            turn_timeline.append({
+                "type": "tool",
+                "id": chunk.id,
+                "name": chunk.name,
+                "input": chunk.args or {},
+            })
             await _safe_send(client_id, {
                 "type": "toolStart",
                 "id": chunk.id,
@@ -1040,6 +1081,14 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                 run["output"] = _clip_tool_output(raw)
                 if elapsed_ms is not None:
                     run["ms"] = elapsed_ms
+            # 时间线上那张卡同步补上结果，重放历史时才和线上看到的一致。
+            for seg in turn_timeline:
+                if seg.get("type") == "tool" and seg.get("id") == chunk.id:
+                    seg["ok"] = not chunk.is_error
+                    seg["output"] = _clip_tool_output(raw)
+                    if elapsed_ms is not None:
+                        seg["ms"] = elapsed_ms
+                    break
             # 生图调用成功 → 顺手把本次新产生的图片路径带上，前端自动预览。
             # 生图脚本只打印文件名，模型又常常忘记写 `![](路径)` —— 前端拿不到
             # 可渲染路径时用户「图生成了但看不到」。
@@ -1156,7 +1205,13 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
             )
             # 生图自动交付：模型忘了写 `![](路径)` 时补上，保证刷新/切换会话后
             # 图片依然能渲染（即时那份由前端 toolEnd 帧的自动预览负责）。
+            _before_refs = final_text
             final_text = append_image_refs(final_text, generated_images)
+            # [T-turn-timeline-order] 补进去的图片引用**也必须进时间线**：界面在
+            # 有 timeline 时不再渲染 ``m.text``，漏掉这段的话生图回合（它必然带
+            # 工具调用 → 必然有 timeline）重放时图片就消失了 —— 那正好废掉
+            # ``append_image_refs`` 存在的唯一理由（见上一条注释）。
+            timeline_with_image_refs(turn_timeline, _before_refs, final_text)
             runs = list(tool_runs.values())
             # 没有正文但有工具调用（模型只调工具就收工）也要落库：否则那一回合
             # 连同它的一堆工具卡一起消失，用户回头无从回看。空正文的行在重建
@@ -1166,6 +1221,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                 await chat_store.append_turn(
                     sid, "assistant", final_text,
                     runs=runs or None,
+                    timeline=turn_timeline or None,
                     model_label=model_label,
                     token_usage=(
                         json.dumps(usage_meter) if any(usage_meter.values()) else None

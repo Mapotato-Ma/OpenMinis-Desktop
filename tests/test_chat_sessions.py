@@ -174,6 +174,164 @@ async def test_messages_api_returns_runs(isolated_chat_db):
     assert msgs[0]["runs"] == [_TOOL_RUN]
 
 
+# ---------------------------------------------------------------------------
+# 重放顺序：正文段与工具卡交替 [T-turn-timeline-order]
+# ---------------------------------------------------------------------------
+_TIMELINE = [
+    {"type": "text", "text": "我先看看目录。"},
+    {"type": "tool", **_TOOL_RUN},
+    {"type": "text", "text": "都过了。"},
+]
+
+
+@pytest.mark.asyncio
+async def test_timeline_roundtrip_keeps_interleaving(isolated_chat_db):
+    """重放历史要还原"说一句 → 调工具 → 再说一句"，而不是把工具卡全堆到底部。
+
+    用户实测：关闭应用再打开、重开会话，所有工具执行都排在最下面。
+    根因是落库只存得下「一整块正文 + 一串工具卡」，交替顺序丢了。
+    """
+    s = await chat_store.create_session()
+    await chat_store.append_turn(
+        s.id, "assistant", "我先看看目录。都过了。",
+        runs=[_TOOL_RUN], timeline=_TIMELINE,
+    )
+
+    rows = await chat_store.load_messages(s.id)
+    assert rows[0].timeline == _TIMELINE
+    # 正文段在时间线里**分开**存着，别被合回一整块
+    kinds = [seg["type"] for seg in rows[0].timeline]
+    assert kinds == ["text", "tool", "text"]
+
+
+@pytest.mark.asyncio
+async def test_timeline_does_not_touch_model_context(isolated_chat_db):
+    """时间线只服务界面：模型上下文仍是纯正文，一个工具名都不能漏进去。"""
+    s = await chat_store.create_session()
+    await chat_store.append_turn(
+        s.id, "assistant", "都过了。", runs=[_TOOL_RUN], timeline=_TIMELINE,
+    )
+
+    rows = await chat_store.load_messages(s.id)
+    assert rows[0].text == "都过了。"
+    assert rows[0].runs == [_TOOL_RUN]
+
+    hist = await chat_store.load_runtime_history(s.id)
+    assert hist[0].content == "都过了。"
+    assert "shell_execute" not in hist[0].content
+    assert "我先看看目录" not in hist[0].content
+
+
+@pytest.mark.asyncio
+async def test_legacy_rows_without_timeline_fall_back(isolated_chat_db):
+    """老数据（没有 flow part）退化成改造前的画法：正文在前、卡片在后。"""
+    s = await chat_store.create_session()
+    await chat_store.append_turn(s.id, "assistant", "都过了。", runs=[_TOOL_RUN])
+
+    rows = await chat_store.load_messages(s.id)
+    assert rows[0].timeline == [
+        {"type": "text", "text": "都过了。"},
+        {"type": "tool", **_TOOL_RUN},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plain_turn_has_no_timeline(isolated_chat_db):
+    """纯正文回合不该凭空多出一个空时间线。"""
+    s = await chat_store.create_session()
+    await chat_store.append_turn(s.id, "assistant", "纯文字")
+    assert (await chat_store.load_messages(s.id))[0].timeline is None
+
+
+@pytest.mark.asyncio
+async def test_flow_part_stores_only_tool_refs(isolated_chat_db):
+    """时间线里的卡片只留 id 引用 —— 内容在 tool part 里已存过，别再抄一份。
+
+    单条 output 上限 8KB，工具多的回合照抄一遍会让 parts_json 直接涨一倍。
+    """
+    import json
+
+    from openminis.data.db.chat_dao import ChatDao
+    from openminis.server import chat_store as cs
+
+    s = await chat_store.create_session()
+    await chat_store.append_turn(
+        s.id, "assistant", "都过了。", runs=[_TOOL_RUN], timeline=_TIMELINE,
+    )
+
+    async with cs._get_db().session() as db:  # noqa: SLF001
+        rows = await ChatDao(db).load_messages(s.id)
+    parts_json = rows[0].parts_json
+    flow = [p for p in json.loads(parts_json) if p.get("type") == "flow"][0]
+    tool_seg = [seg for seg in flow["items"] if seg.get("type") == "tool"][0]
+    assert tool_seg == {"type": "tool", "id": _TOOL_RUN["id"]}
+    # 内容只出现一次（在 tool part 里）
+    assert parts_json.count(_TOOL_RUN["output"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_row_timeline_includes_text(isolated_chat_db):
+    """子代理回合的正文在 subtext part 里，时间线也要带上。
+
+    不带的话那几行就是"空白气泡 + 一摞工具卡"—— 开着子代理时工具卡大多产生
+    在这里，用户看到的正是「所有工具执行都排在最下面」。
+    """
+    from openminis.data.model.agent_tool_definition import AgentToolParam  # noqa: F401
+
+    s = await chat_store.create_session()
+    await chat_store.append_sub_turn(
+        s.id,
+        speaker={"name": "代码助手"},
+        task="看看目录",
+        room_id="r1",
+        text="目录里有 3 个文件。",
+        runs=[_TOOL_RUN],
+    )
+
+    rows = await chat_store.load_messages(s.id)
+    assert rows[0].text == ""            # 不进模型上下文
+    assert rows[0].sub["text"] == "目录里有 3 个文件。"
+    kinds = [seg["type"] for seg in rows[0].timeline]
+    assert kinds == ["text", "tool"]
+    assert rows[0].timeline[0]["text"] == "目录里有 3 个文件。"
+
+
+def test_image_refs_land_in_the_timeline():
+    """生图补写的 `![](路径)` 必须进时间线，否则重放时图会消失。
+
+    界面在有 timeline 时不再渲染 `m.text` —— 补写只进 text 就等于丢了。
+    """
+    from openminis.server.main import timeline_with_image_refs
+
+    tl = [{"type": "text", "text": "画好了："}]
+    before = "画好了："
+    after = "画好了：\n\n![生成图](C:/x/a.png)"
+    timeline_with_image_refs(tl, before, after)
+    assert tl == [{"type": "text", "text": "画好了：\n\n![生成图](C:/x/a.png)"}]
+
+    # 没补写时不动它（别凭空空加一段）
+    tl2 = [{"type": "text", "text": "纯文字"}]
+    timeline_with_image_refs(tl2, "纯文字", "纯文字")
+    assert tl2 == [{"type": "text", "text": "纯文字"}]
+
+
+@pytest.mark.asyncio
+async def test_messages_api_returns_timeline(isolated_chat_db):
+    import httpx
+
+    s = await chat_store.create_session()
+    await chat_store.append_turn(
+        s.id, "assistant", "我先看看目录。都过了。",
+        runs=[_TOOL_RUN], timeline=_TIMELINE,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.get(f"/api/chats/sessions/{s.id}/messages")
+    msgs = r.json()["messages"]
+    assert msgs[0]["timeline"] == _TIMELINE
+
+
 @pytest.mark.asyncio
 async def test_messages_api_defaults_runs_to_empty_list(isolated_chat_db):
     """老消息（没有工具记录）也要给前端一个空数组，省得它到处判 undefined。"""

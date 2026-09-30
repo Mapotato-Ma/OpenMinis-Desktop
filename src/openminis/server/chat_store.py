@@ -43,6 +43,7 @@ __all__ = [
     "drop_runtime",
     "parts_to_text",
     "parts_to_runs",
+    "parts_to_timeline",
     "parts_to_sub",
     "TITLE_DEFAULT",
 ]
@@ -123,12 +124,93 @@ def _text_parts(text: str) -> str:
 RUN_PART_TYPE = "tool"
 
 
-def _parts_with_runs(text: str, runs: list[dict[str, Any]] | None) -> str:
+#: [T-turn-timeline-order] 界面**可视时间线**在 ``parts_json`` 里的类型标签。
+#:
+#: 一条助手回合作品其实是「正文段 → 工具卡 → 正文段 → …」交替的，但原来只存
+#: 得下两样东西：一整块正文（``text`` part）+ 一串工具卡（``tool`` part）。
+#: 顺序信息就此丢失，重放历史只能"先画全部正文、再把所有工具卡堆在下面"——
+#: 用户实测：重启后重开会话，所有工具执行都排在最下面。
+#:
+#: 这里额外存一份**有序片段**。刻意用一个 ``parts_to_text`` / ``parts_to_runs``
+#: 都不认识的类型标签，于是：
+#:   * 模型上下文（只读 text part）**一字不变**；
+#:   * 工具卡（只读 tool part）**一字不变**；
+#:   * 旧数据没有这个 part → 前端退回改造前的老画法，天然兼容。
+FLOW_PART_TYPE = "flow"
+
+
+def _parts_with_runs(
+    text: str,
+    runs: list[dict[str, Any]] | None,
+    timeline: list[dict[str, Any]] | None = None,
+) -> str:
     parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
     for run in runs or []:
         if isinstance(run, dict) and run:
             parts.append({"type": RUN_PART_TYPE, **run})
+    if timeline:
+        parts.append({
+            "type": FLOW_PART_TYPE,
+            # 卡片在时间线里**只留一个 id 引用**：它的 name/input/output/ms 已经
+            # 在 ``tool`` part 里存过一遍了，再抄一份会让 parts_json 直接涨一倍
+            # （单条 output 上限就有 8KB，工具多的回合很可观）。读的时候按 id
+            # join 回 ``tool`` part，见 ``parts_to_timeline``。
+            "items": [_flow_ref(seg) for seg in timeline if isinstance(seg, dict) and seg],
+        })
     return json.dumps(parts, ensure_ascii=False)
+
+
+def _flow_ref(seg: dict[str, Any]) -> dict[str, Any]:
+    """时间线里的一个片段 → 落库形态（工具卡只留 id）。"""
+    if seg.get("type") == RUN_PART_TYPE:
+        return {"type": RUN_PART_TYPE, "id": seg.get("id")}
+    return dict(seg)
+
+
+def parts_to_timeline(parts_json: str) -> list[dict[str, Any]]:
+    """按**发生顺序**取出这一回合的可视片段：``{type:"text"|"tool", …}``。
+
+    界面重放历史时必须按这个顺序画，才能还原"说一句 → 调工具 → 再说一句"。
+    老数据没有 ``flow`` part，退化成 ``[整段正文, 工具卡…]`` —— 即改造前的
+    行为，不会更差。
+    """
+    try:
+        parts = json.loads(parts_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parts, list):
+        return []
+    for p in parts:
+        if isinstance(p, dict) and p.get("type") == FLOW_PART_TYPE:
+            items = p.get("items")
+            if not isinstance(items, list):
+                return []
+            by_id = {r.get("id"): r for r in parts_to_runs(parts_json)}
+            out: list[dict[str, Any]] = []
+            for seg in items:
+                if not isinstance(seg, dict) or not seg:
+                    continue
+                if seg.get("type") == RUN_PART_TYPE:
+                    run = by_id.get(seg.get("id"))
+                    if run is not None:      # 卡片正文在 tool part 里，按 id 取回
+                        out.append({"type": RUN_PART_TYPE, **run})
+                    continue                 # 取不回来就别塞个空壳糊弄界面
+                out.append(dict(seg))
+            return out
+    # 旧数据回退：只有真的存在工具卡时才合成时间线（正文在前、卡片在后）。
+    # 纯正文回合没有可"交替"的东西 → 返回空，前端走原画法，零变化。
+    runs = parts_to_runs(parts_json)
+    if not runs:
+        return []
+    out = []
+    # 子代理回合的正文在 ``subtext`` part 里（``parts_to_text`` 看不到它），
+    # 不补这一句的话那几行就是"空白气泡 + 一摞卡片"。
+    sub = parts_to_sub(parts_json)
+    legacy_text = parts_to_text(parts_json) or ((sub or {}).get("text") or "")
+    if legacy_text:
+        out.append({"type": "text", "text": legacy_text})
+    out.extend({"type": RUN_PART_TYPE, **r} for r in runs)
+    return out
 
 
 def parts_to_runs(parts_json: str) -> list[dict[str, Any]]:
@@ -225,6 +307,10 @@ class ChatMessageInfo:
     #: 会话里要能一直看得见、能展开，所以随消息一起落库；它们**不进模型上下文**
     #: （见 ``parts_to_text`` 只认 text part）。
     runs: list[dict[str, Any]] | None = None
+    #: [T-turn-timeline-order] 这一回合的**可视时间线**（有序：正文段与工具卡
+    #: 交替）。界面重放历史按它来画，工具卡才会停在原来的位置，而不是全被
+    #: 堆到会话底部。同样不进模型上下文。
+    timeline: list[dict[str, Any]] | None = None
     #: [T-subagent-log-persist] 子代理消息：``{speaker, task, roomId, text}``。
     #: 正文在 ``subtext`` part 里（``text`` 字段因此是空的），所以同样不进上下文。
     sub: dict[str, Any] | None = None
@@ -519,6 +605,7 @@ async def load_messages(session_id: str) -> list[ChatMessageInfo]:
                 text=parts_to_text(r.parts_json),
                 createdAt=r.created_at,
                 runs=parts_to_runs(r.parts_json) or None,
+                timeline=parts_to_timeline(r.parts_json) or None,
                 sub=parts_to_sub(r.parts_json),
             )
             for r in rows
@@ -570,6 +657,9 @@ async def append_turn(
     text: str,
     *,
     runs: list[dict[str, Any]] | None = None,
+    #: [T-turn-timeline-order] 有序可视片段（正文段与工具卡交替）。给了就按它
+    #: 落库，界面重放历史才能还原工具卡原本的位置。
+    timeline: list[dict[str, Any]] | None = None,
     model_label: str | None = None,
     token_usage: str | None = None,
     model_id: str | None = None,
@@ -607,7 +697,8 @@ async def append_turn(
                 session_id=session_id,
                 role=role,
                 parts_json=(
-                    _parts_with_runs(text, runs) if runs else _text_parts(text)
+                    _parts_with_runs(text, runs, timeline)
+                    if (runs or timeline) else _text_parts(text)
                 ),
                 created_at=now,
                 sort_order=order,

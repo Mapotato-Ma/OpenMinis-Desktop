@@ -38,6 +38,7 @@
 | `src/openminis/sandbox/guard.py`（`_git_bash_drive_path()`） | Windows 上把 `/c/Users/…` 形态翻成 `C:/Users/…` 再判越界 | Windows 上内核的 shell 是 **Git Bash**（`persistent_shell.py` 优先找 Git 自带的 bash），模型于是写 `/c/Users/…`；而 Windows 语义里 `ntpath.abspath('/c/x')` 是 `'\\c\\x'`（当前盘根下的 c 目录）→ 访问**自己的工作区根**也被判越界（用户实测拦截编号 `g-179067946811-c46651`）。只在 `os.name == "nt"` 时生效，POSIX 上 `/c/...` 是普通路径 |
 | `src/openminis/sandbox/guard.py`（`_looks_like_path()`） | 正则/转义片段（`\r` `\n` `\s+` `\d{2}` `\x00`）不再算路径 | `_TOKEN_RE` 把引号当分隔符剥掉，于是 `tr -d '\r'`、`sed 's/\s\+//'` 里的 `\r`/`\s+` 各自成为独立 token；它们以反斜杠开头 → Windows 上 `ntpath.isabs('\\r')` 为真 → 被解析成盘根下的 `C:\r` → 判「工作区之外」而拦下。实测后果：agent **连续 14 次被拦**（`CRITICAL effect_tool_runaway tool=shell_execute streak=14`），正常文本处理命令一条都跑不了。只匹配「反斜杠 + 1~2 个字母 + 可选量词」与 `\xHH`，**不碰**真正以反斜杠开头的 Windows 路径（`\Windows\System32`、UNC `\\server\share`） |
 | `src/openminis/server/chat_store.py`（新增 `clear_all_chat_data()`） | 新增一个「清空全部会话数据」函数；**会话/消息/压缩标记清掉，工作区（分组）保留** | 桌面版「一键清空数据（保留供应商）」按钮的后端。工作区属于**配置**不是聊天记录：它带着用户绑定的真实项目目录，删了会连带毁掉「agent 在项目目录里干活」这条链路（实测：清空后前端缓存的工作区 id 变悬空 → 「把会话放进工作区失败：工作空间不存在」→ shell 退回空的 `db-<会话id>` 沙箱 → agent 看不到用户的文件）。护栏：`tests/test_chat_sessions.py::test_clear_all_chat_data_keeps_workspaces` |
+| `src/openminis/server/chat_store.py`（`_parts_with_runs()` / 新增 `parts_to_timeline()` / `ChatMessageInfo.timeline`）、`src/openminis/server/main.py`（回合时间线）、`src/openminis/server/chat_api.py`（接口加 `timeline`） | 在 `parts_json` 里额外存一份**有序可视时间线**（新 part 类型 `flow`，内容 = 正文段与工具卡按发生顺序交替） | `parts_json` 原来只存得下「一整块正文 + 一串工具卡」，**交替顺序丢了** → 重放历史只能"先画全部正文、再把所有工具卡堆在底部"（用户实测：关闭应用再打开、重开会话，所有工具执行都排在最下面）。用 `parts_to_text` / `parts_to_runs` 都不认识的类型标签，所以**模型上下文与工具卡都一字不变**；旧数据没有该 part，前端退回老画法，天然兼容。时间线里的卡片**只留 id 引用**（内容在 `tool` part 里已有，读时按 id join），否则 `parts_json` 会涨一倍。两处配套：`append_image_refs` 补写的 `![](路径)` 也要接进时间线（界面有 timeline 时不再渲染 `m.text`，漏了它生图回合重放就没图）；子代理回合的正文在 `subtext` part 里，也要进时间线，否则那几行是「空白气泡 + 一摞卡片」。护栏：`tests/test_chat_sessions.py::test_timeline_roundtrip_keeps_interleaving` / `test_timeline_does_not_touch_model_context` / `test_legacy_rows_without_timeline_fall_back` / `test_plain_turn_has_no_timeline` / `test_messages_api_returns_timeline` |
 | `src/openminis/config/audit/config_audit_log.py`（`usage()`） | 裸 `Usage(...)` 改成 `self.Usage(...)` | `Usage` 是本类的**嵌套类**，而方法体里的名字解析**不查类作用域**（只查局部 → 闭包 → 全局 → 内置）→ 裸写必然 `NameError: name 'Usage' is not defined`（已实测复现）。该函数当时无调用方所以一直没暴露，config-audit 界面一接上就炸。上游自身的问题 |
 | `src/openminis/tools/image_gen_tool.py`（导入区） | 加 `if TYPE_CHECKING: import httpx` | `_generate_once(client: "httpx.AsyncClient", …)` 用的是**字符串注解**，运行时从不求值（文件已有 `from __future__ import annotations`），但静态检查报 F821「未定义的名字」。补一个只在类型检查期存在的导入，运行时行为零变化 |
 | `tests/test_scheduled.py` / `test_settings.py` / `test_skills.py` / `test_subagent_events.py` / `test_subagents.py`（共 21 处同名重定义） | 删掉**被遮蔽的那一份**死定义 | 上游的合并残留：同名函数定义两次，Python 只保留最后一个 → 前面那份永远不运行（F811）。其中 20 组逐字节相同，1 组（`test_skill_entry_exposes_declared_env`）死的那份把 `"metadata:\n"` 写成 `"metadata:/n"`（YAML 会解析失败），活的才是对的。删除前后 pytest 收集数**都是 124**，证明这些代码确实从未运行 |
@@ -83,7 +84,7 @@ README.md                       本文档重写为桌面版说明
 `src/openminis/**` 默认一行不改。桌面路由是通过 `desktop/ui_mount.py` 在运行时
 插入到 FastAPI 路由表前端的，这样上游更新可以直接 merge。
 
-目前有**17 处**例外（按上表行数计，都是上游自身的问题或本项目需要的增补，见上面
+目前有**18 处**例外（按上表行数计，都是上游自身的问题或本项目需要的增补，见上面
 「与上游的偏离」一节），
 一旦上游修好就可以删掉。规矩是：任何对 `src/` 的改动都必须
 

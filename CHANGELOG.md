@@ -1,5 +1,70 @@
 # 变更日志
 
+## v0.4.3 — 修「流式正文重复」与「重开会话后工具卡全堆在底部」（2026-09-30）
+
+现场反馈两个问题，根因分别在**前端渲染**与**持久化表示**。
+
+### 修复①：工具卡之后的正文会把前面的正文再画一遍（用户："先1再12再123再1234"）
+`appendDelta` 渲染的是 `t.text` —— **整轮**累计文本，而不是**当前文本段**。
+一次工具调用会把文本切成多段（`addToolCardToTurn` 里 `t.textBlock = null`，
+下一段另起一个块），于是新块一出现就把工具卡**之前**的正文整段重画一遍，
+而且每来一段就重画一次越来越长的累计串。用户描述完全吻合：
+
+    模型先说"我来看看"      → block1 显示"我来看看"
+    调工具（切段）           → 卡片
+    再说"文件里有A"         → block2 显示"我来看看文件里有A"  ← 重复了
+
+修法：区分 `text`（整轮，供复制/落库）与 `runText`（当前段，供渲染）；
+工具卡切段时把 `runText` 清零；`endTurn` 只回填当前段（且不再走
+`turnTextBlock()` —— 那会在末尾凭空造一个空块）。
+
+### 修复②：关闭应用重开会话，所有工具执行都排在最下面
+`parts_json` 原来只存得下「一整块正文 + 一串工具卡」，**交替顺序丢了** ——
+实时渲染是"正文/卡片交替"，重放时只能"先全部正文、再把卡片堆在下面"，
+两边画法必然不一致。
+
+修法：在 `parts_json` 里额外存一份**有序可视时间线**（新 part 类型 `flow`，
+内容 = 正文段与工具卡按发生顺序交替）。刻意用一个 `parts_to_text` /
+`parts_to_runs` **都不认识**的类型标签，于是：
+
+- 模型上下文（只读 `text` part）**一字不变**；
+- 工具卡（只读 `tool` part）**一字不变**；
+- 旧数据没有该 part → 前端退回老画法，**天然兼容，不需要迁移**；
+- 纯正文回合不合成时间线（没有可交替的东西），同样零变化。
+
+后端在 sink 里边收边记（`turn_timeline`），接口多吐一个 `timeline` 字段，
+前端 `renderMessages` 按它画。
+
+### 独立审核补充的三处（同一轮改动，审核子 agent 发现）
+
+送了一个子 agent 独立复核（它把 `beginTurn/appendDelta/addToolCardToTurn/endTurn`
+原样抽出来配假 DOM 跑了行为复现），**两个根因都被独立复现确认**，另外指出三处：
+
+1. **生图引用会丢（这是本次改动引入的回归，必须补）**：`append_image_refs`
+   补写的 `![](路径)` 只进了 `text=`，而界面在有 timeline 时**不再渲染 `m.text`**
+   → 生图回合（必然带工具调用）重放时图片消失，正好废掉那个函数存在的唯一理由。
+   已把补写的那段一并接进时间线，并加了**调用点级别**的集成测试。
+2. **时间线里的卡片只留 id 引用**：卡片的 name/input/output/ms 已在 `tool` part
+   里存过，再抄一份会让 `parts_json` 直接涨一倍（单条 output 上限 8KB）。
+   读的时候按 id join 回 `tool` part。
+3. **子代理回合不再是"空白气泡 + 一摞卡片"**：它们的正文在 `subtext` part 里，
+   `parts_to_text` 看不到 → 时间线原本只有卡片。现在把子代理正文也放进时间线，
+   并在界面上给一个身份标签。开着子代理时工具卡大多产生在这些行里 ——
+   正是「所有工具执行都排在最下面」观感的一部分。
+
+### 护栏（都做过反向自检：撤回修复必红）
+- `tests/test_chat_sessions.py::test_timeline_roundtrip_keeps_interleaving`
+- `tests/test_chat_sessions.py::test_timeline_does_not_touch_model_context`
+- `tests/test_chat_sessions.py::test_legacy_rows_without_timeline_fall_back`
+- `tests/test_chat_sessions.py::test_plain_turn_has_no_timeline`
+- `tests/test_chat_sessions.py::test_messages_api_returns_timeline`
+- `tests/test_chat_sessions.py::test_flow_part_stores_only_tool_refs`
+- `tests/test_chat_sessions.py::test_subagent_row_timeline_includes_text`
+- `tests/test_turn_timeline.py::test_turn_timeline_persists_interleaved_order`
+  （驱动真实的 `_run_chat`，断言落库顺序 = 流式发生顺序）
+- `tests/test_turn_timeline.py::test_image_refs_are_written_into_the_timeline`
+  （**调用点级别**：把补写那行删掉，这条必红）
+
 ## v0.4.2 — 修「清空数据把工作区也删了」引发的连锁 + 正则片段被误判越界（2026-09-30）
 
 现场反馈「还是有问题的」+ 一整份日志。日志把两条独立的 bug 摆得很清楚，都已修并带护栏。

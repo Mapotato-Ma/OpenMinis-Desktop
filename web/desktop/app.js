@@ -362,7 +362,13 @@ function beginTurn() {
   const body = el('div', 'msg-body');
   root.appendChild(body);
   $('messages').appendChild(root);
-  state.turn = { root, body, textBlock: null, text: '', toolCards: new Map() };
+  // ``text`` 是**整轮**累计（复制按钮用）；``runText`` 是**当前这一文本段**的
+  // 累计（渲染用）。一次工具调用会把文本切成多段，每段各自渲染自己的内容 ——
+  // 否则工具卡之后新建的块会把工具卡**之前**的正文再画一遍（用户实测：
+  // 「先1再12再123再1234」，越画越长）。
+  state.turn = {
+    root, body, textBlock: null, text: '', runText: '', toolCards: new Map(),
+  };
   return state.turn;
 }
 
@@ -386,13 +392,14 @@ let deltaRaf = 0;
 function appendDelta(text) {
   if (!state.turn) beginTurn();
   const t = state.turn;
-  t.text += text;
+  t.text += text;      // 整轮（复制 / 落库）
+  t.runText += text;   // 当前段（只画这一段）
   if (deltaRaf) return;
   deltaRaf = requestAnimationFrame(() => {
     deltaRaf = 0;
     const block = turnTextBlock();
     clearStreamCursor();   // 先清旧的，否则每来一段新文本就多留一个在闪
-    if (block) block.innerHTML = renderMarkdown(t.text) + '<span class="cursor-blink"></span>';
+    if (block) block.innerHTML = renderMarkdown(t.runText) + '<span class="cursor-blink"></span>';
     scrollChat();
   });
 }
@@ -402,6 +409,7 @@ function addToolCardToTurn(id, name, input) {
   // A tool call ends the current text run: the next delta starts a new block
   // *below* the card, which is what the agent's ordering actually means.
   t.textBlock = null;
+  t.runText = '';        // 新段的累计从空开始 —— 别把上一段带进来
   clearStreamCursor();   // 文本说完了，光标跟着收掉
   const card = makeToolCard(name, input);
   t.body.appendChild(card);
@@ -414,8 +422,10 @@ function endTurn() {
   const t = state.turn;
   if (!t) return;
   if (deltaRaf) { cancelAnimationFrame(deltaRaf); deltaRaf = 0; }
-  const block = turnTextBlock();
-  if (block) block.innerHTML = renderMarkdown(t.text);
+  // 只回填**当前段**；已经画好的前几段保持原样（回填整轮会把它们重复一遍）。
+  // 注意用 t.textBlock 直接判断，不要走 turnTextBlock() —— 那会在末尾凭空
+  // 造一个空块（最后一步是工具卡时就会出现）。
+  if (t.textBlock) t.textBlock.innerHTML = renderMarkdown(t.runText);
   if (!t.text && !t.toolCards.size) {
     const body = el('div', 'msg-body');
     body.innerHTML = '<p style="color:var(--fg-faint)">(空回复)</p>';
@@ -702,19 +712,45 @@ function renderMessages(messages) {
 
     const body = el('div', 'msg-body');
     if (isUser) body.textContent = m.text || '';
-    else body.innerHTML = renderMarkdown(m.text || '');
-    node.appendChild(body);
 
+    // [T-turn-timeline-order] 重放历史优先按**有序时间线**画：正文段与工具卡
+    // 交替，工具卡才会停在它原本的位置。没有 timeline（旧数据 / 纯正文）时退回
+    // 老画法：整段正文 + 卡片统一附在后面。
+    const timeline = Array.isArray(m.timeline) ? m.timeline : [];
     const runs = Array.isArray(m.runs) ? m.runs : [];
-    if (runs.length) {
-      const wrap = el('div', 'turn-tools');
-      for (const r of runs) {
-        const card = makeToolCard(r.name || 'tool', r.input || {});
-        settleToolCard(card, r.ok !== false, r.output || '', r.ms);
-        wrap.appendChild(card);
-        if (r.name === 'file_edit' || r.name === 'file_write') recordChange(r.name, r.input || {});
+    if (!isUser && timeline.length) {
+      // 子代理回合先给一个身份标签 —— 否则它和主代理的话看起来一模一样。
+      if (m.sub) {
+        const sp = (m.sub && m.sub.speaker) || {};
+        const who = [sp.emoji, sp.name].filter(Boolean).join(' ') || '子代理';
+        node.appendChild(el('div', 'tool-section-label',
+          m.sub.task ? who + ' · ' + m.sub.task : who));
       }
-      node.appendChild(wrap);
+      for (const seg of timeline) {
+        if (seg.type === 'tool') {
+          const card = makeToolCard(seg.name || 'tool', seg.input || {});
+          settleToolCard(card, seg.ok !== false, seg.output || '', seg.ms);
+          if (seg.name === 'file_edit' || seg.name === 'file_write') recordChange(seg.name, seg.input || {});
+          node.appendChild(card);
+        } else if (seg.text) {
+          const blk = el('div', 'msg-body stream-block');
+          blk.innerHTML = renderMarkdown(seg.text);
+          node.appendChild(blk);
+        }
+      }
+    } else {
+      if (!isUser) body.innerHTML = renderMarkdown(m.text || '');
+      node.appendChild(body);
+      if (runs.length) {
+        const wrap = el('div', 'turn-tools');
+        for (const r of runs) {
+          const card = makeToolCard(r.name || 'tool', r.input || {});
+          settleToolCard(card, r.ok !== false, r.output || '', r.ms);
+          wrap.appendChild(card);
+          if (r.name === 'file_edit' || r.name === 'file_write') recordChange(r.name, r.input || {});
+        }
+        node.appendChild(wrap);
+      }
     }
     if (!isUser && m.text) addMessageActions(node, m.text);
     box.appendChild(node);
