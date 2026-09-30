@@ -331,6 +331,37 @@ def test_pinned_shell_id_matches_the_shell_sources():
     assert compute() == SHELL_ID, "改了壳就跑 python scripts/shell_id.py --write"
 
 
+def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
+    """同一个提交，Linux(LF) 与 Windows(CRLF) 必须算出**同一个**壳指纹。
+
+    CI 实测抓到过：Verify 跑在 windows-latest 上，git 默认按 CRLF 检出，指纹就对不上。
+    行尾是检出方式的差别，不是壳变了 —— 而载荷恰恰在 Windows 上用。
+    """
+    from scripts.shell_id import compute, normalise
+
+    assert normalise(b"a\r\nb") == normalise(b"a\nb") == b"a\nb"
+
+    # 把整个壳源码复制一份、全部转成 CRLF，指纹必须不变
+    import shutil
+
+    from scripts import shell_id
+
+    fake = tmp_path / "repo"
+    shutil.copytree(shell_id.REPO / "desktop", fake / "desktop",
+                    ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
+    shutil.copy2(shell_id.REPO / "desktop_main.py", fake / "desktop_main.py")
+    (fake / "packaging").mkdir()
+    shutil.copy2(shell_id.REPO / "packaging" / "OpenMinisDesktop.spec",
+                 fake / "packaging" / "OpenMinisDesktop.spec")
+    before = shell_id.compute()
+    for path in fake.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            path.write_bytes(data.replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(shell_id, "REPO", fake)
+    assert shell_id.compute() == before, "转成 CRLF 之后壳指纹变了 —— 行尾没归一化"
+
+
 def test_cleanup_removes_old_downloads(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "updates_dir", lambda: tmp_path)
     old = tmp_path / "old.zip"

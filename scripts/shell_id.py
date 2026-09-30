@@ -58,6 +58,18 @@ def _iter_shell_files() -> list[Path]:
     return sorted(out, key=lambda p: p.relative_to(REPO).as_posix())
 
 
+def normalise(data: bytes) -> bytes:
+    """把行尾统一成 LF 再算哈希。
+
+    Windows 上 git 默认按 **CRLF** 检出，Linux/macOS 上是 LF —— 那是**检出方式**的
+    差别，不是壳变了。不归一化的话，同一个提交在两个平台上会算出两个壳指纹，而载荷
+    恰恰是 Windows 上用的（CI 实测：Verify 在 windows-latest 上因此红过一次）。
+
+    顺手也就容忍了用户本地编辑器改行尾的情况。
+    """
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def compute() -> str:
     digest = hashlib.sha256()
     # Python 主次版本也算进去：换解释器（3.12 → 3.13）就是换壳。
@@ -66,7 +78,7 @@ def compute() -> str:
         rel = path.relative_to(REPO).as_posix()
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        digest.update(hashlib.sha256(normalise(path.read_bytes())).digest())
     return digest.hexdigest()[:16]
 
 
