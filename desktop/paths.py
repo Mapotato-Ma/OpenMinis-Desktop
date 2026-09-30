@@ -20,6 +20,8 @@ had its way with us:
 
 from __future__ import annotations
 
+import importlib
+import importlib.machinery
 import sys
 from pathlib import Path
 
@@ -66,7 +68,7 @@ def payload_root() -> Path | None:
 
 
 def install_payload_path() -> Path | None:
-    """把载荷目录插到 ``sys.path`` **最前面**。
+    """把载荷目录插到 ``sys.path`` **最前面**，并在 ``sys.meta_path`` 上认领内核。
 
     **必须在任何 ``openminis`` / ``desktop`` 的 import 之前调用**：Python 一旦
     导入过某个包就把它记在 ``sys.modules`` 里，之后再改 ``sys.path`` 也换不掉。
@@ -86,7 +88,54 @@ def install_payload_path() -> Path | None:
         if entry in sys.path:
             sys.path.remove(entry)
         sys.path.insert(0, entry)
+    _install_payload_finder(root)
     return root
+
+
+#: 载荷负责提供的包。**不含 ``desktop``** —— 见 scripts/make_payload.py 的说明：
+#: 壳里有引导模块，能决定"去哪儿找载荷"的代码不能由载荷自己提供。
+PAYLOAD_PACKAGES = ("openminis",)
+
+
+class PayloadFinder:
+    """从载荷目录提供 ``openminis``（及其子模块）。
+
+    **为什么光靠 ``sys.path`` 不够**：PyInstaller 冻出来的应用里，bundle 内的模块
+    是由 ``sys.meta_path`` 上的**冻结导入器**提供的，而 meta_path 里的查找器一律
+    排在 ``sys.path`` **之前** —— 只把载荷插到 ``sys.path[0]`` 是**盖不住**它的。
+    必须在 meta_path 也占住最前面那一格。
+
+    （这个坑 CI 的断言就是为抓它而加的。我本地的机制实验用 ``sys.path`` 模拟
+    bundle，恰好绕过了这个差别 —— 本地全绿，打包版未必生效。教训：**实验的模型
+    比现实更宽松时，绿是假的**。）
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def find_spec(self, fullname: str, path: object = None, target: object = None):  # noqa: ARG002
+        # 这里**绝不能**再 import 任何东西：导入本身会再走一遍 meta_path，而我们就
+        # 挂在上面 → 无限递归（实测 RecursionError）。所需模块一律在文件顶部导好。
+        # 只认领顶层包；子模块跟着父包的 __path__ 走，交给常规机制。
+        if "." in fullname or fullname not in PAYLOAD_PACKAGES:
+            return None
+        package = self.root / fullname
+        if not (package / "__init__.py").is_file() and not (package / "__init__.pyc").is_file():
+            return None    # 载荷里没有它 → 别拦着，让冻结导入器照旧提供
+        return importlib.machinery.PathFinder.find_spec(fullname, [str(self.root)])
+
+    def find_module(self, fullname: str, path: object = None):  # pragma: no cover
+        return None    # 兼容旧接口；find_spec 才是正路
+
+
+def _install_payload_finder(root: Path) -> None:
+    for finder in sys.meta_path:
+        if isinstance(finder, PayloadFinder):
+            if finder.root == root:
+                return
+            sys.meta_path.remove(finder)   # 换了载荷目录就换一个
+            break
+    sys.meta_path.insert(0, PayloadFinder(root))
 
 
 def _payload_path_entries(root: Path) -> list[Path]:
@@ -110,8 +159,6 @@ def module_origin(name: str) -> str | None:
     载荷没被用上时表现是"改的东西没反应"，只能靠猜（这个项目已经吃过一次
     "WebView 跑旧界面"的亏）。
     """
-    import importlib  # noqa: PLC0415
-
     try:
         return getattr(importlib.import_module(name), "__file__", None)
     except Exception:  # pragma: no cover - 诊断信息不该反过来把启动弄挂

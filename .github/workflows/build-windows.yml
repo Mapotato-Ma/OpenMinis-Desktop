@@ -167,11 +167,17 @@ jobs:
           for ($i = 0; $i -lt 40; $i++) {
             try {
               $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
-              if ($access.token) { break }
+              # **必须比对端口**：这份文件是"当前实例"的全局记录，同一次流水线里
+              # 前后会起好几个实例，留着上一个实例的令牌。只看 token 非空会立刻
+              # 拿到陈旧令牌，然后被自己的闸门 403（v0.4.5 就是这么红的）。
+              if ($access.token -and $access.port -eq $port) { break }
             } catch { }
             Start-Sleep -Milliseconds 500
           }
-          if (-not $access.token) { Write-Error "access token file never appeared"; exit 1 }
+          if (-not $access.token -or $access.port -ne $port) {
+            Write-Error "access token file never appeared for port $port"
+            exit 1
+          }
           $auth = @{ 'x-minis-desktop-access' = $access.token }
 
           $gateCode = 0
@@ -219,12 +225,13 @@ jobs:
           $p = Start-Process -FilePath dist\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
           $zoom = $null
           # 令牌同上：这一步是外部进程在打受保护的 /api/desktop/zoom。
+          # 同上：按端口过滤，别拿上一步那个实例的令牌。
           $access = $null
           for ($i = 0; $i -lt 25; $i++) {
             Start-Sleep -Seconds 2
             try {
               $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
-              if ($access.token) { break }
+              if ($access.token -and $access.port -eq 8803) { break }
             } catch { }
           }
           $auth = @{ 'x-minis-desktop-access' = $access.token }
@@ -350,14 +357,31 @@ jobs:
         # 断言的是**加载来源**：内核必须来自 payload\，不是 exe 里冻住的那份。
         run: |
           $p = Start-Process -FilePath dist\OpenMinisDesktop\OpenMinisDesktop.exe -ArgumentList "--no-window","--port","8804" -PassThru
+          # 按端口过滤（上一步 startup_probe 用的是 8802，它的令牌还留在文件里），
+          # 而且请求本身也重试 —— 双保险，免得再被自己的闸门挡一次。
           $access = $null
           for ($i = 0; $i -lt 40; $i++) {
             Start-Sleep -Seconds 2
             $p.Refresh(); if ($p.HasExited) { break }
-            try { $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json; if ($access.token) { break } } catch { }
+            try {
+              $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
+              if ($access.token -and $access.port -eq 8804) { break }
+            } catch { }
           }
           $auth = @{ 'x-minis-desktop-access' = $access.token }
-          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Headers $auth "http://127.0.0.1:8804/api/desktop/info").Content | ConvertFrom-Json
+          $info = $null
+          for ($i = 0; $i -lt 15; $i++) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Headers $auth "http://127.0.0.1:8804/api/desktop/info"
+              if ($r.StatusCode -eq 200) { $info = $r.Content | ConvertFrom-Json; break }
+            } catch { }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $info) {
+            Write-Error "could not read /api/desktop/info from the packaged app"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Write-Host "kernelFrom: $($info.kernelFrom)"
           Write-Host "payloadDir: $($info.payloadDir)"
