@@ -160,7 +160,18 @@ jobs:
           # 桌面壳的本地服务要求访问令牌（防"用户访问的任意网页都能跨域驱动本机
           # 这个手里有 shell 的 agent"）。窗口从 `?k=` 换 cookie，外部工具从落盘的
           # 记录里取 —— 打包版漏装闸门必须在这条流水线上红，别等用户来报。
-          $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
+          # 令牌文件是在后端**健康之后**才落盘的（start_server 里 publish_access 在
+          # wait_for_health 之后），所以这里必须轮询 —— 健康检查一过就立刻读会输掉
+          # 这个竞态（v0.4.5 的流水线就是这么红的：文件还没写出来）。
+          $access = $null
+          for ($i = 0; $i -lt 40; $i++) {
+            try {
+              $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
+              if ($access.token) { break }
+            } catch { }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $access.token) { Write-Error "access token file never appeared"; exit 1 }
           $auth = @{ 'x-minis-desktop-access' = $access.token }
 
           $gateCode = 0

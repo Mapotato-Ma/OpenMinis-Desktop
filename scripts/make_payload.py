@@ -53,6 +53,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
+# Windows 控制台默认是 cp1252，直接 print 中文会 UnicodeEncodeError（CI 上炸过一次：
+# `'charmap' codec can't encode characters`）。这里显式改成 UTF-8，坏字符降级成 ?，
+# 而不是让整个构建挂掉。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:  # pragma: no cover - 老环境没有 reconfigure
+        pass
+
 #: 载荷里放什么（相对仓库根）。**刻意不含 ``desktop/``**：壳里有引导模块
 #: （``paths`` / ``stdio`` / ``startup_trace``），它们必须由 exe 提供 ——
 #: 能决定"去哪里找载荷"的代码不能由载荷自己给。半个桌面包能从载荷覆盖、半个不能，
