@@ -356,7 +356,9 @@ def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
     before = shell_id.compute()
     for path in fake.rglob("*"):
         if path.is_file():
-            data = path.read_bytes()
+            # 先归一成 LF 再转 CRLF —— 直接 replace 的话，Windows 上本来就是 CRLF，
+            # 会变成 \r\r\n（这条测试第一次跑在 windows-latest 上就是这么红的）。
+            data = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
             path.write_bytes(data.replace(b"\n", b"\r\n"))
     monkeypatch.setattr(shell_id, "REPO", fake)
     assert shell_id.compute() == before, "转成 CRLF 之后壳指纹变了 —— 行尾没归一化"
