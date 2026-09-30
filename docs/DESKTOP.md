@@ -45,7 +45,7 @@ pywebview GUI 事件循环                启动期：内核 import → uvicorn
 
 启动耗时的证据链：`desktop/startup_trace.py` 每次启动往
 `%USERPROFILE%\openminis\logs\startup.log` 追加**一行**（`origin=parent|self|python`
-标明 0 点取自哪里 —— 取父进程时刻才能把 onefile 的解包算进去）。
+标明 0 点取自哪里 —— 从父进程时刻算起，才能把真正的启动开销算进去）。
 
 **单实例**：启动时先探测 `host:port` 上是否已有健康的内核，有就直接把新窗口
 指过去。否则会出现两个内核、两套 SQLite 会话库，用户看到的是「会话丢了」。
@@ -377,14 +377,14 @@ v0.1.0 的「模型服务」页**没有保存按钮**，于是出现了一个非
 
 `console=False` 是默认值（真正的 GUI 应用行为），调试时设 `OPENMINIS_CONSOLE=1`。
 
-打包形状由 `OPENMINIS_ONEFILE` 决定，**两个都发**：
+打包只出**便携版（onedir）**：`dist\OpenMinisDesktop\`，压成
+`OpenMinisDesktop-portable.zip` 发出去。
 
-| 形状 | 启动 | 用法 |
-|---|---|---|
-| onefile（`OpenMinisDesktop.exe`） | 每次启动都要把载荷解到 `%TEMP%\_MEIxxxxx`，办公电脑上还要过一遍杀软实时扫描 | 双击即用，最省事 |
-| onedir（`OpenMinisDesktop-portable.zip`） | 没有解包这一步 | 解压一次，双击文件夹里的 exe |
+早期还发过一个 onefile 的单 exe，已经删掉 —— 它每次启动都要把载荷解到
+`%TEMP%\_MEIxxxxx`（办公电脑上还要过一遍杀软实时扫描），而两个形态并存只会让人
+不知道该下哪个。真要那份对比数据，去翻 v0.3.x 的 release。
 
-哪个更快要在**用户自己的机器**上量：CI 的 runner 没有企业杀软。`scripts/startup_probe.ps1`
+`scripts/startup_probe.ps1`
 在 CI 上量冷/热两次（`--no-window`，报"进程起来 → 端口通 → `/api/health` 200"），
 真机上则看 `logs\startup.log` 那一行。
 
@@ -453,9 +453,10 @@ markdown 生效，会话落库，刷新后从 `runs` 恢复卡片。
 [ ok ] Verify the runtime dependencies the kernel needs
 [ ok ] Smoke-test the desktop shell          ← 14 项全过
 [ ok ] Generate icon
-[ ok ] Build onefile executable              ← 37.3 MB
-[ ok ] Verify the executable starts          ← 真的启动 exe，等 /api/health 200，
-                                                 再确认 /_desktop/ 返回桌面界面
+[ ok ] Build portable (onedir) app
+[ ok ] Build the update payload (payload/)    ← 内核与界面单独装成一个可替换目录
+[ ok ] Verify the payload actually shadows…   ← 断言内核真的从 payload\ 加载
+[ ok ] Build the update manifest (latest.json)
 [ ok ] Upload artifact
 [ ok ] Attach to release
 ```

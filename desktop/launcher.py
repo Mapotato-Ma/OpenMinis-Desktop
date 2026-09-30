@@ -63,6 +63,23 @@ _FALLBACK_SPLASH = (
 )
 
 
+def register_restart_hook(window: Any) -> None:
+    """把"怎么正常退出"告诉 api 层 —— 应用内更新装完之后要重启才生效。
+
+    为什么用注册而不是让 api 直接 import 窗口：窗口在这个模块手里，而 api 层不该
+    反过来依赖启动流程。没有注册时更新接口会兜底硬退（进程退出、助手脚本把我拉起来）。
+    """
+    from .ui_mount import set_restart_hook  # noqa: PLC0415
+
+    def _quit() -> None:
+        try:
+            window.destroy()
+        except Exception:  # pragma: no cover - 窗口可能已经没了
+            logger.debug("window.destroy failed", exc_info=True)
+
+    set_restart_hook(_quit)
+
+
 def existing_instance_token(existing: str) -> str | None:
     """复用**别的实例**的服务时，令牌要从它落盘的记录里取。
 
@@ -261,6 +278,7 @@ def run_window_first(
     except TypeError as exc:
         raise SplashUnsupported(str(exc)) from exc
 
+    register_restart_hook(window)
     state = BootState()
     seen = {"loaded": 0}
 

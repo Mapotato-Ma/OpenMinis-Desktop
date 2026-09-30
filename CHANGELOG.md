@@ -1,5 +1,94 @@
 # 变更日志
 
+## v0.4.6 — 架构第 3 步：应用内一键更新（对标 CC Switch 那套）（2026-09-30）
+
+界面上点一个按钮就能更新，和 CC Switch 一样。做法也照搬它：应用去拉一个**固定地址**
+的清单，比版本，下载，校验，替换自己，重启。
+
+    清单地址  https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+              ↑ `releases/latest` 永远指向最新那个 release，应用里不用写版本号，
+                也不吃 GitHub API 的限流（它是 release 资产，不是 API）。
+
+### 为什么这个项目做起来比 CC Switch 便宜一大截
+
+第 2 步把内核与界面拆成了 exe 旁边的 `payload/`，于是**日常更新根本不用碰正在运行的
+exe**：
+
+| | 大小 | 怎么做 |
+|---|---|---|
+| 小更新（内核 / 界面） | **2.35 MB** | 替换一个目录 → 重启生效 |
+| 整包（壳 / 运行时变了） | 39.5 MB | 要替换 exe 本身，得走安装器（第 4 步） |
+
+Python 导入完 `.py`/`.pyc` 就把文件关掉了、不持有句柄，所以**运行中重命名 `payload/`
+在 Windows 上也成立** —— 这是"载荷做成普通目录"的附带好处。替换是原子的（新的先解到
+旁边的临时目录 → 查验 → 旧的改名让位 → 新的挪进来），中途出错会把旧的回滚回去。
+
+### 判据是**壳指纹**，不是版本号（这一步的关键设计）
+
+第一版把清单里的 `shellVersion` 设成发布版本号 —— 结果**每次更新都被判成"换壳了、
+要下整包"**，因为版本号每个 release 都涨。小更新那条路永远走不到，等于白做。
+
+改成 `SHELL_ID` = 对**壳的源码**（`desktop/` 下所有 .py + 入口 + PyInstaller spec +
+Python 主次版本）取哈希，由 `scripts/shell_id.py` 算、签进 `desktop/build_id.py`：
+
+* 只改内核或界面 → 壳的哈希一字不变 → **只换载荷（2.35 MB）**；
+* 壳真改了一行 → 哈希变 → 老老实实下整包。
+
+`tests/test_updater.py::test_pinned_shell_id_matches_the_shell_sources` 钉住它：
+改了壳却忘了重算，pytest 直接红（这条**当天就抓到一次** —— 我加完 env 覆盖忘了重算，
+本地指纹和实际壳对不上，端到端立刻显形）。
+
+### 做了什么
+
+* `scripts/make_latest.py` —— 产出更新清单（两个资产的 url / sha256 / bytes + 壳指纹），
+  跟着 release 一起发。
+* `desktop/updater.py` —— 检查 → 下载（流式 + **sha256 校验**）→ 解压（拒绝 zip slip）
+  → 原子替换 → 重启助手脚本（等旧进程退出再拉起来）。
+* `desktop/ui_mount.py` —— `/api/desktop/update`（GET 检查 / POST 开始）、
+  `/update/status`（进度）、`/update/restart`。**都在访问闸门后面**：网页点不了这个按钮。
+* 界面：「关于」面板加了 当前版本 / 可用版本 / 状态 / 「检查更新」「下载并安装」
+  「重启生效」，带下载进度百分比。
+* `OPENMINIS_UPDATE_URL` 可以换清单来源 —— 端到端测试要用，将来架自建镜像/内网分发
+  也用得上（办公电脑连不上 GitHub 是常事）。
+
+### 只出便携版（不需要的东西就不要出）
+
+单独的 `OpenMinisDesktop.exe`（onefile）**不再发布**，CI 里那个 job 也删掉了。它本来
+就是启动最慢的那一种（每次启动都要把整个载荷解到 `%TEMP%`，办公电脑上还要过一遍杀软
+实时扫描），而两个形态并存只会让人不知道该下哪个。现在发布资产只剩三样：
+
+    OpenMinisDesktop-portable.zip     整包（解压即用）
+    OpenMinisDesktop-update.zip       小更新包（应用内更新下载的就是它）
+    latest.json                       更新清单
+
+删 job 时**特意把那两条检查挪进了 portable** 而不是跟着一起删：打包版的访问闸门断言
+（无令牌打 `/api/*` 必须 403）、以及带窗口的原生缩放探针。
+`packaging/OpenMinisDesktop.spec` 与 `build-desktop.bat` 里的 onefile 分支也一并清掉，
+README 与 docs/DESKTOP.md 同步更新。
+
+### 校验做到哪一步（说清楚，别夸大）
+
+清单里的 `sha256` 会验，防的是**下载被截断/损坏**、缓存或代理返回了旧包。
+它**防不住**"有人能改 GitHub 上的 release" —— 那需要签名（CC Switch 每个包配一个
+`.sig`、应用内置公钥）。这一步没做，记在这儿。
+
+### 验证
+
+* 单元 + 集成 28 项（版本比较、清单解析、决策、校验失败丢弃文件、zip slip、原子替换、
+  壳指纹护栏）。
+* **端到端**（`/var/minis/workspace/update-e2e.sh`）：造一个"假装装好的实例"
+  （真内核的完整拷贝，壳指纹与真机一致），对着本地清单服务走完
+  检查 → 下载 → 校验 → 换载荷，然后**在子进程里**确认新内核真的生效 ——
+  实测 `检查更新 → kind=payload`、流程走到 `ready`、载荷版本从 `9.9.8-old` 变成
+  `9.9.9-new`、新进程 import 到的是新版本。走的是真的 API 端点（含访问闸门）。
+* 服务器 `python scripts/check.py` 四步全绿：**921 passed / 2 skipped**。
+
+### 还没做（第 4 步）
+
+整包更新（要替换 exe）+ 安装器（per-user `%LOCALAPPDATA%`，不触发 UAC）+
+WebView2 Evergreen 引导 + **代码签名**（没签名 + 每次换新 exe = 每次更新都吃
+SmartScreen；这也是上面"校验防不住改 release"的正解）。
+
 ## v0.4.5 — 架构第 2 步：把「运行时」与「载荷」拆开，更新从 37.9 MB 变成 2.3 MB（2026-09-30）
 
 ### 问题：改内核一行 = 重发整个 37.9 MB

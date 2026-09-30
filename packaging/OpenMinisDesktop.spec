@@ -15,7 +15,10 @@ server). Differences that matter:
 * **``console=False``** by default so it behaves like a real GUI app; set
   ``OPENMINIS_CONSOLE=1`` when you want the log console for debugging.
 
-Shape is chosen with ``OPENMINIS_ONEFILE=1`` (onedir otherwise).
+**Only onedir.** The onefile shape was dropped on purpose — it re-extracted the
+whole payload to ``%TEMP%`` on every launch (and got scanned by corporate AV
+each time), and shipping both shapes only made "which one do I download"
+ambiguous. `OPENMINIS_CONSOLE=1` still turns on the log console.
 """
 
 import os
@@ -140,7 +143,6 @@ excludes = [
     "pytest_asyncio",
 ]
 
-onefile = os.environ.get("OPENMINIS_ONEFILE") == "1"
 console = os.environ.get("OPENMINIS_CONSOLE") == "1"
 icon = ROOT / "desktop" / "assets" / "icon.ico"
 
@@ -173,16 +175,13 @@ exe_common = dict(
     icon=str(icon) if icon.is_file() else None,
 )
 
-if onefile:
-    exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], runtime_tmpdir=None, **exe_common)
-else:
-    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **exe_common)
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        strip=False,
-        upx=False,
-        upx_exclude=[],
-        name="OpenMinisDesktop",
-    )
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **exe_common)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="OpenMinisDesktop",
+)

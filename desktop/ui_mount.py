@@ -27,11 +27,15 @@ the old failure mode was silent (requests answered by the catch-all, or a JSON
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI
+
+from . import __version__
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount, Route
@@ -39,7 +43,19 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.4.5"
+
+#: 应用内更新的进度/结果（单实例，全局一份够了 —— 一次只跑一个更新）。
+_update_state: dict[str, Any] = {"phase": "idle", "done": 0, "total": 0, "error": None}
+
+#: 壳注册的"正常退出"回调。有它就走它（顺手收后端、关窗口）；没有就兜底硬退。
+#: 为什么用注册而不是 import：窗口在 launcher 手里，而 api 模块不该反过来依赖它。
+_restart_hook: dict[str, Callable[[], None] | None] = {"fn": None}
+
+
+def set_restart_hook(fn: Callable[[], None] | None) -> None:
+    """壳在窗口建好之后把"怎么正常退出"告诉这里（见 desktop/launcher.py）。"""
+    _restart_hook["fn"] = fn
+DESKTOP_UI_VERSION = "0.4.6"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -263,11 +279,136 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             return JSONResponse({"error": "factor 必须是数字"}, status_code=400, headers=_NO_STORE)
         return JSONResponse(native_zoom.set_zoom(factor), headers=_NO_STORE)
 
+    async def _update_check(request: Any) -> JSONResponse:  # noqa: ARG001
+        """检查有没有新版本 [T-in-app-update]。
+
+        网络请求放线程里跑：这是同步阻塞的 HTTP，直接放在事件循环上会把整个后端
+        卡住（连界面自己的轮询都会排队）。
+        """
+        import asyncio  # noqa: PLC0415
+
+        from . import updater  # noqa: PLC0415
+
+        try:
+            result = await asyncio.to_thread(
+                updater.plan,
+                current_version=__version__,
+                current_shell=updater.own_shell_id(),
+                url=updater.MANIFEST_URL,
+            )
+        except updater.UpdateError as exc:
+            return JSONResponse(
+                {"ok": False, "current": __version__, "error": str(exc)},
+                status_code=200,   # "检查不了"不是服务器错误，界面照样要能画
+                headers=_NO_STORE,
+            )
+        info = result.info
+        return JSONResponse(
+            {
+                "ok": True,
+                "current": __version__,
+                "available": result.kind != "none",
+                "kind": result.kind,
+                "reason": result.reason,
+                "latest": info.version if info else None,
+                "notes": info.notes if info else "",
+                "pubDate": info.pub_date if info else "",
+                "bytes": (result.asset.bytes if result.asset else 0),
+            },
+            headers=_NO_STORE,
+        )
+
+    async def _update_apply(request: Any) -> JSONResponse:  # noqa: ARG001
+        """下载并安装（后台跑，界面轮询 `update/status` 看进度）。"""
+        state = _update_state
+        if state.get("phase") == "running":
+            return JSONResponse({"ok": False, "error": "已经在更新了"}, headers=_NO_STORE)
+        state.clear()
+        state.update({"phase": "checking", "done": 0, "total": 0, "error": None})
+        threading.Thread(target=_run_update, name="openminis-update", daemon=True).start()
+        return JSONResponse({"ok": True, "phase": "checking"}, headers=_NO_STORE)
+
+    async def _update_status(request: Any) -> JSONResponse:  # noqa: ARG001
+        return JSONResponse(dict(_update_state), headers=_NO_STORE)
+
+    async def _update_restart(request: Any) -> JSONResponse:  # noqa: ARG001
+        """重启以让新载荷生效。
+
+        正在跑的进程没法换掉自己的代码（``.pyc`` 已进内存），所以只能"我先退出，
+        让助手把我拉起来"。非 Windows 上不写助手脚本 —— 那里不是发布目标。
+        """
+        from . import updater  # noqa: PLC0415
+
+        hook = _restart_hook["fn"]
+        script = updater.schedule_relaunch()
+        if hook is not None:
+            # 有壳注册的正常退出路径就走它（会顺手收掉后端、关掉窗口）。
+            threading.Timer(0.4, hook).start()
+        else:
+            # 兜底：没有壳的时候（无头/测试）直接退出进程，助手会把它拉起来。
+            threading.Timer(0.6, lambda: os._exit(0)).start()
+
+        return JSONResponse(
+            {"ok": True, "relaunch": str(script) if script else None}, headers=_NO_STORE
+        )
+
+    def _run_update() -> None:
+        """后台更新流程：探清单 → 下载 → 校验 → 换载荷。"""
+        from . import updater  # noqa: PLC0415
+        from .paths import payload_root  # noqa: PLC0415
+
+        state = _update_state
+        try:
+            result = updater.plan(
+                current_version=__version__,
+                current_shell=updater.own_shell_id(),
+                url=updater.MANIFEST_URL,
+            )
+            if result.kind == "none" or result.asset is None:
+                state.update({"phase": "done", "note": result.reason})
+                return
+            if result.kind != "payload":
+                # 换壳的更新需要替换 exe，这一步还没做（见 CHANGELOG 的"还没做"）。
+                state.update({"phase": "manual", "note": result.reason})
+                return
+
+            state.update(
+                {"phase": "downloading", "version": result.info.version,
+                 "total": result.asset.bytes, "done": 0}
+            )
+            archive = updater.download(
+                result.asset,
+                updater.updates_dir(),
+                on_progress=lambda done, total: state.update(
+                    {"done": done, "total": total or result.asset.bytes}
+                ),
+            )
+            state.update({"phase": "installing"})
+            target = payload_root()
+            if target is None:
+                state.update({"phase": "manual", "note": "这个安装没有载荷目录，需要整包装"})
+                return
+            updater.install_payload(
+                archive, target, expect_shell=result.info.shell_id or updater.own_shell_id()
+            )
+            updater.cleanup_old_downloads(keep=archive)
+            state.update({"phase": "ready", "version": result.info.version})
+        except updater.UpdateError as exc:
+            state.update({"phase": "failed", "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - 任何意外都要让界面看得见
+            logger.exception("update failed")
+            state.update({"phase": "failed", "error": f"{type(exc).__name__}: {exc}"})
+
     routes.extend(
         [
             # 壳层与界面之间那点小事：界面靠 /api/desktop/info 画窗口 chrome，
             # 而不用从 user agent 去猜。
             Route("/api/desktop/info", _info, methods=["GET"], include_in_schema=False),
+            # 应用内更新（对标 CC Switch 那套）：探清单 / 下载安装 / 看进度 / 重启。
+            Route("/api/desktop/update", _update_check, methods=["GET"], include_in_schema=False),
+            Route("/api/desktop/update", _update_apply, methods=["POST"], include_in_schema=False),
+            Route("/api/desktop/update/status", _update_status, methods=["GET"], include_in_schema=False),
+            Route("/api/desktop/update/restart", _update_restart, methods=["POST"], include_in_schema=False),
             # /api/desktop/test-provider —— 这个服务商真的能应答吗？
             # 上游已有的 /api/settings/fetch-models 只探测 GET /models：
             # 它能在「模型 id 写错」时依然是绿的，所以这里发一次真正的最小

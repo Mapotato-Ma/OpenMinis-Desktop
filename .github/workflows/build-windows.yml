@@ -38,276 +38,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 40
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-
-      - name: Install dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          # pywebview supplies the WebView2 window; PyInstaller does the packaging.
-          pip install "pywebview>=5.0" "pyinstaller>=6.6"
-
-      - name: Verify the runtime dependencies the kernel needs
-        shell: pwsh
-        run: |
-          # SQLAlchemy only pulls greenlet when its platform marker matches, and
-          # that marker has historically missed some Windows builds — the
-          # symptom is an ImportError deep inside a build. Assert it up front so
-          # the failure costs two seconds instead of ten minutes.
-          python -c "import greenlet, aiosqlite, sqlalchemy.ext.asyncio as a; print('greenlet', greenlet.__version__); print('sqlalchemy', a.__name__, 'ok')"
-          if ($LASTEXITCODE -ne 0) { Write-Error "runtime dependency check failed"; exit 1 }
-
-      - name: Smoke-test the desktop shell
-        shell: pwsh
-        run: python scripts/smoke_test.py
-
-      - name: Generate icon
-        shell: pwsh
-        run: python scripts/make_icon.py
-
-      - name: Build onefile executable
-        shell: pwsh
-        env:
-          OPENMINIS_ONEFILE: '1'
-          # Keep the console in CI: if startup fails we want the traceback in
-          # the log rather than a silent exit. Release builds flip this off.
-          OPENMINIS_CONSOLE: ${{ github.event_name == 'pull_request' && '1' || '0' }}
-        run: python -m PyInstaller --noconfirm --clean packaging/OpenMinisDesktop.spec
-
-      - name: Verify the executable starts
-        shell: pwsh
-        run: |
-          # A GUI build has no console, so the only sane check is: launch it
-          # headless and see whether the backend answers. The app writes its
-          # startup log to %USERPROFILE%\openminis\logs\desktop.log, which is
-          # what we dump when it does not come up.
-          #
-          # Polling is a cheap raw TCP connect with a short timeout, not an
-          # HTTP request: a refused local connect returns immediately, while
-          # Invoke-WebRequest can sit on its own timeout on every attempt and
-          # turn a failure into minutes of dead waiting.
-          $port = 8799
-          $log = Join-Path $env:USERPROFILE "openminis\logs\desktop.log"
-          $p = Start-Process -FilePath "dist\OpenMinisDesktop.exe" `
-               -ArgumentList "--no-window","--port","$port" -PassThru
-
-          # NB: parameter named $portToTest rather than $p — $p is the process
-          # handle and shadowing it here would be a nasty read.
-          function Test-Port([int]$portToTest) {
-            try {
-              $c = New-Object System.Net.Sockets.TcpClient
-              $null = $c.ConnectAsync('127.0.0.1', $portToTest).Wait(250)
-              $open = $c.Connected
-              $c.Close()
-              return $open
-            } catch { return $false }
-          }
-
-          $deadline = (Get-Date).AddSeconds(75)
-          $open = $false
-          while ((Get-Date) -lt $deadline) {
-            if ($p.HasExited) { break }   # crashed: no point waiting out the clock
-            if (Test-Port $port) { $open = $true; break }
-            Start-Sleep -Milliseconds 400
-          }
-
-          $ok = $false
-          if ($open) {
-            try {
-              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/health"
-              if ($r.StatusCode -eq 200) { $ok = $true }
-            } catch { }
-          }
-
-          if (-not $ok) {
-            Write-Host "::group::exe did not become healthy — diagnostics"
-            Write-Host "port opened: $open"
-            Write-Host "process exited: $($p.HasExited)"
-            if ($p.HasExited) { Write-Host "exit code: $($p.ExitCode)" }
-            if (Test-Path $log) {
-              Write-Host "--- tail of $log ---"
-              Get-Content $log -Tail 80
-            } else {
-              Write-Host "no log file at $log"
-            }
-            Write-Host "::endgroup::"
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            Write-Error "frozen exe never became healthy"
-            exit 1
-          }
-
-          $ui = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/_desktop/"
-          if ($ui.Content -notmatch 'OpenMinis Desktop') {
-            Write-Host "::group::wrong UI served"
-            Write-Host $ui.Content.Substring(0, [Math]::Min(600, $ui.Content.Length))
-            Write-Host "::endgroup::"
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            Write-Error "frozen exe served the wrong UI"
-            exit 1
-          }
-
-          # 桌面壳的本地服务要求访问令牌（防"用户访问的任意网页都能跨域驱动本机
-          # 这个手里有 shell 的 agent"）。窗口从 `?k=` 换 cookie，外部工具从落盘的
-          # 记录里取 —— 打包版漏装闸门必须在这条流水线上红，别等用户来报。
-          # 令牌文件是在后端**健康之后**才落盘的（start_server 里 publish_access 在
-          # wait_for_health 之后），所以这里必须轮询 —— 健康检查一过就立刻读会输掉
-          # 这个竞态（v0.4.5 的流水线就是这么红的：文件还没写出来）。
-          $access = $null
-          for ($i = 0; $i -lt 40; $i++) {
-            try {
-              $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
-              # **必须比对端口**：这份文件是"当前实例"的全局记录，同一次流水线里
-              # 前后会起好几个实例，留着上一个实例的令牌。只看 token 非空会立刻
-              # 拿到陈旧令牌，然后被自己的闸门 403（v0.4.5 就是这么红的）。
-              if ($access.token -and $access.port -eq $port) { break }
-            } catch { }
-            Start-Sleep -Milliseconds 500
-          }
-          if (-not $access.token -or $access.port -ne $port) {
-            Write-Error "access token file never appeared for port $port"
-            exit 1
-          }
-          $auth = @{ 'x-minis-desktop-access' = $access.token }
-
-          $gateCode = 0
-          try {
-            $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/chats/sessions"
-            $gateCode = 200
-          } catch { $gateCode = [int]$_.Exception.Response.StatusCode }
-          if ($gateCode -ne 403) {
-            Write-Error "access gate missing: unauthenticated /api/* answered $gateCode (expected 403)"
-            exit 1
-          }
-          Write-Host "access gate ok: unauthenticated /api/* -> 403"
-
-          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Headers $auth "http://127.0.0.1:$port/api/desktop/info").Content
-          # 打包断言：新界面文件真的进了包（不然 exe 会跑在没有 ui-prefs 的旧界面上）
-          foreach ($asset in @('ui-prefs.js', 'vendor/webawesome/components/dialog/dialog.js')) {
-            $code = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/_desktop/$asset").StatusCode
-            if ($code -ne 200) { Write-Error "packaged UI is missing $asset"; exit 1 }
-            Write-Host "packaged asset ok: $asset"
-          }
-          Write-Host "desktop info: $info"
-          # 缩放交给谁：WebView2 原生 ZoomFactor（引擎级）还是页面里的 CSS zoom。
-          # 这里只打印不判定 —— 原生拿不到是降级、不是失败（界面会回落 CSS），
-          # 但我们要在日志里看得见，别靠用户报「缩放感觉不对」来发现。
-          $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Headers $auth "http://127.0.0.1:$port/api/desktop/zoom").Content
-          Write-Host "::notice::zoom capability: $zoom"
-          Write-Host "frozen exe is healthy and serving the desktop UI"
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-
-      - name: Report startup timeline (onefile)
-        shell: pwsh
-        # 只报告、不判定：绝对值会随 runner 波动，有意义的是同一个 runner 上两个
-        # 打包形状的对比，以及应用自己写进 logs\startup.log 的分段耗时。
-        run: pwsh -File scripts/startup_probe.ps1 -ExePath dist\OpenMinisDesktop.exe -Port 8801
-
-      - name: Probe native zoom capability (windowed)
-        shell: pwsh
-        # 上面那次探活是 --no-window 起的：进程里根本没有窗口，所以 /api/desktop/zoom
-        # 只会回答「没有控件」，**证明不了原生缩放能不能用**，更拦不住「窗口模式崩了」
-        # （v0.3.5 就是这样漏出去的）。这一步带窗口再起一次，并把**进程退出码**和
-        # 应用自己的 startup.log 打出来 —— 崩了和「runner 没桌面」必须能分开看。
-        # 仍然 continue-on-error：runner 上桌面会话未必可用，降级不该染红流水线。
-        continue-on-error: true
-        run: |
-          $p = Start-Process -FilePath dist\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
-          $zoom = $null
-          # 令牌同上：这一步是外部进程在打受保护的 /api/desktop/zoom。
-          # 同上：按端口过滤，别拿上一步那个实例的令牌。
-          $access = $null
-          for ($i = 0; $i -lt 25; $i++) {
-            Start-Sleep -Seconds 2
-            try {
-              $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
-              if ($access.token -and $access.port -eq 8803) { break }
-            } catch { }
-          }
-          $auth = @{ 'x-minis-desktop-access' = $access.token }
-          for ($i = 0; $i -lt 25; $i++) {
-            Start-Sleep -Seconds 2
-            $p.Refresh()
-            if ($p.HasExited) { break }
-            try {
-              $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Headers $auth "http://127.0.0.1:8803/api/desktop/zoom").Content
-              if ($zoom) { break }
-            } catch { }
-          }
-          $p.Refresh()
-          if ($zoom) {
-            Write-Host "::notice::windowed zoom capability: $zoom"
-            # 「能不能用」只有真的设一次才知道 —— 而且只有「设进去 + 读回来一致」才算数。
-            # 用 1.0 探（不改变任何视觉）。
-            try {
-              $set = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Method Post `
-                      -ContentType 'application/json' -Body '{"factor":1.0}' -Headers $auth `
-                      "http://127.0.0.1:8803/api/desktop/zoom").Content
-              Write-Host "::notice::native zoom set: $set"
-              if ($set.StartsWith('{"ok":true')) { Write-Host "native zoom is usable on Windows" }
-              else { Write-Host "::warning::native zoom NOT usable — see reason above" }
-            } catch { Write-Host "::warning::native zoom set request failed: $_" }
-          } elseif ($p.HasExited) {
-            Write-Host "::error::windowed exe exited early (exit code $($p.ExitCode)) — 窗口模式的启动路径崩了，别当成“runner 没桌面”"
-          } else {
-            Write-Host "::warning::windowed exe is alive but never served HTTP within 50s"
-          }
-          $log = Join-Path $env:USERPROFILE 'openminis\logs\startup.log'
-          if (Test-Path $log) { Write-Host "--- startup.log tail"; Get-Content $log -Tail 25 }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          exit 0
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenMinisDesktop-windows
-          path: dist/OpenMinisDesktop.exe
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/OpenMinisDesktop.exe
-          generate_release_notes: true
-          body: |
-            ## OpenMinis Desktop ${{ github.ref_name }}
-
-            Windows 桌面版（原生窗口，基于 OpenMinis 内核）。
-
-            下载 `OpenMinisDesktop.exe` 双击运行即可，无需安装 Python 或 Node。
-            首次启动会在 `%USERPROFILE%\openminis`（即 `C:\Users\<你的用户名>\openminis`）建数据目录，然后在设置里
-            配置模型服务（OpenAI / Anthropic / 任意 OpenAI 兼容网关）。
-
-            **嫌启动慢就换便携版**：下载 `OpenMinisDesktop-portable.zip`，解压后双击
-            文件夹里的 `OpenMinisDesktop.exe`。单文件版每次启动都要把内容解到临时目录
-            （办公电脑上还会被杀软逐个扫描），便携版没有这一步。
-
-            - 快捷键：`Ctrl+K` 命令面板、`Ctrl+\`` 终端、`Ctrl+B` 左侧面板、`Ctrl+N` 新会话、
-              `Ctrl+O` 打开文件夹、`Ctrl+,` 设置、`Esc` 关闭当前文件
-            - 界面：菜单栏（文件/视图/帮助）、活动栏、可多标签看代码（同时最多 10 个）、
-              文件树可指向任意目录
-            - 首次运行若提示缺少 WebView2，装一次微软的
-              [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 较老版本可能需要）
-            - 想知道启动那几秒花在哪：`%USERPROFILE%\openminis\logs\startup.log`
-              每次启动写一行（解包 / 内核 / 后端 / 窗口各自的累计毫秒）。
-              设环境变量 `OPENMINIS_NO_SPLASH=1` 可以退回旧的启动顺序，用来对比。
-
-  # 同一个 exe 的"免解包"版本。onefile 每次启动都要把载荷解到 %TEMP%，办公电脑上
-  # 还要过一遍杀软实时扫描；onedir 没有这一步，代价是得先解压一次、双击的是文件夹里
-  # 的 exe。两个都发出去，让用户在**自己那台机器**上对比 —— CI 机器没有企业杀软，
-  # 它给不出那个决定性数字。
+  # 只发便携版（onedir）。onefile 那版已经删掉了 —— 它每次启动都要把载荷解到
+  # %TEMP%（办公电脑上还要过一遍杀软实时扫描），而两个形态并存只会让人不知道该下
+  # 哪个。启动速度的对比数据留在 v0.3.x 的 release 里，需要时去翻。
   portable:
     runs-on: windows-latest
     timeout-minutes: 40
@@ -382,6 +115,32 @@ jobs:
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             exit 1
           }
+          # 访问闸门必须在场：无令牌打 /api/* 必须 403（打包版漏装闸门 = 任意网页
+          # 都能驱动本机这个手里有 shell 的 agent）。这条原本在 onefile 那个 job 里，
+          # 删掉那个 job 时**不能连它一起删**。
+          $gateCode = 0
+          try {
+            $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:8804/api/chats/sessions"
+            $gateCode = 200
+          } catch { $gateCode = [int]$_.Exception.Response.StatusCode }
+          if ($gateCode -ne 403) {
+            Write-Error "access gate missing: unauthenticated /api/* answered $gateCode (expected 403)"
+            exit 1
+          }
+          Write-Host "access gate ok: unauthenticated /api/* -> 403"
+
+          # 界面真的进了包（不然 exe 跑在没有 ui-prefs 的旧界面上）
+          $ui = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:8804/_desktop/"
+          if ($ui.Content -notmatch 'OpenMinis Desktop') {
+            Write-Error "frozen exe served the wrong UI"
+            exit 1
+          }
+          foreach ($asset in @('ui-prefs.js', 'vendor/webawesome/components/dialog/dialog.js')) {
+            $code = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:8804/_desktop/$asset").StatusCode
+            if ($code -ne 200) { Write-Error "packaged UI is missing $asset"; exit 1 }
+          }
+          Write-Host "packaged UI ok"
+
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Write-Host "kernelFrom: $($info.kernelFrom)"
           Write-Host "payloadDir: $($info.payloadDir)"
@@ -392,11 +151,71 @@ jobs:
           }
           Write-Host "payload overlay ok: kernel loads from the payload dir"
 
+      - name: Probe native zoom capability (windowed)
+        shell: pwsh
+        # 上面那些探活都是 --no-window 起的：进程里根本没有窗口，所以
+        # /api/desktop/zoom 只会回答"没有控件"，**证明不了窗口模式能用**。
+        # 这一步带窗口再起一次，并把进程退出码与 startup.log 打出来 ——
+        # 崩了和"runner 没桌面"必须能分开看。仍然 continue-on-error：
+        # runner 上桌面会话未必可用，降级不该染红流水线。
+        continue-on-error: true
+        run: |
+          $p = Start-Process -FilePath dist\OpenMinisDesktop\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
+          $zoom = $null
+          # 令牌按端口过滤：上一步那个实例的令牌还留在文件里。
+          $access = $null
+          for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Seconds 2
+            $p.Refresh(); if ($p.HasExited) { break }
+            try {
+              $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
+              if ($access.token -and $access.port -eq 8803) { break }
+            } catch { }
+          }
+          $auth = @{ 'x-minis-desktop-access' = $access.token }
+          for ($i = 0; $i -lt 15; $i++) {
+            try {
+              $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Headers $auth "http://127.0.0.1:8803/api/desktop/zoom").Content
+              if ($zoom) { break }
+            } catch { }
+            Start-Sleep -Seconds 1
+          }
+          $p.Refresh()
+          if ($zoom) {
+            Write-Host "::notice::windowed zoom capability: $zoom"
+            try {
+              $set = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Method Post `
+                      -ContentType 'application/json' -Body '{"factor":1.0}' -Headers $auth `
+                      "http://127.0.0.1:8803/api/desktop/zoom").Content
+              Write-Host "::notice::native zoom set: $set"
+              if ($set.StartsWith('{"ok":true')) { Write-Host "native zoom is usable on Windows" }
+              else { Write-Host "::warning::native zoom NOT usable — see reason above" }
+            } catch { Write-Host "::warning::native zoom set request failed: $_" }
+          } elseif ($p.HasExited) {
+            Write-Host "::error::windowed exe exited early (exit code $($p.ExitCode)) — 窗口模式崩了，别当成 runner 没桌面"
+            $log = Join-Path $env:USERPROFILE 'openminis\logs\startup.log'
+            if (Test-Path $log) { Write-Host "--- startup.log tail"; Get-Content $log -Tail 25 }
+          } else {
+            Write-Host "::warning::windowed exe is alive but never served HTTP within 50s"
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          exit 0
+
       - name: Package the folder
         shell: pwsh
         run: |
           Compress-Archive -Path dist\OpenMinisDesktop -DestinationPath dist\OpenMinisDesktop-portable.zip
           Get-Item dist\OpenMinisDesktop-portable.zip | Select-Object Name, Length
+
+      - name: Build the update manifest (latest.json)
+        shell: pwsh
+        # 应用内"检查更新"就是去 releases/latest/download/latest.json 拉这个文件
+        # （固定地址，不吃 GitHub API 限流）。壳指纹在这里进清单。
+        run: |
+          $tag = "${{ github.ref_name }}"
+          python scripts/make_latest.py --dist dist --tag $tag --notes "见 release 说明"
+          if ($LASTEXITCODE -ne 0) { Write-Error "latest.json build failed"; exit 1 }
+          Get-Content dist\latest.json
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -405,6 +224,7 @@ jobs:
           path: |
             dist/OpenMinisDesktop-portable.zip
             dist/OpenMinisDesktop-update.zip
+            dist/latest.json
           if-no-files-found: error
           retention-days: 30
 
@@ -415,3 +235,29 @@ jobs:
           files: |
             dist/OpenMinisDesktop-portable.zip
             dist/OpenMinisDesktop-update.zip
+            dist/latest.json
+          generate_release_notes: true
+          body: |
+            ## OpenMinis Desktop ${{ github.ref_name }}
+
+            Windows 桌面版（原生窗口，基于 OpenMinis 内核）。
+
+            下载 `OpenMinisDesktop-portable.zip`，解压后双击文件夹里的
+            `OpenMinisDesktop.exe`。无需安装 Python 或 Node。
+            首次启动会在 `%USERPROFILE%\openminis`（即 `C:\Users\<你的用户名>\openminis`）建数据目录，然后在设置里
+            配置模型服务（OpenAI / Anthropic / 任意 OpenAI 兼容网关）。
+
+
+            - 快捷键：`Ctrl+K` 命令面板、`Ctrl+\`` 终端、`Ctrl+B` 左侧面板、`Ctrl+N` 新会话、
+              `Ctrl+O` 打开文件夹、`Ctrl+,` 设置、`Esc` 关闭当前文件
+            - 界面：菜单栏（文件/视图/帮助）、活动栏、可多标签看代码（同时最多 10 个）、
+              文件树可指向任意目录
+            - 首次运行若提示缺少 WebView2，装一次微软的
+              [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10 较老版本可能需要）
+            - 想知道启动那几秒花在哪：`%USERPROFILE%\openminis\logs\startup.log`
+              每次启动写一行（解包 / 内核 / 后端 / 窗口各自的累计毫秒）。
+              设环境变量 `OPENMINIS_NO_SPLASH=1` 可以退回旧的启动顺序，用来对比。
+
+            **更新**：装好之后在界面里「设置 → 关于」点「检查更新」就行 —— 内核与界面的
+            更新只有 2~3 MB，装完点一下重启生效，不用重下整包。
+

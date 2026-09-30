@@ -604,6 +604,22 @@
         <h2>关于</h2>
         <p class="pane-sub">运行环境与诊断信息。</p>
         <div class="settings-block">
+          <h3>更新</h3>
+          <p class="pane-sub">
+            从发布页取最新版本。内核与界面的更新只有几 MB，装完重启生效。
+          </p>
+          <div class="kv"><span class="kv-k">当前版本</span><span class="kv-v" id="updateCurrent">—</span></div>
+          <div class="kv"><span class="kv-k">可用版本</span><span class="kv-v" id="updateLatest">—</span></div>
+          <div class="kv"><span class="kv-k">状态</span><span class="kv-v" id="updateStatus">还没检查</span></div>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" id="btnCheckUpdate">
+              <wa-icon library="om" name="refresh-cw" class="ic"></wa-icon>检查更新
+            </button>
+            <button class="btn primary" id="btnApplyUpdate" hidden>下载并安装</button>
+            <button class="btn primary" id="btnRestartUpdate" hidden>重启生效</button>
+          </div>
+        </div>
+        <div class="settings-block">
           <h3>环境</h3>
           <div id="aboutList"><div class="empty-note">加载中…</div></div>
         </div>

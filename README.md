@@ -62,7 +62,6 @@ OpenAI 兼容网关的 API Key，就能开始对话。
 git clone <this repo>
 cd OpenMinisDesktop
 build-desktop.bat            rem onedir  -> dist\OpenMinisDesktop\OpenMinisDesktop.exe
-build-desktop.bat onefile    rem onefile -> dist\OpenMinisDesktop.exe
 ```
 
 需要 Windows + Python 3.11+，脚本自己建 `.venv` 并装依赖。
@@ -95,7 +94,7 @@ python scripts/smoke_test.py
 |---|---|---|
 | 窗口外壳 | `desktop/` | pywebview 原生窗口（Windows 走 WebView2），uvicorn 跑在后台线程，单实例复用，窗口关闭即停后端 |
 | 桌面界面 | `web/desktop/` | 纯 HTML/CSS/JS，**无构建步骤**，IDE 风格三栏 + 终端抽屉 + 命令面板 |
-| 打包 | `packaging/`, `.github/workflows/` | PyInstaller 单文件 exe，CI 在 windows-latest 上构建并验证 |
+| 打包 | `packaging/`, `.github/workflows/` | PyInstaller **便携版（onedir）** + 可覆盖载荷 `payload/`，CI 在 windows-latest 上构建并验证 |
 
 ### 为什么用运行时挂载而不是改内核
 

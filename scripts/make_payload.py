@@ -130,7 +130,8 @@ def _tree_digest(root: Path) -> tuple[str, int, int]:
 def build(out: Path, *, zip_path: Path | None = None) -> dict:
     import openminis  # noqa: PLC0415
 
-    from desktop import __version__ as shell_version  # noqa: PLC0415
+    from desktop import __version__ as app_version  # noqa: PLC0415
+    from desktop.build_id import SHELL_ID  # noqa: PLC0415
 
     if out.exists():
         shutil.rmtree(out)
@@ -148,8 +149,11 @@ def build(out: Path, *, zip_path: Path | None = None) -> dict:
     manifest = {
         "format": 1,
         "kernelVersion": openminis.__version__,
-        #: 载荷只对**同一个壳**有效 —— 壳在 exe 里，换壳要重装。更新器拿它比对。
-        "shellVersion": shell_version,
+        "appVersion": app_version,
+        #: **壳指纹** —— 载荷能不能用只取决于它。不能用版本号：版本号每个 release
+        #: 都涨，拿它当判据会让每次更新都退化成"下整包"（第一版就是这么错的）。
+        #: 它由 scripts/shell_id.py 从壳源码算出来，壳没改就不变。
+        "shellId": SHELL_ID,
         "python": f"{sys.version_info.major}.{sys.version_info.minor}",
         "builtAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "files": count,
@@ -189,8 +193,8 @@ def main() -> int:
     size = sum(p.stat().st_size for p in _iter_files(args.out))
     print(f"载荷目录 {args.out}")
     print(f"  {manifest['files']} 个文件，{size / 1048576:.2f} MB（未压缩）")
-    print(f"  kernel {manifest['kernelVersion']} / shell {manifest['shellVersion']}"
-          f" / py{manifest['python']}")
+    print(f"  kernel {manifest['kernelVersion']} / app {manifest['appVersion']}"
+          f" / shellId {manifest['shellId']} / py{manifest['python']}")
     print(f"  treeSha256 {manifest['treeSha256'][:16]}…")
     if args.zip:
         print(f"  更新包 {args.zip}（{args.zip.stat().st_size / 1048576:.2f} MB）")

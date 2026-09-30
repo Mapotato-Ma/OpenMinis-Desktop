@@ -209,6 +209,15 @@ def run_window(
         title=title, url=url, width=width, height=height, app_root=app_root
     )
 
+    # 应用内更新装完之后要重启才生效 —— 把"怎么正常退出"交给 api 层。
+    # 另一条启动路径（窗口先行）在 launcher 里自己注册。
+    try:
+        from .ui_mount import set_restart_hook  # noqa: PLC0415
+
+        set_restart_hook(window.destroy)
+    except Exception:  # pragma: no cover - 注册不上只影响"更新后自动重启"
+        logger.debug("could not register the restart hook", exc_info=True)
+
     if on_closed is not None:
         window.events.closed += on_closed
 

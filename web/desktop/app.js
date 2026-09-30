@@ -2394,6 +2394,9 @@ function wire() {
   $('btnResetSoul').addEventListener('click', resetSoul);
   { const b = $('btnDownloadLogs'); if (b) b.addEventListener('click', downloadLogs); }
   { const b = $('btnClearData'); if (b) b.addEventListener('click', clearAllData); }
+  { const b = $('btnCheckUpdate'); if (b) b.addEventListener('click', checkUpdate); }
+  { const b = $('btnApplyUpdate'); if (b) b.addEventListener('click', applyUpdate); }
+  { const b = $('btnRestartUpdate'); if (b) b.addEventListener('click', restartForUpdate); }
   $('btnSaveAgent').addEventListener('click', async () => {
     readAgentForm();
     await saveSettings();
@@ -3000,7 +3003,7 @@ function switchSettingsPane(name) {
   if (name === 'knowledge' && !settings.knowledgeLoaded) { settings.knowledgeLoaded = true; loadKnowledge(); }
   if (name === 'marketplace' && !settings.marketplaceLoaded) { settings.marketplaceLoaded = true; loadMarketplace(); }
   if (name === 'usage') loadUsage();
-  if (name === 'about') loadAbout();
+  if (name === 'about') { loadAbout(); loadUpdate(); }
   if (name === 'interface') renderInterfacePane();
 }
 
@@ -3848,6 +3851,95 @@ async function loadAbout() {
     const dk = $('logDirKernel'); if (dk) dk.textContent = w.kernel || '—';
     const dd = $('logDirDesktop'); if (dd) dd.textContent = w.desktop || '—';
   } catch { /* 拿不到目录不影响下载 */ }
+}
+
+/* ── 应用内更新（对标 CC Switch 那套：拉清单 → 下载 → 换载荷 → 重启）───────── */
+
+const UPDATE_LABEL = { idle: '还没检查', checking: '正在检查…', downloading: '正在下载…',
+  installing: '正在安装…', ready: '已就绪，重启生效', failed: '失败',
+  done: '已是最新', manual: '需要整包装' };
+
+function updateHint(t) {
+  const el2 = $('updateStatus');
+  if (!el2) return;
+  let text = UPDATE_LABEL[t.phase] || t.phase;
+  if (t.phase === 'downloading' && t.total) {
+    text += ` ${Math.round((t.done / t.total) * 100)}%（${(t.done / 1048576).toFixed(1)} / ${(t.total / 1048576).toFixed(1)} MB）`;
+  }
+  if (t.error) text += '：' + t.error;
+  if (t.note) text += '：' + t.note;
+  el2.textContent = text;
+}
+
+async function loadUpdate() {
+  try { if (!state.info) state.info = await api('/desktop/info'); } catch { /* 拿不到就显示 — */ }
+  const cur = $('updateCurrent');
+  if (cur) cur.textContent = state.info && state.info.uiVersion ? 'v' + state.info.uiVersion : '—';
+  try { updateHint(await api('/desktop/update/status')); } catch { /* 忽略 */ }
+}
+
+async function checkUpdate() {
+  const btn = $('btnCheckUpdate');
+  if (btn) btn.setAttribute('loading', '');
+  updateHint({ phase: 'checking' });
+  try {
+    const r = await api('/desktop/update');
+    if (r.ok === false) { updateHint({ phase: 'failed', error: r.error }); return; }
+    const latest = $('updateLatest');
+    if (latest) latest.textContent = r.available ? 'v' + r.latest : '已是最新';
+    updateHint({ phase: r.available ? 'idle' : 'done', note: r.available ? r.reason : '' });
+    const apply = $('btnApplyUpdate');
+    if (apply) {
+      apply.hidden = !r.available;
+      apply.textContent = r.kind === 'full'
+        ? `下载整包（${(r.bytes / 1048576).toFixed(1)} MB）`
+        : `下载并安装（${(r.bytes / 1048576).toFixed(1)} MB）`;
+    }
+    const restart = $('btnRestartUpdate');
+    if (restart) restart.hidden = true;
+  } catch (e) {
+    updateHint({ phase: 'failed', error: e.message });
+  } finally {
+    if (btn) btn.removeAttribute('loading');
+  }
+}
+
+async function applyUpdate() {
+  const btn = $('btnApplyUpdate');
+  if (btn) btn.setAttribute('loading', '');
+  try {
+    const r = await api('/desktop/update', { method: 'POST' });
+    if (r.ok === false) throw new Error(r.error || '无法开始更新');
+    // 更新在后端后台跑，这里轮询到终态为止。
+    for (let i = 0; i < 600; i++) {
+      await new Promise((done) => setTimeout(done, 500));
+      const t = await api('/desktop/update/status');
+      updateHint(t);
+      if (t.phase === 'ready') {
+        if (btn) btn.hidden = true;
+        const restart = $('btnRestartUpdate');
+        if (restart) restart.hidden = false;
+        return;
+      }
+      if (t.phase === 'failed' || t.phase === 'done' || t.phase === 'manual') return;
+    }
+  } catch (e) {
+    updateHint({ phase: 'failed', error: e.message });
+  } finally {
+    if (btn) btn.removeAttribute('loading');
+  }
+}
+
+async function restartForUpdate() {
+  const btn = $('btnRestartUpdate');
+  if (btn) btn.setAttribute('loading', '');
+  try {
+    await api('/desktop/update/restart', { method: 'POST' });
+    updateHint({ phase: 'installing', note: '正在重启，窗口会自动回来' });
+  } catch (e) {
+    updateHint({ phase: 'failed', error: e.message });
+    if (btn) btn.removeAttribute('loading');
+  }
 }
 
 /** 下载全部日志（内核 + 桌面壳）打成一个 zip。 */
