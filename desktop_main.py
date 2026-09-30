@@ -18,6 +18,13 @@ for _p in (str(_ROOT), str(_ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# 可覆盖载荷（打包版里是 exe 旁边的 ``payload/``）要排在 **sys.path 最前面**：
+# 它压过 exe 里冻住的那一份内核，这就是"更新只换几 MB"的机制。必须在任何
+# ``openminis`` / ``desktop`` 业务模块之前 —— 详见 desktop/paths.py。
+from desktop.paths import install_payload_path  # noqa: E402
+
+_PAYLOAD = install_payload_path()
+
 from desktop.stdio import ensure_console_streams  # noqa: E402
 
 # 最早的一次打点：此刻还没 import 任何重型依赖。它和"进程创建时刻"的差就是

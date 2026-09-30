@@ -39,7 +39,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.4.4"
+DESKTOP_UI_VERSION = "0.4.5"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -86,8 +86,9 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
     )
 
     async def _info(request: Any) -> JSONResponse:  # noqa: ARG001
-        from .paths import app_root, data_root, is_frozen  # noqa: PLC0415
+        from .paths import app_root, data_root, is_frozen, module_origin, payload_root  # noqa: PLC0415
 
+        payload = payload_root()
         info: dict[str, Any] = {
             "desktop": True,
             "uiActive": ui_active,
@@ -97,6 +98,11 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             "appRoot": str(app_root()),
             "dataRoot": str(data_root()),
             "assetsDir": str(desktop_dir) if desktop_dir else None,
+            # 可覆盖载荷（"更新只换几 MB"的落脚点）。这三行是给**排查**用的：
+            # 载荷没生效时表现是"改的东西没反应"，没有它们只能靠猜。
+            "payloadDir": str(payload) if payload else None,
+            "kernelFrom": module_origin("openminis"),
+            "desktopFrom": module_origin("desktop"),
         }
         try:
             from openminis.core.context import app_context  # noqa: PLC0415

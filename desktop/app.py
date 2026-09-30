@@ -33,6 +33,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from desktop import __version__, paths  # noqa: E402
+
+# 与 desktop_main.py 同一件事（直接跑这个文件时引导脚本不在场）。幂等。
+paths.install_payload_path()
+
 from desktop import startup_trace as trace  # noqa: E402
 from desktop.launcher import (  # noqa: E402
     BootPlan,

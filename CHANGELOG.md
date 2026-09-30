@@ -1,5 +1,76 @@
 # 变更日志
 
+## v0.4.5 — 架构第 2 步：把「运行时」与「载荷」拆开，更新从 37.9 MB 变成 2.3 MB（2026-09-30）
+
+### 问题：改内核一行 = 重发整个 37.9 MB
+
+内核的 `.pyc` 是被**打进 exe 里**的（CI 日志实证：`Building PYZ (ZlibArchive)`
+→ `Building PKG (CArchive)` → `EXE`）。所以哪怕只改一行内核代码，也要重新打包
+那个 37.9 MB 的 exe。
+
+而天天变的东西其实很小：
+
+| 会变的部分 | 源码 | 压缩后 |
+|---|---|---|
+| `src/openminis`（内核，278 个 .py） | 2.8 MB | |
+| `web/desktop`（界面，其中 vendor 1.6 MB） | 1.9 MB | |
+| **合计** | **5.0 MB** | **~1.7 MB** |
+
+占大头的解释器 + 依赖（~30 MB）基本不动。
+
+### 修法：exe 旁边放一个可整体替换的 `payload/`
+
+`desktop/paths.py` 新增 `payload_root()` / `install_payload_path()`：把 exe 旁边的
+`payload/` 插到 `sys.path` **最前面**，于是它盖过 bundle 里冻住的那一份内核与界面。
+引导脚本 `desktop_main.py` 与 `desktop/app.py` 在 import 任何业务模块**之前**调用它。
+
+**刻意的边界：壳与运行时留在 exe 里，只有内核与界面走载荷。** 因为壳里有引导模块
+（`paths` / `stdio` / `startup_trace`）—— 能决定"去哪儿找载荷"的代码不能由载荷自己
+提供。半个桌面包能从载荷覆盖、半个不能，那种版本错配比"壳改完要重发 exe"难查得多。
+而且**没有 `payload/` 时一切照旧**（落回 bundle），所以老安装包不会被这个机制弄坏。
+
+新增 `scripts/make_payload.py` 组装载荷，产出：
+
+* `payload/` 目录（放在 exe 旁边）—— 实测 **845 个文件 / 5.59 MB**；
+* `OpenMinisDesktop-update.zip` —— **2.33 MB**，对照整包 **37.9 MB**（**16 倍**）；
+* `payload.json` 清单：`kernelVersion` / `shellVersion` / `python` / 文件数 /
+  `treeSha256`。更新器拿 `shellVersion` 比对 —— 壳换了就必须走整包装，没换就能
+  只换载荷。
+
+### 两个实测出来的关键取舍
+
+1. **发源码 + 预编译字节码，而不是只发一种。** 只发源码时，更新后**第一次**启动
+   要多花约 **0.19 秒**现编译（实测：冷 1.00s / 热 0.81s），而且只在安装目录**可写**
+   时才缓存得下来 —— Program Files 那种只读安装就每次启动都付。
+2. **必须用 `--invalidation-mode checked-hash`（PEP 552）编译。** 默认的 mtime
+   校验模式下，.pyc 打包再解压（时间戳全变）就**失效重编译**；checked-hash 按源码
+   **哈希**校验，实测解压后原样复用，而且**仍然能发现源码内容变了** —— 万一只换了
+   一半文件，不会静默跑旧字节码。
+
+   （顺带记一笔坑：别去读 .pyc 头里的 flag 位判断模式 —— 本机 3.12 上 checked-hash
+   编出来的 flag 读出来像 unchecked。**以行为为准**。我差点照 flag 编号把它"修"错。）
+
+### 可观察性：更新到底生效没有
+
+`/api/desktop/info` 多了三个字段：`payloadDir` / `kernelFrom` / `desktopFrom`。
+载荷没被用上时表现是"改的东西没反应"，没有这几个字段只能靠猜 —— 这个项目已经吃过
+一次"WebView 跑旧界面"的亏。
+
+### 护栏（都做过反向自检：撤回修复必红）
+
+- `desktop/tests/test_payload.py` —— 8 项。核心那条走**子进程**验 import 优先级
+  （进程内 `sys.modules` 已缓存 `openminis`，改 `sys.path` 是换不掉的，那正是这个
+  机制最容易"看起来对了其实没生效"的地方）：伪造一个 PyInstaller 布局，断言内核与
+  界面**都从载荷加载**；没有载荷时断言**不是**从载荷加载、且**一行都不插手**。
+  另有一条钉住 `make_payload.py` 的载荷清单里**不含 `desktop/`**。
+- CI（portable 任务）加两步：构建载荷 + **断言 `kernelFrom` 指向 payload\\**
+  （载荷漏了或用不上必须让流水线红，不能等用户报"更新后没反应"）。
+
+### 验证
+
+服务器 `python scripts/check.py` 四步全绿：**901 passed / 2 skipped**。
+版本号三处同步 0.4.5；NOTICE 偏离表不动（本次仍未改 `src/`）。
+
 ## v0.4.4 — 本地服务加访问闸门（桌面壳不该把本机 agent 交给任意网页）（2026-09-30）
 
 这是一次**架构层面**的修补，不是补个参数。

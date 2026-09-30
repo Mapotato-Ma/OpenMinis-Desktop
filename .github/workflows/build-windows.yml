@@ -324,6 +324,39 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/startup_probe.ps1 -ExePath dist\OpenMinisDesktop\OpenMinisDesktop.exe -Port 8802
 
+      - name: Build the update payload (payload/)
+        shell: pwsh
+        # "更新只换几 MB"的那一半：把内核与界面单独装成一个可整体替换的目录。
+        # 它排在 sys.path 最前面，所以盖过 exe 里冻住的那一份 —— 已经装好的实例
+        # 更新时只需要换这一个目录（实测 2.3MB），不用重发 37.9MB 的整包。
+        run: |
+          python scripts/make_payload.py --out dist\OpenMinisDesktop\payload --zip dist\OpenMinisDesktop-update.zip
+          if ($LASTEXITCODE -ne 0) { Write-Error "payload build failed"; exit 1 }
+
+      - name: Verify the payload actually shadows the bundled kernel
+        shell: pwsh
+        # 没有这一步，"载荷在不在、用没用上"就只能靠用户报"更新后没反应"。
+        # 断言的是**加载来源**：内核必须来自 payload\，不是 exe 里冻住的那份。
+        run: |
+          $p = Start-Process -FilePath dist\OpenMinisDesktop\OpenMinisDesktop.exe -ArgumentList "--no-window","--port","8804" -PassThru
+          $access = $null
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Seconds 2
+            $p.Refresh(); if ($p.HasExited) { break }
+            try { $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json; if ($access.token) { break } } catch { }
+          }
+          $auth = @{ 'x-minis-desktop-access' = $access.token }
+          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Headers $auth "http://127.0.0.1:8804/api/desktop/info").Content | ConvertFrom-Json
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "kernelFrom: $($info.kernelFrom)"
+          Write-Host "payloadDir: $($info.payloadDir)"
+          if (-not $info.payloadDir) { Write-Error "payload dir missing from the package"; exit 1 }
+          if ($info.kernelFrom -notlike "*payload*") {
+            Write-Error "payload is NOT shadowing the bundled kernel (kernelFrom=$($info.kernelFrom))"
+            exit 1
+          }
+          Write-Host "payload overlay ok: kernel loads from the payload dir"
+
       - name: Package the folder
         shell: pwsh
         run: |
@@ -334,7 +367,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OpenMinisDesktop-windows-portable
-          path: dist/OpenMinisDesktop-portable.zip
+          path: |
+            dist/OpenMinisDesktop-portable.zip
+            dist/OpenMinisDesktop-update.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -342,4 +377,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/OpenMinisDesktop-portable.zip
+          files: |
+            dist/OpenMinisDesktop-portable.zip
+            dist/OpenMinisDesktop-update.zip

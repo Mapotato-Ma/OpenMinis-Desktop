@@ -69,6 +69,17 @@ if /i "%~1"=="onefile" (
 
 "%PYTHON_PATH%" -m PyInstaller --noconfirm --clean packaging\OpenMinisDesktop.spec || goto :fail
 
+rem --- 可覆盖载荷 ---------------------------------------------------------
+rem 内核与界面单独装成一个可以整体替换的目录，排在 sys.path 最前面（见
+rem desktop\paths.py 的 payload_root）。已经装好的实例更新时只需要换它。
+if /i "%~1"=="onefile" (
+    set PAYLOAD_OUT=dist\payload
+) else (
+    set PAYLOAD_OUT=dist\OpenMinisDesktop\payload
+)
+echo [build] assembling payload -> !PAYLOAD_OUT!
+"%PYTHON_PATH%" scripts\make_payload.py --out "!PAYLOAD_OUT!" --zip dist\OpenMinisDesktop-update.zip || goto :fail
+
 echo.
 echo ============================================================
 echo  Build finished.
