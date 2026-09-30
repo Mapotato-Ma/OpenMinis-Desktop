@@ -421,6 +421,22 @@ class AgentRuntime:
             assistant_parts: list = []
             text_joined = "".join(round_text)
             if text_joined:
+                # PORT-FIX(desktop diagnostics): flag when a turn's visible text
+                # substantially repeats an earlier turn's — the cross-turn form
+                # of the "输出一直重复一大段" report (loop re-emitting the answer).
+                try:
+                    from ..core.repeat_diag import turn_repeat_ratio
+
+                    ratio = turn_repeat_ratio(text_joined, final_text)
+                    if ratio >= 0.6:
+                        logger.warning(
+                            "[repeat-diag] turn=%s repeats a previous turn "
+                            "(overlap=%.2f, chars=%d). session=%s. Head: %r",
+                            turn, ratio, len(text_joined), session_id,
+                            text_joined.strip()[:120],
+                        )
+                except Exception:  # pragma: no cover - diagnostics never break a turn
+                    logger.debug("repeat-diag turn check failed", exc_info=True)
                 assistant_parts.append(Text(text_joined))
                 final_text.append(text_joined)
             for tu in round_tool_uses:

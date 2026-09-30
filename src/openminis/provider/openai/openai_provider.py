@@ -312,6 +312,15 @@ class OpenAIProvider(LLMProvider):
         finish_reason: Optional[str] = None
         sent_finished = False
         think_parser = ThinkPrefixStreamParser()
+        # PORT-FIX(desktop diagnostics): watch the visible stream for a runaway
+        # repeat (the "输出一直重复一大段" field report). Logs once per response.
+        from ..core.repeat_diag import StreamRepeatWatch
+
+        repeat_watch = StreamRepeatWatch(label=f"openai-stream[{self.model.id}]")
+        # count raw SSE frames + visible chars so the log shows whether a relay
+        # is double-sending deltas vs. the model itself looping.
+        _sse_frames = 0
+        _visible_chars = 0
 
         try:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
@@ -335,6 +344,8 @@ class OpenAIProvider(LLMProvider):
                             reasoning_accum.append(seg.thinking)
                             yield LLMStreamChunk.ThinkingDelta(seg.thinking)
                         if seg.visible:
+                            _visible_chars += len(seg.visible)
+                            repeat_watch.feed(seg.visible)
                             yield LLMStreamChunk.Text(seg.visible)
                         for c in await self._tail_chunks(tool_accs, reasoning_accum, finish_reason):
                             yield c
@@ -347,6 +358,7 @@ class OpenAIProvider(LLMProvider):
                         logger.warning("OpenAIProvider: SSE JSON parse failed: %s payload=%s",
                                        "", payload[:300])
                         continue
+                    _sse_frames += 1
 
                     choices = event.get("choices")
                     if choices:
@@ -376,6 +388,8 @@ class OpenAIProvider(LLMProvider):
                                 reasoning_accum.append(seg.thinking)
                                 yield LLMStreamChunk.ThinkingDelta(seg.thinking)
                             if seg.visible:
+                                _visible_chars += len(seg.visible)
+                                repeat_watch.feed(seg.visible)
                                 yield LLMStreamChunk.Text(seg.visible)
 
                         # tool calls keyed by index
@@ -414,9 +428,22 @@ class OpenAIProvider(LLMProvider):
                     reasoning_accum.append(seg.thinking)
                     yield LLMStreamChunk.ThinkingDelta(seg.thinking)
                 if seg.visible:
+                    _visible_chars += len(seg.visible)
+                    repeat_watch.feed(seg.visible)
                     yield LLMStreamChunk.Text(seg.visible)
                 for c in await self._tail_chunks(tool_accs, reasoning_accum, finish_reason):
                     yield c
+
+            # PORT-FIX(desktop diagnostics): one line per completed stream so a
+            # user's log shows the shape of every response — frames vs visible
+            # chars vs whether a big repeat fired. `sent_finished` distinguishes
+            # a clean [DONE] from a dropped connection (no sentinel).
+            logger.info(
+                "[repeat-diag] openai stream done: model=%s sse_frames=%d "
+                "visible_chars=%d finish_reason=%s done_sentinel=%s repeat_fired=%s",
+                self.model.id, _sse_frames, _visible_chars, finish_reason,
+                sent_finished, repeat_watch.fired(),
+            )
 
         except httpx.HTTPError as exc:
             raise self._map_error(exc) from exc

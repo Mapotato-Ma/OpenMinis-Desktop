@@ -2329,6 +2329,8 @@ function wire() {
   $('btnSaveSoul').addEventListener('click', saveSoul);
   $('btnReloadSoul').addEventListener('click', loadSoul);
   $('btnResetSoul').addEventListener('click', resetSoul);
+  { const b = $('btnDownloadLogs'); if (b) b.addEventListener('click', downloadLogs); }
+  { const b = $('btnClearData'); if (b) b.addEventListener('click', clearAllData); }
   $('btnSaveAgent').addEventListener('click', async () => {
     readAgentForm();
     await saveSettings();
@@ -3776,6 +3778,58 @@ async function loadAbout() {
     r.appendChild(el('span', 'kv-k', k));
     r.appendChild(el('span', 'kv-v', v));
     box.appendChild(r);
+  }
+  // 日志目录：告诉用户日志写在哪，并接上「下载日志压缩包」按钮。
+  try {
+    const w = await api('/desktop/logs/where');
+    const dk = $('logDirKernel'); if (dk) dk.textContent = w.kernel || '—';
+    const dd = $('logDirDesktop'); if (dd) dd.textContent = w.desktop || '—';
+  } catch { /* 拿不到目录不影响下载 */ }
+}
+
+/** 下载全部日志（内核 + 桌面壳）打成一个 zip。 */
+async function downloadLogs() {
+  const btn = $('btnDownloadLogs');
+  if (btn) btn.setAttribute('loading', '');
+  try {
+    const res = await fetch(API + '/desktop/logs');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'openminis-logs.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast('日志已开始下载');
+  } catch (e) {
+    toast('下载日志失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.removeAttribute('loading');
+  }
+}
+
+/** 一键清空对话数据（保留供应商与一切设置）。 */
+async function clearAllData() {
+  const ok = await confirmDialog(
+    '清空所有对话数据？将删除全部会话、消息与分组，用于排除历史数据影响。'
+    + '供应商、模型、人格与其它设置都会保留。此操作不可撤销。',
+    { okText: '清空', danger: true },
+  );
+  if (!ok) return;
+  const btn = $('btnClearData');
+  if (btn) btn.setAttribute('loading', '');
+  try {
+    const r = await api('/desktop/clear-data', { method: 'POST' });
+    const c = (r && r.cleared) || {};
+    toast(`已清空 ${c.sessions || 0} 个会话 / ${c.messages || 0} 条消息`);
+    // 会话列表与当前会话都要归零，否则界面还挂着已删除的会话。
+    state.sessionId = null;
+    if (typeof loadSessions === 'function') await loadSessions();
+    if (typeof newSession === 'function') newSession();
+  } catch (e) {
+    toast('清空失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.removeAttribute('loading');
   }
 }
 

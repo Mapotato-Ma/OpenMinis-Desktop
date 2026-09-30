@@ -39,7 +39,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.4.0"
+DESKTOP_UI_VERSION = "0.4.1"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -123,6 +123,91 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
 
         return JSONResponse(await chat_readiness())
 
+    async def _clear_data(request: Any) -> JSONResponse:  # noqa: ARG001
+        """一键清空对话数据（会话/消息/分组/压缩标记），保留供应商等一切设置。
+
+        排除「历史数据把模型带偏」这类怀疑时用：只动对话表，SettingsStore 里的
+        供应商、模型、人设、记忆一律不碰。
+        """
+        from openminis.server import chat_store  # noqa: PLC0415
+
+        try:
+            counts = await chat_store.clear_all_chat_data()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("clear-data failed")
+            return JSONResponse(
+                {"ok": False, "error": str(exc)}, status_code=500, headers=_NO_STORE
+            )
+        logger.info("desktop clear-data: %s", counts)
+        return JSONResponse({"ok": True, "cleared": counts}, headers=_NO_STORE)
+
+    async def _logs_bundle(request: Any) -> Any:  # noqa: ARG001
+        """打包全部日志成一个 zip 供下载 —— 排障时用户把它发回来即可。
+
+        收集两处：内核 ``cache_dir/logs``（``minis.log*``，含本次新增的
+        ``[repeat-diag]`` 行）与桌面壳 ``data_root/logs``（``desktop.log``）。
+        """
+        import io  # noqa: PLC0415
+        import zipfile  # noqa: PLC0415
+
+        from starlette.responses import Response  # noqa: PLC0415
+
+        from .paths import data_root  # noqa: PLC0415
+
+        roots: list[Path] = []
+        try:
+            from openminis.core.context import app_context  # noqa: PLC0415
+
+            roots.append(app_context().cache_dir / "logs")
+        except Exception:  # pragma: no cover
+            pass
+        roots.append(data_root() / "logs")
+
+        buf = io.BytesIO()
+        added = 0
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            seen: set[str] = set()
+            for root in roots:
+                if not root.is_dir():
+                    continue
+                for p in sorted(root.glob("*")):
+                    if not p.is_file():
+                        continue
+                    arc = f"{root.name}/{p.name}"
+                    if arc in seen:
+                        continue
+                    seen.add(arc)
+                    try:
+                        zf.write(p, arcname=arc)
+                        added += 1
+                    except OSError:
+                        continue
+            if added == 0:
+                zf.writestr("README.txt", "还没有任何日志文件。跑一轮对话后再下载。\n")
+        data = buf.getvalue()
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="openminis-logs.zip"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    async def _logs_where(request: Any) -> JSONResponse:  # noqa: ARG001
+        """日志到底写在哪个目录 —— 界面上直接展示给用户。"""
+        from .paths import data_root  # noqa: PLC0415
+
+        out: dict[str, Any] = {}
+        try:
+            from openminis.core.context import app_context  # noqa: PLC0415
+
+            out["kernel"] = str(app_context().cache_dir / "logs")
+        except Exception:  # pragma: no cover
+            out["kernel"] = None
+        out["desktop"] = str(data_root() / "logs")
+        return JSONResponse(out, headers=_NO_STORE)
+
     # ── 从 cc-switch 导入供应商 ──────────────────────────────────────────
     # 两条路由必须紧邻注册（GET 列清单、POST 取明文），并进 desktop_routes() 的
     # 顺序契约测试。清单里只有掩码；明文只在用户显式点「导入」的那一次返回。
@@ -184,6 +269,12 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             # 配置，所以界面上点「测试连接」会先保存再测 —— 测的和看到的是同一份。
             Route("/api/desktop/test-provider", _test_provider, methods=["POST"], include_in_schema=False),
             Route("/api/desktop/chat-readiness", _readiness, methods=["GET"], include_in_schema=False),
+            # /api/desktop/clear-data —— 一键清空对话数据（保留供应商/设置）。
+            # 排除「历史把模型带偏」的嫌疑用，只动对话表。
+            Route("/api/desktop/clear-data", _clear_data, methods=["POST"], include_in_schema=False),
+            # /api/desktop/logs —— 打包全部日志下载 / 告知日志目录。排障回路。
+            Route("/api/desktop/logs", _logs_bundle, methods=["GET"], include_in_schema=False),
+            Route("/api/desktop/logs/where", _logs_where, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/import/cc-switch", _import_scan, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/import/cc-switch", _import_entries, methods=["POST"], include_in_schema=False),
             # /api/desktop/zoom —— 缩放落在哪儿。WebView2 的 ZoomFactor 是引擎级

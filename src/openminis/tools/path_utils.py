@@ -32,6 +32,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "workspace_root",
+    "session_workspace_root",
     "resolve_workspace_path",
     "readonly_roots",
     "PREFIXES",
@@ -248,9 +249,42 @@ def workspace_root() -> Path:
     return app_context().external_files_dir
 
 
-def resolve_workspace_path(path: str | None) -> Path | None:
-    """Resolve ``path`` against the workspace root, or ``None`` if refused."""
-    root = workspace_root().resolve()
+def session_workspace_root(session_id: str | None) -> Path:
+    """The root a file-class tool should resolve against for this session.
+
+    A filed session (one belonging to a workspace bound to a real folder) has
+    its sandbox root registered on the shared coordinator by the server (see
+    ``main.py``: ``set_session_cwd(f"db-{sid}", ws_dir)``). The shell already
+    boots inside that directory; before this hook the file tools
+    (``ls``/``search_files``/``file_*``) still resolved against the **global**
+    ``external_files_dir``, so a filed session's shell saw the project while
+    ``ls``/``file_read`` saw an empty ``external_files_dir/<sid>`` — the "agent
+    can't see the workspace files" bug.
+
+    Falls back to the global root when the session isn't filed, or when the
+    coordinator can't be reached (tests / CLI without a live server).
+    """
+    if session_id:
+        try:
+            from .shell_execute_tool import get_coordinator
+
+            override = get_coordinator().sandbox_root_for(session_id)
+            if override is not None:
+                return override
+        except Exception:  # pragma: no cover - never let this break a tool call
+            logger.debug("session_workspace_root lookup failed", exc_info=True)
+    return app_context().external_files_dir
+
+
+def resolve_workspace_path(
+    path: str | None, session_id: str | None = None
+) -> Path | None:
+    """Resolve ``path`` against the workspace root, or ``None`` if refused.
+
+    When ``session_id`` names a filed session, resolution is rooted at that
+    session's bound workspace directory instead of the global default.
+    """
+    root = session_workspace_root(session_id).resolve()
     candidate = (path or "").strip()
     if not candidate or candidate in {".", "./"}:
         return root

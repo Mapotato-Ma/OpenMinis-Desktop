@@ -229,7 +229,26 @@ def _resolve_session_host_path(session_id: str, path: str) -> Path | None:
     relative path) resolves inside ``AppContext.external_files_dir``.
     """
     workspace = app_context().external_files_dir
+    # Filed sessions (bound to a real workspace folder) resolve inside that
+    # folder — the same directory the session's shell boots into. Without this
+    # the shell saw the project while file_read/write saw an empty
+    # ``external_files_dir/db-<sid>`` (the "agent can't read workspace files"
+    # bug). Falls back to the per-session subdir when not filed.
     session_root = workspace / session_id if session_id else workspace
+    if session_id:
+        try:
+            # Only override when the session is actually FILED to a workspace
+            # (coordinator has a registered root). Unbound → keep the
+            # per-session subdir. Querying the coordinator directly (rather
+            # than path_utils.session_workspace_root, which falls back to the
+            # global root) keeps this scoped to real bindings.
+            from .shell_execute_tool import get_coordinator
+
+            bound = get_coordinator().sandbox_root_for(session_id)
+            if bound is not None:
+                session_root = bound
+        except Exception:  # pragma: no cover
+            logger.debug("session workspace root lookup failed", exc_info=True)
 
     candidate = path.strip()
     if not candidate:
@@ -257,10 +276,13 @@ def _resolve_session_host_path(session_id: str, path: str) -> Path | None:
     # 工作区外的绝对路径不走这条捷径，仍按下面的相对规则处理。
     raw_path = Path(candidate)
     if not rooted and raw_path.is_absolute():
-        ws_resolved = workspace.resolve()
         resolved_abs = raw_path.resolve()
-        if resolved_abs == ws_resolved or ws_resolved in resolved_abs.parents:
-            return resolved_abs
+        # Accept absolutes inside either the global workspace OR this session's
+        # bound project folder (a filed session's real root).
+        for base in {workspace, session_root}:
+            b = base.resolve()
+            if resolved_abs == b or b in resolved_abs.parents:
+                return resolved_abs
         # PORT-FIX(上游 bug): 只读根（技能库）里的绝对路径同样要原样接受。
         # 原写法在 POSIX 上会继续往下走 ``lstrip("/")``，把它拼成
         # ``<workspace>/<sid>/tmp/…``，于是「技能目录里的 SKILL.md 读不到」；

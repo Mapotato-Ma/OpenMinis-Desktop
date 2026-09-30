@@ -168,6 +168,48 @@ def test_data_dir_paths_reach_the_skills_root(workspace):
     assert resolved == (skills / "SKILL.md").resolve()
 
 
+def test_filed_session_resolves_inside_its_bound_workspace(workspace, tmp_path):
+    """[T-workspace-file-tools] 归到工作区的会话，file_read/write/resolve 都要
+    落到那个真实项目目录里，而不是全局 external_files_dir。
+
+    这是「shell 进了工作区，但 agent 用 ls/file_read 还是看不到项目文件」这个
+    现场问题的回归护栏 —— 修复前文件类工具硬解析全局根，永远看不到绑定目录。
+    """
+    from openminis.sandbox.execution_coordinator import ExecutionCoordinator
+    from openminis.tools import shell_execute_tool
+    from openminis.tools.path_utils import session_workspace_root
+
+    project = tmp_path / "real-project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+    coord = ExecutionCoordinator()
+    coord.set_session_cwd("db-filed", project)
+    shell_execute_tool.install_coordinator(coord)
+    try:
+        # 已绑定的会话：三个解析口都指向真实项目
+        assert session_workspace_root("db-filed") == project
+        assert resolve_workspace_path("src/main.py", "db-filed") == (
+            project / "src" / "main.py"
+        ).resolve()
+        assert read_resolver("db-filed", "src/main.py") == (
+            project / "src" / "main.py"
+        ).resolve()
+        assert write_resolver("db-filed", "src/new.py") == (
+            project / "src" / "new.py"
+        ).resolve()
+        # 绝对路径落在绑定项目里也接受
+        assert read_resolver("db-filed", str(project / "src" / "main.py")) == (
+            project / "src" / "main.py"
+        ).resolve()
+        # 未绑定的会话：仍回落到全局工作区（子目录），不受影响
+        assert session_workspace_root("db-loose") == Path(
+            context.app_context().external_files_dir
+        )
+    finally:
+        shell_execute_tool.install_coordinator(None)  # type: ignore[arg-type]
+
+
 def test_attachment_ref_from_sandbox_form(workspace):
     """模型在回复里回填的沙箱图片路径要还原，否则图发不出去。"""
     from openminis.settings.attachments import _resolve_local

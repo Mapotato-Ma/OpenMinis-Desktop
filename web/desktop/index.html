@@ -608,6 +608,29 @@
           <div id="aboutList"><div class="empty-note">加载中…</div></div>
         </div>
         <div class="settings-block">
+          <h3>诊断日志</h3>
+          <p class="pane-sub">遇到问题时把日志打包发回来协助排查。日志目录：</p>
+          <div class="kv"><span class="kv-k">内核</span><span class="kv-v" id="logDirKernel">—</span></div>
+          <div class="kv"><span class="kv-k">桌面</span><span class="kv-v" id="logDirDesktop">—</span></div>
+          <div style="margin-top:10px">
+            <button class="btn" id="btnDownloadLogs">
+              <wa-icon library="om" name="download" class="ic"></wa-icon>下载日志压缩包
+            </button>
+          </div>
+        </div>
+        <div class="settings-block">
+          <h3>数据</h3>
+          <p class="pane-sub">
+            清空全部会话、消息与分组，用于排除历史数据的影响。
+            <strong>供应商、模型、人格、技能与其它设置一律保留。</strong>此操作不可撤销。
+          </p>
+          <div>
+            <button class="btn" id="btnClearData" style="--wa-color-fill-loud:var(--danger)">
+              <wa-icon library="om" name="trash-2" class="ic"></wa-icon>清空所有对话数据
+            </button>
+          </div>
+        </div>
+        <div class="settings-block">
           <h3>快捷键</h3>
           <div class="kv"><span class="kv-k">Ctrl+K</span><span class="kv-v">命令面板</span></div>
           <div class="kv"><span class="kv-k">Ctrl+`</span><span class="kv-v">终端</span></div>

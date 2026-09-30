@@ -363,6 +363,50 @@ async def delete_message(session_id: str, message_id: str) -> bool:
     return deleted
 
 
+async def clear_all_chat_data() -> dict[str, int]:
+    """Wipe every chat session, message, folder and compact marker.
+
+    Deliberately touches ONLY conversation tables — providers, models, soul,
+    memory, skills and every other setting live outside the chat DAO and are
+    left completely alone. This backs the desktop "一键清空数据（保留供应商）"
+    button whose whole point is ruling out corrupt history without forcing the
+    user to reconfigure their model provider.
+
+    Returns per-category counts so the UI/log can confirm what was removed.
+    """
+    await ensure_db()
+    counts = {"sessions": 0, "messages": 0, "folders": 0, "markers": 0}
+    async with _get_db().session() as s:
+        dao = ChatDao(s)
+        sessions = await dao.list_sessions()
+        folders = await dao.list_folders()
+        counts["sessions"] = len(sessions)
+        counts["folders"] = len(folders)
+        for sess in sessions:
+            msgs = await dao.load_messages(sess.id)
+            counts["messages"] += len(msgs)
+            await dao.delete_compact_markers(sess.id)
+            await dao.delete_messages(sess.id)
+            await dao.delete_session(sess.id)
+        for folder in folders:
+            await dao.delete_folder(folder.id)
+    counts["markers"] = counts["sessions"]  # markers cleared per session above
+
+    # Drop in-process caches + loop guards so a fresh chat starts truly empty.
+    global _RUNTIME
+    for sid in list(_RUNTIME.keys()):
+        drop_runtime(sid)
+    _RUNTIME = {}
+    try:
+        from ..settings.chat_service import reset_session_guards
+
+        for sess in sessions:
+            reset_session_guards(sess.id)
+    except Exception:  # pragma: no cover - guard cleanup is best-effort
+        pass
+    return counts
+
+
 # -- runtime transcript cache ------------------------------------------------
 def _cache_runtime(session_id: str, messages: list[LLMMessage]) -> None:
     _RUNTIME[session_id] = messages

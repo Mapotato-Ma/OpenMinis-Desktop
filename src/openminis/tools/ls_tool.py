@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..core.logging import get_logger
 from ..data.model.agent_tool_definition import AgentToolDefinition, AgentToolParam
-from .path_utils import resolve_workspace_path, workspace_root
+from .path_utils import resolve_workspace_path, session_workspace_root
 from .tool_execution_result import ToolExecutionResult
 
 logger = get_logger(__name__)
@@ -85,7 +85,9 @@ class LsTool:
             return ToolExecutionResult(
                 "Error: invalid JSON args", False, tool_title=LsTool.NAME
             )
-        target = await asyncio.to_thread(resolve_workspace_path, args.get("path"))
+        target = await asyncio.to_thread(
+            resolve_workspace_path, args.get("path"), session_id
+        )
         if target is None:
             return ToolExecutionResult(
                 "Error: path escapes the workspace root", False, tool_title=tool_title
@@ -120,7 +122,7 @@ class LsTool:
                 except OSError:
                     size = 0
                 lines.append(f"{p.name}  ({_fmt_size(size)})")
-        abs_root = workspace_root().resolve()
+        abs_root = session_workspace_root(session_id).resolve()
         try:
             rel = target.relative_to(abs_root).as_posix()
         except ValueError:

@@ -1,5 +1,37 @@
 # 变更日志
 
+## v0.4.1 — 修「agent 看不到工作区文件」+ 重复输出诊断 + 一键清空数据（2026-09-30）
+
+三件事，都带回归护栏。
+
+### 修复：归到工作区的会话，agent 现在真能读到项目文件
+v0.3.x 把「会话↔工作区」绑定后，只把 **shell** 钉进了项目目录；`ls` /
+`search_files` / `file_read` / `file_write` / `file_edit` 这些文件类工具**还在
+硬解析全局工作区根** → agent 用它们只看到空的 `db-<会话id>` 目录，读不到项目里
+的文件（现场截图就是这个）。现在这些工具解析路径时会先查会话是否绑定了真实
+目录（`ExecutionCoordinator.sandbox_root_for()`），是就以项目目录为根；未绑定的
+会话行为完全不变。护栏：`tests/test_sandbox_paths.py::test_filed_session_resolves_inside_its_bound_workspace`。
+
+### 新增：重复输出诊断日志（排查「输出一直重复一大段」）
+在 OpenAI 兼容流式路径和 agent 回合循环里加了**只读不改行为**的探针：
+- 流内检测到 runaway 重复块 → `WARNING [repeat-diag] stream is repeating …`
+- 某回合正文与上一回合高度重合 → `WARNING [repeat-diag] turn=N repeats …`
+- 每条流结束一行 `INFO [repeat-diag] … sse_frames=… visible_chars=… finish_reason=… done_sentinel=…`
+  —— 用来区分「是中转在重复发 delta」还是「模型自己在循环」。
+
+**日志在哪**：设置 → 关于 → 诊断日志，那里直接显示内核 / 桌面两个日志目录，
+并有「下载日志压缩包」按钮（打包成 `openminis-logs.zip`）。跑一轮复现后下载发回即可。
+（内核日志默认在 `<数据目录>/logs`，Windows 上是 `%USERPROFILE%\openminis\logs`。）
+
+### 新增：一键清空数据（保留供应商）
+设置 → 关于 → 数据 → 「清空所有对话数据」：删除全部会话、消息、分组与压缩标记，
+用于排除历史数据把模型带偏的嫌疑。**供应商、模型、人格、技能与其它一切设置都保留**
+（清空只动对话表，碰不到 SettingsStore）。护栏：
+`tests/test_chat_sessions.py::test_clear_all_chat_data_wipes_sessions_and_folders`。
+
+验证：`scripts/check.py` 四步全过（pytest 852 passed / 2 skipped、ruff F821/F811、
+前端 25 项、冒烟）。
+
 ## v0.4.0 — 补齐 6 个设置面板 + 附件上传（内核接口大量接通）（2026-09-29）
 
 内核有 14 个路由模块，桌面界面之前只调了 5 个。这一版把用户会用到的接上：

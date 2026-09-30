@@ -84,6 +84,18 @@ class ExecutionCoordinator:
     def clear_session_cwd(self, session_id: str) -> None:
         self._cwd_overrides.pop(session_id, None)
 
+    def sandbox_root_for(self, session_id: str) -> Optional[Path]:
+        """The workspace directory this session is filed under, if any.
+
+        Unlike :meth:`cwd_for` (which also reports a running shell's live
+        ``cd`` location), this returns **only** the registered workspace root —
+        the same directory the shell was booted into. File-class tools
+        (``ls``/``search_files``/``file_*``) resolve against this so a filed
+        session sees its real project instead of the empty
+        ``external_files_dir/<session_id>`` fallback.
+        """
+        return self._cwd_overrides.get(session_id)
+
     def cwd_for(self, session_id: str) -> str:
         """会话当前的工作目录（沙箱守卫记录「调用目录」用）。"""
         override = self._cwd_overrides.get(session_id)

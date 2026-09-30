@@ -113,7 +113,7 @@ def _search_content(root: Path, pattern: str, *, file_glob: str | None,
         except OSError:
             return
         text = data.decode("utf-8", errors="replace")
-        rel = _rel(p)
+        rel = _rel(p, root)
         if not matches_glob(rel, name, globs):
             return
         file_count += 1
@@ -228,16 +228,25 @@ def _search_names(root: Path, pattern: str, *, ignore_case: bool,
 
     walk(root if root.is_dir() else root.parent)
     found.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
-    out = [_rel(p) for p in found[:max_results]]
+    out = [_rel(p, root) for p in found[:max_results]]
     timed_out = time.monotonic() > deadline
     return out, timed_out
 
 
-def _rel(p: Path) -> str:
-    try:
-        return p.relative_to(workspace_root()).as_posix()
-    except ValueError:
-        return p.name
+def _rel(p: Path, root: Path | None = None) -> str:
+    """Path shown to the model — relative to the search root when possible.
+
+    ``root`` is the resolved session workspace root the search ran under; when
+    omitted (or ``p`` lies outside it) we fall back to the bare name.
+    """
+    for base in (root, workspace_root()):
+        if base is None:
+            continue
+        try:
+            return p.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return p.name
 
 
 class SearchFilesTool:
@@ -336,7 +345,9 @@ class SearchFilesTool:
             return ToolExecutionResult(
                 "Error: 'pattern' is required", False, tool_title=tool_title
             )
-        target_path = await asyncio.to_thread(resolve_workspace_path, args.get("path"))
+        target_path = await asyncio.to_thread(
+            resolve_workspace_path, args.get("path"), session_id
+        )
         if target_path is None:
             return ToolExecutionResult(
                 "Error: path escapes the workspace root", False, tool_title=tool_title

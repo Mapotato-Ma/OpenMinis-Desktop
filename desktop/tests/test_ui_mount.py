@@ -66,6 +66,9 @@ def test_every_desktop_route_lands_before_the_kernel_catch_all(ui_dir: Path):
         "/api/desktop/info",
         "/api/desktop/test-provider",
         "/api/desktop/chat-readiness",
+        "/api/desktop/clear-data",
+        "/api/desktop/logs",
+        "/api/desktop/logs/where",
         "/",
         f"{DESKTOP_MOUNT_PATH}/",
     ):

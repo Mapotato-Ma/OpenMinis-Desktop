@@ -131,6 +131,15 @@ def _resolve_session_host_path(session_id: str, path: str) -> Path | None:
     """
     workspace = app_context().external_files_dir
     session_root = workspace / session_id if session_id else workspace
+    if session_id:
+        try:
+            from .path_utils import session_workspace_root
+
+            bound = session_workspace_root(session_id)
+            if bound != workspace:
+                session_root = bound
+        except Exception:  # pragma: no cover
+            logger.debug("session workspace root lookup failed", exc_info=True)
 
     candidate = path.strip()
     if not candidate:
@@ -142,10 +151,21 @@ def _resolve_session_host_path(session_id: str, path: str) -> Path | None:
     from .path_utils import split_sandbox_root
 
     split = split_sandbox_root(candidate)
+    rooted = split is not None
     if split is not None:
         base_root, candidate = split
     else:
         base_root = session_root
+
+    # 绝对路径落在工作区 / 本会话项目根内就原样接受（否则下面 lstrip("/") 会把
+    # ``/c/Users/…/proj/x.py`` 拼成 ``session_root/c/Users/…`` 写错地方）。
+    raw_path = Path(candidate)
+    if not rooted and raw_path.is_absolute():
+        resolved_abs = raw_path.resolve()
+        for base in {workspace, session_root}:
+            b = base.resolve()
+            if resolved_abs == b or b in resolved_abs.parents:
+                return resolved_abs
 
     candidate = candidate.lstrip("/") or ""
 

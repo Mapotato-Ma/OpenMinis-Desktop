@@ -64,6 +64,27 @@ async def test_sessions_ordered_newest_first_and_delete(isolated_chat_db):
     assert len(await chat_store.list_sessions()) == 1
 
 
+@pytest.mark.asyncio
+async def test_clear_all_chat_data_wipes_sessions_and_folders(isolated_chat_db):
+    """[T-clear-chat-data] 一键清空：会话/消息/分组全清，计数如实返回。
+
+    供应商等设置不在 chat_store 里，这个函数天然碰不到它们 —— 是「清数据但
+    保留供应商」按钮的后端。"""
+    a = await chat_store.create_session()
+    b = await chat_store.create_session()
+    await chat_store.append_turn(a.id, "user", "一")
+    await chat_store.append_turn(a.id, "assistant", "答一")
+    await chat_store.append_turn(b.id, "user", "二")
+
+    counts = await chat_store.clear_all_chat_data()
+    assert counts["sessions"] == 2
+    assert counts["messages"] == 3
+    assert await chat_store.list_sessions() == []
+    # 清空后还能正常新建，说明表结构没被动坏
+    c = await chat_store.create_session()
+    assert await chat_store.get_session(c.id) is not None
+
+
 # ---------------------------------------------------------------------------
 # 工具卡持久化 [T-tool-cards-persist-and-fold]
 # ---------------------------------------------------------------------------
