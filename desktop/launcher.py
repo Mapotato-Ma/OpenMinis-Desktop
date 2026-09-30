@@ -63,6 +63,31 @@ _FALLBACK_SPLASH = (
 )
 
 
+def existing_instance_token(existing: str) -> str | None:
+    """复用**别的实例**的服务时，令牌要从它落盘的记录里取。
+
+    我们自己没有那个令牌（它是别人启动时生成的）。取不到就照旧加载地址 ——
+    界面会整片 403，但日志里能看出是为什么，而不是一片空白让人猜。
+    """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    from .access_gate import published_token  # noqa: PLC0415
+
+    try:
+        port = urlparse(existing).port
+    except ValueError:  # pragma: no cover - 地址是别人给的，坏掉也不该炸
+        return None
+    if not port:
+        return None
+    token = published_token(port)
+    if not token:
+        logger.warning(
+            "复用已有实例（端口 %s）但拿不到它的访问令牌 —— 界面的请求会被闸门拒绝",
+            port,
+        )
+    return token
+
+
 class SplashUnsupported(RuntimeError):
     """这个 pywebview 建不出 splash 窗口 —— 调用方应当退回串行顺序。"""
 
@@ -78,8 +103,19 @@ class BootPlan:
     existing: str | None
     debug: bool = False
 
-    def url_for(self, base: str) -> str:
-        return f"{base}{DESKTOP_PATH if self.ui_active else ''}"
+    def url_for(self, base: str, token: str | None = None) -> str:
+        """窗口要加载的地址。
+
+        ``token`` 非空就挂上 ``?k=`` —— 服务端据此换一个 HttpOnly cookie 再 302
+        掉它（见 :mod:`desktop.access_gate`）。**没有这一步的话界面整片 403**：
+        闸门默认开着，而窗口是唯一合法的客户端。
+        """
+        url = f"{base}{DESKTOP_PATH if self.ui_active else ''}"
+        if not token:
+            return url
+        from .access_gate import with_token  # noqa: PLC0415
+
+        return with_token(url, token)
 
 
 def splash_enabled() -> bool:
@@ -164,7 +200,7 @@ def _boot_once(state: BootState, plan: BootPlan, window: Any) -> None:
     try:
         state.ready.wait(SPLASH_GRACE)
         if plan.existing is not None:
-            url = plan.url_for(plan.existing)
+            url = plan.url_for(plan.existing, existing_instance_token(plan.existing))
         else:
             if state.is_closing():
                 logger.info("window closed before the backend started — nothing to boot")
@@ -181,7 +217,7 @@ def _boot_once(state: BootState, plan: BootPlan, window: Any) -> None:
             state.attach(server)
             if state.is_closing():
                 return
-            url = plan.url_for(server.url)
+            url = plan.url_for(server.url, server.access_token)
 
         _status(window, state, "正在载入界面…")
         if not state.ready.wait(READY_TIMEOUT):
@@ -284,7 +320,7 @@ def run_serial_window(
 ) -> int:
     """老顺序：先起服务、健康了再开窗口。留着当 ``OPENMINIS_NO_SPLASH=1`` 的对照组。"""
     if plan.existing is not None:
-        url = plan.url_for(plan.existing)
+        url = plan.url_for(plan.existing, existing_instance_token(plan.existing))
         return run_window(
             url,
             width=getattr(args, "width", 1440),
@@ -304,7 +340,8 @@ def run_serial_window(
     try:
         trace.mark("window-open")
         return run_window(
-            plan.url_for(server.url),
+            # 令牌别忘了：漏了这条，窗口会开出来但每个 API 调用都 403（复核抓到）。
+            plan.url_for(server.url, server.access_token),
             width=getattr(args, "width", 1440),
             height=getattr(args, "height", 900),
             storage_path=storage_path,

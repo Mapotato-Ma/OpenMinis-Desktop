@@ -139,6 +139,14 @@ def check_no_console_patch() -> None:
     )
 
 
+#: 访问闸门要的令牌，起完服务后填（见 :mod:`desktop.access_gate`）。
+#:
+#: 桌面壳的本地服务现在**要求令牌**：它挡的是"用户访问的任意网页都能跨域驱动
+#: 本机那个手里有 shell 的 agent"。窗口靠 URL 上的 ``?k=`` 换 cookie，外部工具
+#: （就是这里、以及 CI 的探针）走这个请求头。
+AUTH: dict[str, str] = {}
+
+
 def get(url: str, *, follow: bool = True, timeout: float = 10.0):
     """Return ``(status, body_bytes, headers)``; never raises for HTTP errors."""
     class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -146,6 +154,8 @@ def get(url: str, *, follow: bool = True, timeout: float = 10.0):
             return None
 
     opener = urllib.request.build_opener() if follow else urllib.request.build_opener(NoRedirect)
+    for _k, _v in AUTH.items():
+        opener.addheaders.append((_k, _v))
     try:
         with opener.open(url, timeout=timeout) as resp:
             # Header names arrive in whatever case the server chose; normalise
@@ -164,6 +174,7 @@ def main() -> int:
     print("starting backend…")
     server = start_server(port=0, desktop_dir=desktop_dir, ui_active=True, log_level="warning")
     base = server.url
+    AUTH["x-minis-desktop-access"] = server.access_token
     print(f"backend at {base}")
 
     try:
@@ -171,6 +182,67 @@ def main() -> int:
         payload = json.loads(body or b"{}")
         check("GET /api/health -> 200", status == 200, f"status={status}")
         check("health payload ok", payload.get("status") == "ok", str(payload)[:120])
+
+        # --- 访问闸门 -------------------------------------------------------
+        # 这一组断言的是"口子关着"，不是"功能能用"。桌面壳的本地服务原本对**任何
+        # 本机客户端**敞开（内核默认没设密码就完全不拦 + CORS 回显 Origin），
+        # 而它背后是一个手里有 shell 的 agent —— 用户访问的任意网页都能驱动它。
+        _saved = dict(AUTH)
+        AUTH.clear()
+        try:
+            status, _, _ = get(f"{base}/api/chats/sessions")
+            check("无令牌的 /api/* 被闸门拒绝", status == 403, f"status={status}")
+
+            status, _, _ = get(f"{base}/api/health")
+            check("豁免的 /api/health 仍可匿名问", status == 200, f"status={status}")
+
+            req = urllib.request.Request(
+                f"{base}/api/chats/sessions",
+                headers={"Origin": "https://evil.example"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    cross = resp.status
+            except urllib.error.HTTPError as e:
+                cross = e.code
+            check("跨站 Origin 被拒（DNS rebinding / 恶意网页那条路）", cross == 403, f"status={cross}")
+
+            # 路径变体：闸门用**前缀**判断受保护路径，路由用**精确**匹配 ——
+            # 两者若在某些写法上分歧，那就是"闸门放过去、路由却服务了它"的洞。
+            #
+            # 判据是**响应类型**而不是状态码：这些写法本来就会落到 SPA 兜底页
+            # （返回 index.html，200）。之前我用"不是 2xx"来判，那条实际上在测
+            # "web/dist 存不存在" —— 它缺席时给 503、存在时给 200，于是同一个
+            # 检查会在两种环境下翻转。真正要测的是"没落到 API 处理函数"，
+            # 而 API 一律回 application/json。
+            # 判据是"**2xx 且 JSON**"，而不是"不是 2xx"、也不是"不是 JSON"：
+            #   * 被闸门拒绝 → 403 + JSON（那是我自己的拒绝体，正是要的）
+            #   * 落到 SPA 兜底 → 200 + HTML（这些写法本来就会落到那儿，无害）
+            #   * 真被 API 服务了 → 200 + JSON  ← **只有这一种是洞**
+            # 用"不是 2xx"会去测 web/dist 存不存在（它缺席给 503、存在给 200，
+            # 同一个检查会翻转）；用"不是 JSON"会把拒绝也误判成洞。
+            for variant in ("//api/chats/sessions", "/API/chats/sessions",
+                            "/./api/chats/sessions", "/api/health/../chats/sessions"):
+                status, body, headers = get(f"{base}{variant}")
+                ctype = headers.get("content-type", "")
+                served_by_api = 200 <= status < 300 and "application/json" in ctype
+                check(f"路径变体 {variant} 不落到 API 处理函数", not served_by_api,
+                      f"status={status} type={ctype!r} body={body[:60]!r}")
+
+            # 拿 URL 上的令牌换 cookie：拿不到 cookie 就是 403，拿到了就该过。
+            setup = f"{base}/api/chats/sessions?k={server.access_token}"
+            status, _, headers = get(setup, follow=False)
+            check("URL 令牌换 cookie（302 + Set-Cookie）",
+                  status == 302 and "set-cookie" in headers, f"status={status} headers={list(headers)}")
+
+            # 界面路径上也要换 —— 窗口加载的是 `/_desktop/`，只在 /api/* 上换的话
+            # 窗口永远拿不到 cookie，之后每个 API 调用都被拒，**界面全白**。
+            # （这一条是端到端演示抓出来的，单元用例当时只喂了 /api/ 路径。）
+            status, _, headers = get(f"{base}/_desktop/?k={server.access_token}", follow=False)
+            check("界面路径上也换 cookie（302 + Set-Cookie）",
+                  status == 302 and "set-cookie" in headers, f"status={status}")
+        finally:
+            AUTH.update(_saved)
 
         status, _body, headers = get(f"{base}/", follow=False)
         check("GET / redirects to the desktop UI", status in (301, 302, 307, 308)
@@ -195,7 +267,7 @@ def main() -> int:
 
         req = urllib.request.Request(
             f"{base}/api/chats/sessions", data=b"{}", method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **AUTH},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             created = json.loads(resp.read() or b"{}")
@@ -224,7 +296,7 @@ def main() -> int:
 
         req = urllib.request.Request(
             f"{base}/api/desktop/test-provider", data=b'{"id":"nope"}', method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **AUTH},
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             probe = json.loads(resp.read() or b"{}")
@@ -237,7 +309,7 @@ def main() -> int:
 
         req = urllib.request.Request(
             f"{base}/api/desktop/test-provider", data=b"not json", method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **AUTH},
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:

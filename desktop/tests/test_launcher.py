@@ -85,8 +85,11 @@ class FakeWebview(types.ModuleType):
 
 
 class FakeServer:
-    def __init__(self, url: str = "http://127.0.0.1:8765") -> None:
+    def __init__(self, url: str = "http://127.0.0.1:8765", token: str = "test-token") -> None:
         self.url = url
+        # 窗口地址要带上它换 cookie（见 desktop/access_gate.py）：闸门默认开着，
+        # 不带令牌的话界面里每个 /api/* 都会被拒。
+        self.access_token = token
         self.shutdown_calls = 0
 
     def shutdown(self, timeout: float = 6.0) -> None:  # noqa: ARG002
@@ -165,7 +168,8 @@ def test_window_comes_first_and_the_kernel_boots_behind_it(monkeypatch, tmp_path
     window = fake_webview.windows[0]
     assert window.url is None, "窗口不该一开始就指向后端（那时后端还不存在）"
     assert "__bootStatus" in (window.html or ""), "窗口应当先渲染 splash"
-    assert window.loaded_urls == ["http://127.0.0.1:8765/_desktop/"]
+    # 地址必须带上访问令牌 —— 少了它界面整片 403（闸门默认开着）。
+    assert window.loaded_urls == ["http://127.0.0.1:8765/_desktop/?k=test-token"]
     assert fake_webview.order == ["window", "server"], "窗口必须先于内核出现"
     assert server.shutdown_calls == 1, "关窗后必须收掉后端"
     # 启动文案要真的推给界面，否则用户看到的是一个不动的 splash
@@ -185,10 +189,27 @@ def test_splash_is_not_used_when_the_backend_already_runs(monkeypatch, tmp_path,
     assert window.loaded_urls == ["http://127.0.0.1:9999/_desktop/"]
 
 
+def test_serial_path_also_carries_the_token(tmp_path, fake_webview, monkeypatch):
+    """splash 建不出来时的**降级路径**也必须带令牌。
+
+    复核抓到的：这条路径漏传 token，窗口会照常开出来，但界面里每个 API 调用
+    都被闸门拒 —— 表现为"应用打开了但整个是坏的"，比起不来还难查。
+    """
+    monkeypatch.setattr(launcher, "start_server", lambda **_k: FakeServer())
+    launcher.run_serial_window(
+        plan=make_plan(tmp_path),
+        args=make_args(),
+        storage_path=tmp_path / "webview",
+        app_root=tmp_path,
+    )
+    # 串行路径是把地址直接交给 create_window（不是 load_url），所以看 window.url。
+    assert fake_webview.windows[0].url == "http://127.0.0.1:8765/_desktop/?k=test-token"
+
+
 def test_ui_flag_off_keeps_the_upstream_surface(tmp_path, fake_webview, monkeypatch):
     monkeypatch.setattr(launcher, "start_server", lambda **_k: FakeServer())
     run(make_plan(tmp_path, ui_active=False), tmp_path, fake_webview)
-    assert fake_webview.windows[0].loaded_urls == ["http://127.0.0.1:8765"]
+    assert fake_webview.windows[0].loaded_urls == ["http://127.0.0.1:8765?k=test-token"]
 
 
 # ---------------------------------------------------------------------------

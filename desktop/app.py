@@ -37,6 +37,7 @@ from desktop import startup_trace as trace  # noqa: E402
 from desktop.launcher import (  # noqa: E402
     BootPlan,
     SplashUnsupported,
+    existing_instance_token,
     run_serial_window,
     run_window_first,
     splash_enabled,
@@ -201,7 +202,7 @@ def _present_headless(plan: BootPlan, args: argparse.Namespace) -> int:
     """
     if plan.existing is not None:
         server: DesktopServer | None = None
-        url = plan.url_for(plan.existing)
+        url = plan.url_for(plan.existing, existing_instance_token(plan.existing))
     else:
         try:
             server = start_server(
@@ -214,7 +215,7 @@ def _present_headless(plan: BootPlan, args: argparse.Namespace) -> int:
         except Exception as exc:
             logger.error("could not start the OpenMinis backend: %s", exc)
             return 1
-        url = plan.url_for(server.url)
+        url = plan.url_for(server.url, server.access_token)
 
     logger.info("OpenMinis Desktop ready — %s", url)
     trace.report(version=__version__)

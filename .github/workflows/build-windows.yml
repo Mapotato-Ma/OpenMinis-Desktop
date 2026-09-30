@@ -157,7 +157,24 @@ jobs:
             exit 1
           }
 
-          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/desktop/info").Content
+          # 桌面壳的本地服务要求访问令牌（防"用户访问的任意网页都能跨域驱动本机
+          # 这个手里有 shell 的 agent"）。窗口从 `?k=` 换 cookie，外部工具从落盘的
+          # 记录里取 —— 打包版漏装闸门必须在这条流水线上红，别等用户来报。
+          $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
+          $auth = @{ 'x-minis-desktop-access' = $access.token }
+
+          $gateCode = 0
+          try {
+            $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/chats/sessions"
+            $gateCode = 200
+          } catch { $gateCode = [int]$_.Exception.Response.StatusCode }
+          if ($gateCode -ne 403) {
+            Write-Error "access gate missing: unauthenticated /api/* answered $gateCode (expected 403)"
+            exit 1
+          }
+          Write-Host "access gate ok: unauthenticated /api/* -> 403"
+
+          $info = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Headers $auth "http://127.0.0.1:$port/api/desktop/info").Content
           # 打包断言：新界面文件真的进了包（不然 exe 会跑在没有 ui-prefs 的旧界面上）
           foreach ($asset in @('ui-prefs.js', 'vendor/webawesome/components/dialog/dialog.js')) {
             $code = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/_desktop/$asset").StatusCode
@@ -168,7 +185,7 @@ jobs:
           # 缩放交给谁：WebView2 原生 ZoomFactor（引擎级）还是页面里的 CSS zoom。
           # 这里只打印不判定 —— 原生拿不到是降级、不是失败（界面会回落 CSS），
           # 但我们要在日志里看得见，别靠用户报「缩放感觉不对」来发现。
-          $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:$port/api/desktop/zoom").Content
+          $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Headers $auth "http://127.0.0.1:$port/api/desktop/zoom").Content
           Write-Host "::notice::zoom capability: $zoom"
           Write-Host "frozen exe is healthy and serving the desktop UI"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
@@ -190,12 +207,22 @@ jobs:
         run: |
           $p = Start-Process -FilePath dist\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
           $zoom = $null
+          # 令牌同上：这一步是外部进程在打受保护的 /api/desktop/zoom。
+          $access = $null
+          for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $access = Get-Content "$env:USERPROFILE\openminis\.desktop-access.json" -Raw | ConvertFrom-Json
+              if ($access.token) { break }
+            } catch { }
+          }
+          $auth = @{ 'x-minis-desktop-access' = $access.token }
           for ($i = 0; $i -lt 25; $i++) {
             Start-Sleep -Seconds 2
             $p.Refresh()
             if ($p.HasExited) { break }
             try {
-              $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "http://127.0.0.1:8803/api/desktop/zoom").Content
+              $zoom = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Headers $auth "http://127.0.0.1:8803/api/desktop/zoom").Content
               if ($zoom) { break }
             } catch { }
           }
@@ -206,7 +233,7 @@ jobs:
             # 用 1.0 探（不改变任何视觉）。
             try {
               $set = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Method Post `
-                      -ContentType 'application/json' -Body '{"factor":1.0}' `
+                      -ContentType 'application/json' -Body '{"factor":1.0}' -Headers $auth `
                       "http://127.0.0.1:8803/api/desktop/zoom").Content
               Write-Host "::notice::native zoom set: $set"
               if ($set.StartsWith('{"ok":true')) { Write-Host "native zoom is usable on Windows" }

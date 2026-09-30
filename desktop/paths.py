@@ -14,7 +14,7 @@ had its way with us:
 
 ``data_root()``
     Per-user application data. The kernel already resolves this itself
-    (``~\openminis`` on Windows, ``XDG_DATA_HOME`` elsewhere) — we only
+    (``~\\openminis`` on Windows, ``XDG_DATA_HOME`` elsewhere) — we only
     re-export it so the shell can point a window title at it.
 """
 

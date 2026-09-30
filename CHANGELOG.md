@@ -1,5 +1,164 @@
 # 变更日志
 
+## v0.4.4 — 本地服务加访问闸门（桌面壳不该把本机 agent 交给任意网页）（2026-09-30）
+
+这是一次**架构层面**的修补，不是补个参数。
+
+### 问题：部署形态变了，威胁模型没跟着变
+
+内核原本是给手机端用的 —— 那时唯一的客户端是 App 自己的 WebView，服务绑在
+loopback 上，而 loopback 上只有自己。桌面壳把同一个服务放到**用户自己的电脑**上，
+那里同时住着浏览器、别的程序、以及用户访问的每一个网站。三条都已逐条核实：
+
+| 项 | 位置 | 事实 |
+|---|---|---|
+| CORS | `src/openminis/server/main.py:187` | `allow_origins=["*"]` + `allow_credentials=True`；Starlette 会把请求 Origin **原样回显**（`cors.py:163,176`）|
+| 访问闸门 | `src/openminis/server/main.py:216` | 以 `has_password()` 为第一条件 → **没设过密码就完全不拦**（默认态）|
+| 来源校验 | 全 `src/openminis/server/` | 除上面那个 CORS 中间件外，**没有任何** Host / Origin 校验 |
+| 聊天通道 | `src/openminis/server/main.py:794` | `/ws` —— WebSocket **不受同源策略约束**，浏览器不挡跨站握手 |
+
+合起来：用户访问的任意网页都能跨域读写这个本地 API，包括开一条
+`ws://127.0.0.1:<port>/ws` 发一帧 `{"type":"chat"}` —— **而那个 agent 手里有
+`shell_execute`**。
+
+### 修法：在壳这一层加闸，**一行内核代码都没改**
+
+新增 `desktop/access_gate.py` + 在 `ui_mount.attach()` 里装一层 ASGI 中间件。
+`add_middleware` 是**头插**（后加的在外层），所以闸门排在内核 CORS **之前**，
+可以先拒后放 —— 这比改内核 CORS 更对：再加一个 `CORSMiddleware` 会让
+`Access-Control-Allow-Origin` 发两遍，浏览器直接拒掉整个响应。
+
+三道闸，互相独立：
+
+1. **Host 白名单** —— 挡 DNS rebinding（攻击者把自己的域名解析到 127.0.0.1，
+   请求就带着他的 Host / Origin 进来）。
+2. **Origin 白名单** —— 带了 Origin 且不是自己人一律拒，**即使它手里有有效令牌**。
+   跨站这条路因此是封死的，与令牌是否泄漏无关。
+3. **令牌** —— 每次启动随机生成，随窗口地址 `?k=` 交给 WebView，换成一个
+   `HttpOnly + SameSite=Strict` 的 cookie。
+
+第 3 条选 cookie 是**刻意的**：同源请求浏览器自动带上 → **前端零改动**（所有
+fetch / WebSocket 都不用动）；跨站请求浏览器不会带 SameSite=Strict 的 cookie
+→ 正是我们要的语义，而且比"前端记得带 header"可靠（前端漏一处就是一个洞）。
+
+豁免只有 `/api/health`（只回答"活着吗"，不含用户数据，但**必须**能被拿不到
+令牌的外部工具问到 —— CI 探针、单实例检测都靠它）。静态资源不设闸：它们是界面
+自己的 JS/CSS，不含用户数据，且必须在换到 cookie 之前就能加载。
+
+### 过程中踩到/抓到的三个坑
+
+1. **端到端演示抓到一个单元测试照不出的洞**：界面加载的是 `/_desktop/`（不是
+   `/api/*`），而第一版只在"受保护路径"上把 `?k=` 换成 cookie —— 于是窗口
+   永远拿不到 cookie，**真机上是整个界面全白**。单元用例当时只喂了 `/api/` 路径，
+   全绿；真起服务 curl 一次就露了。已修（任何路径的合法 `?k=` 都换），并补了
+   针对 `/_desktop/` 的护栏。
+2. **内核 `app` 是进程级单例，而 Starlette 的中间件卸载不掉** —— 一旦装上闸门，
+   同一进程里后面所有打 `/api/*` 的测试都会 403（一次改动能炸掉几百个用例）。
+   解法是中间件持有的是**可替换的 `GateHolder`**：换令牌 = 换 `holder.gate`，
+   测试用完置空即放行。另加 `_add_middleware_anytime()` 处理"应用已启动后
+   attach"（重建中间件栈），否则那次 attach 会当场抛异常或**静默失去中间件**。
+3. **反向自检抓到"假绿"**：撤掉 Origin 闸之后，两条 Origin 用例**仍然通过** ——
+   因为请求没带令牌、被令牌闸拦下了，它们根本没测到 Origin。改成"带着有效令牌
+   再叠跨站 Origin"后才真正生效。
+
+### 护栏（全部做过反向自检：撤回对应那道闸必红）
+
+- `desktop/tests/test_access_gate.py` —— 25 项：三道闸各自的正反例、中间件层的
+  ASGI 断言（被拒的请求不能进到应用里）、真 app 上的完整栈断言
+  （**跨站响应里不许出现 `access-control-allow-origin`**，出现就说明闸门排到了
+  内核 CORS 后面）、落盘/读回的端口校验。
+- `scripts/smoke_test.py` —— 冒烟里加了"闸门必须在场"一组：无令牌 403、
+  `/api/health` 仍 200、跨站 Origin 403、URL 令牌换 cookie 得到 302。
+- `.github/workflows/build-windows.yml` —— 打包版多一条硬断言：
+  **无令牌打 `/api/*` 必须 403**，否则流水线红。打包漏装闸门不能等用户来报。
+
+### 真机端到端（`/var/minis/workspace/gate-e2e.sh`，14/14 通过）
+
+起真服务，用 curl 模拟恶意网页：匿名打 `/api/chats/sessions`、`/api/settings`、
+`/api/fs/read` 全 403；`Host` 换成攻击者域名 403；**带着偷来的令牌 + 跨站 Origin
+也 403**；跨站响应里无任何 CORS 放行头；WS 跨站握手 403、匿名 403、带令牌 101。
+
+### 改动前后的实测对照（同一台机器、同一份代码，只差这道闸）
+
+用**上游无闸**的无头服务（`app.py`）量"改动前"，用桌面壳量"改动后"：
+
+| 请求 | 改动前 | 改动后 |
+|---|---|---|
+| `GET /api/health` + `Origin: https://evil.example` | **200** + `ACAO: https://evil.example` + `Allow-Credentials: true` | **403**，无放行头 |
+| `GET /api/chats/sessions` + 跨站 Origin | **200** + 同样回显 Origin | **403**，无放行头 |
+| `GET /api/settings` + 跨站 Origin | **200** + 同样回显 Origin | **403**，无放行头 |
+| 预检 `OPTIONS` + 跨站 Origin | **200**，放行 `DELETE/PATCH/PUT/POST…` | **403** |
+
+改动前那三行就是"任意网页能读能写本机这个手里有 shell 的 agent"的直接证据。
+
+### 对抗性实验（`/var/minis/workspace/gate-adversarial.sh`）
+
+| 攻击面 | 结果 |
+|---|---|
+| 不带 `Origin` 头的跨站 GET（`<img>`/`<script>`/`no-cors fetch` 那一类） | 403 —— 跨站时浏览器**不会**带 `SameSite=Strict` 的 cookie，令牌闸兜住 |
+| `Origin: null`（沙箱 iframe / `file://` 页面） | 403（受保护路径与豁免路径都是） |
+| 跨域读**豁免路径** `/api/health` | 403 —— Origin 闸排在豁免判断**之前**，豁免不能被拿来当外泄通道 |
+| 预检 `OPTIONS` + 跨站 Origin | 403，无放行头 |
+| 重复 `Origin` 头 / `ORIGIN` 大写 | 403（请求头统一小写化后再判） |
+| 路径变体 `//api/…`、`/./api/…`、`/API/…`、`%61pi`、`dotdot` 上跳、分号、尾斜杠 | 全部拿不到 2xx（它们既不匹配 `/api/*` 也不匹配 `/ws`，落到 SPA 兜底页，**根本没进处理函数**） |
+| `/ws` 的尾斜杠 / 双斜杠 / 大小写 / dotdot | 403 |
+| 令牌参数：空 / 错 / 重复（先错后对） | 403（`parse_qs` 取第一个，不是"任意一个匹配就算过"） |
+| `Sec-Fetch-Site: same-site` / `cross-site`（带 cookie） | 403 |
+| `Sec-Fetch-Site: same-origin` / 头不存在（带 cookie） | 200（**对照组**：别把正常浏览弄坏） |
+
+### 独立复核（对抗性，30 分钟，专门去攻破它）
+
+**结论：挡得住，无高危绕过。** 它给了 8 条发现，处置如下：
+
+| # | 发现 | 处置 |
+|---|---|---|
+| 8 | **`OPENMINIS_NO_SPLASH=1` 的串行启动路径漏传令牌** → 窗口照常开、界面里每个 API 都 403 | **真 bug，已修**（`launcher.run_serial_window`）；这条最险，因为表现是"应用打开了但是坏的"，比打不开还难查 |
+| 4 | cookie 的 SameSite 按**站**算，而"站"**不含端口** → 本机另一个 loopback 页面（比如别的 dev server）与本服务同站，能带上 cookie 发 `<img>`/表单 GET（那类请求**不带 Origin**） | **已修**：新增 `Sec-Fetch-Site` 闸，只认 `same-origin`/`none`。头不存在时不判（老浏览器、非浏览器客户端还得过令牌闸） |
+| 5 | cookie 按域名存、**不分端口** → 同机另一个页面能塞一个同名 cookie，只认第一个的话界面整片 403（拒绝服务） | **已修**：改成"任一同名 cookie 匹配即通过" |
+| 7 | 装中间件时先放一个**空持有者**、稍后才赋令牌 → 中间那段是"装着闸门却放行一切" | **已修**：先把闸门造好再装 |
+| 6 | `/api/health` 的响应里有 `data_dir` / `workspace` 绝对路径，我注释里写的"无用户数据"不实 | **注释改成准确说法**；行为保留（是本机信息泄漏，跨域读它已被 Origin 闸挡住；CI 探针与单实例检测依赖这条豁免） |
+| 1/2/3 | 无 Origin 的跨站 GET、`Origin: null`、跨域读豁免路径 —— 均 403 | 无需改（与我的实验一致） |
+
+它的"未验证猜测"里有一条值得一提：若将来给内核设了 `root_path`，闸门看的是完整的
+`scope["path"]`、而 Starlette 按去掉 `root_path` 的路径匹配 —— 那时可能出现分歧。
+当前接线没有设 `root_path`，记在这里当预警。
+
+### 端到端（`/var/minis/workspace/gate-e2e.sh`，18/18 通过）
+
+真起服务、用 curl 当恶意网页打：匿名打 `/api/chats/sessions`、`/api/settings`、
+`/api/fs/read` 全 403；`Host` 换成攻击者域名 403；**带着偷来的令牌 + 跨站 Origin
+也 403**；跨站响应里无任何 CORS 放行头；`Sec-Fetch-Site` 四态符合预期；
+WS 跨站握手 403、匿名 403、带令牌 101。
+
+### 顺带修掉一个我自己写坏的断言
+
+冒烟里那条"路径变体不服务 API"我先写成"不是 2xx"—— 那实际上在测 **`web/dist`
+存不存在**（它缺席时这些路径落到"前端未构建"页给 503，存在时落到 SPA 兜底页给
+200），同一个检查会随环境翻转。改成"**2xx 且 JSON**"才是真正要测的东西：
+被闸门拒 = 403 + JSON（要的）、落 SPA = 200 + HTML（无害）、**真被 API 服务 =
+200 + JSON（只有这一种是洞）**。
+
+### 验证
+
+服务器 `python scripts/check.py` 四步全绿：**893 passed / 2 skipped**，
+lint / 前端 / 冒烟全过。
+
+已知的**非**问题（记录在案，避免以后重复怀疑）：
+
+- cookie 没有 `Secure`：服务是 `http://127.0.0.1`，加了它反而设不上；这里没有网络
+  攻击者（流量不出 loopback），而 `HttpOnly` + `SameSite=Strict` 才是防网页的那两条。
+- `/api/health` 匿名可读，且它的响应里带 `data_dir` / `workspace`（会暴露本机
+  用户名与目录）。这是**本机**信息泄漏（别的进程本来也能看到），不是网页那条路 ——
+  跨域读它已经被 Origin 闸挡住（见上表）。CI 探针与单实例检测都要靠这个豁免。
+- 令牌会落盘到用户数据目录（`~\openminis\.desktop-access.json`）：第二个实例复用
+  第一个实例的服务时要用它，CI 探针也要用。这是**本机**可读，与 Jupyter / VS Code
+  把自己的令牌打进控制台是同一类做法。
+
+### 验证
+
+服务器 `python scripts/check.py` 四步全绿：**889 passed / 3 skipped**，
+lint / 前端 / 冒烟全过。
+
 ## v0.4.3 — 修「流式正文重复」与「重开会话后工具卡全堆在底部」（2026-09-30）
 
 现场反馈两个问题，根因分别在**前端渲染**与**持久化表示**。

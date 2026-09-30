@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import paths
 from . import startup_trace as trace
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,8 @@ class DesktopServer:
     port: int
     _server: object = field(repr=False)
     _thread: threading.Thread = field(repr=False)
+    #: 本次运行的访问令牌。窗口地址要用它换 cookie（见 access_gate 模块）。
+    access_token: str = ""
 
     @property
     def url(self) -> str:
@@ -128,7 +131,14 @@ class DesktopServer:
             logger.warning("uvicorn thread did not exit within %.1fs", timeout)
 
 
-def build_app(*, desktop_dir: Path | None = None, ui_active: bool = False):
+def build_app(
+    *,
+    desktop_dir: Path | None = None,
+    ui_active: bool = False,
+    access_token: str | None = None,
+    access_host: str = DEFAULT_HOST,
+    access_port: int = 0,
+):
     """Import the kernel app and bolt the desktop routes onto it.
 
     Import is inside the function on purpose: ``openminis.server.main`` does
@@ -138,12 +148,23 @@ def build_app(*, desktop_dir: Path | None = None, ui_active: bool = False):
 
     ``ui_mount.attach()`` 装的是**一个清单里的全部路由**，并且在装完后自查
     「有没有哪条排在内核兜底路由之后」—— 那会导致请求被静默吞掉。
+
+    ``access_token`` 交给 ``attach()`` 装访问闸门；``None`` 时**不装**并在日志里
+    报警（见 :mod:`desktop.access_gate`）。正式启动路径由 ``start_server()`` 兜底，
+    所以这里为空只可能是测试或别处直接建 app。
     """
     from openminis.server.main import app  # noqa: PLC0415
 
     from .ui_mount import attach  # noqa: PLC0415
 
-    attach(app, desktop_dir=desktop_dir, ui_active=ui_active)
+    attach(
+        app,
+        desktop_dir=desktop_dir,
+        ui_active=ui_active,
+        access_token=access_token,
+        access_host=access_host,
+        access_port=access_port,
+    )
     return app
 
 
@@ -155,12 +176,26 @@ def start_server(
     ui_active: bool = False,
     log_level: str = "info",
     should_stop: Callable[[], bool] | None = None,
+    access_token: str | None = None,
 ) -> DesktopServer:
-    """Start uvicorn in a daemon thread and block until it is healthy."""
+    """Start uvicorn in a daemon thread and block until it is healthy.
+
+    ``access_token`` 不给就**现场生成一个** —— 正式路径上不该存在"忘了传令牌"这种
+    状态，那等于把闸门关了。
+    """
     import uvicorn  # noqa: PLC0415
 
+    from .access_gate import new_token  # noqa: PLC0415
+
+    token = access_token or new_token()
     chosen = find_free_port(host) if port in (None, 0) else port
-    app = build_app(desktop_dir=desktop_dir, ui_active=ui_active)
+    app = build_app(
+        desktop_dir=desktop_dir,
+        ui_active=ui_active,
+        access_token=token,
+        access_host=host,
+        access_port=chosen,
+    )
     trace.mark("kernel-import")
 
     config = uvicorn.Config(
@@ -186,4 +221,25 @@ def start_server(
         )
     trace.mark("backend-ready")
     logger.info("backend ready on http://%s:%s", host, chosen)
-    return DesktopServer(host=host, port=chosen, _server=server, _thread=thread)
+    handle = DesktopServer(
+        host=host, port=chosen, access_token=token, _server=server, _thread=thread
+    )
+    publish_access(handle)
+    return handle
+
+
+def publish_access(handle: DesktopServer) -> None:
+    """把这个实例的访问地址落盘（用户数据目录）。
+
+    两处要用：**第二个实例**（端口被占时它会复用第一个实例的服务 —— 没有令牌的话
+    那个窗口的界面会整片 403）、以及 CI 的启动探针。落盘失败只记日志：写不了一个
+    文件不该拦住用户开窗口。
+    """
+    from .access_gate import access_file_path, publish_access_url  # noqa: PLC0415
+
+    try:
+        root = paths.data_root()
+    except Exception:  # pragma: no cover - 数据目录都解析不出来就别提了
+        logger.debug("数据目录解析失败，跳过访问地址落盘", exc_info=True)
+        return
+    publish_access_url(access_file_path(root), handle.url, handle.access_token, handle.port)

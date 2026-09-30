@@ -39,7 +39,7 @@ from starlette.routing import Mount, Route
 logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
-DESKTOP_UI_VERSION = "0.4.3"
+DESKTOP_UI_VERSION = "0.4.4"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -430,7 +430,35 @@ def ordering_problems(app: FastAPI, routes: list[Any] | None = None) -> list[str
     return problems
 
 
-def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) -> bool:
+def _add_middleware_anytime(app: FastAPI, middleware_class: Any, **kwargs: Any) -> None:
+    """加一个中间件，**即使应用已经开始处理请求**。
+
+    Starlette 的 ``add_middleware`` 在应用启动后会直接抛
+    ``RuntimeError: Cannot add middleware after an application has started``。
+    生产路径上 ``attach()`` 一定发生在 uvicorn 起来之前 —— 但内核的 ``app`` 是
+    **进程级单例**，测试里它经常已经被别的用例启动过了。不处理的话，那次 attach
+    会当场炸（或者更糟：被当成"装过了"而**静默失去中间件**）。
+
+    做法就是把中间件栈重建一次：``user_middleware`` 已经加进去了，重建只是让它
+    被用上。
+    """
+    started = getattr(app, "middleware_stack", None) is not None
+    if started:
+        app.middleware_stack = None  # 只是让 add_middleware 别拦我们
+    app.add_middleware(middleware_class, **kwargs)
+    if started:
+        app.middleware_stack = app.build_middleware_stack()
+
+
+def attach(
+    app: FastAPI,
+    *,
+    desktop_dir: Path | None,
+    ui_active: bool = True,
+    access_token: str | None = None,
+    access_host: str = "127.0.0.1",
+    access_port: int = 0,
+) -> bool:
     """把桌面壳装到内核 app 上；返回**界面是否真的挂上了**。
 
     返回值就是界面的 ``uiActive`` —— 不是调用方想要什么，而是实际结果。
@@ -439,6 +467,41 @@ def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) ->
     测试里重复建 app）不会再插一遍 —— 否则路由表里会出现重复项。
     """
     mounted = bool(ui_active) and desktop_assets_ready(desktop_dir)
+
+    # --- 中间件：装一次，且**与路由的幂等判断分开** ---------------------------
+    #
+    # 顺序说明：`add_middleware` 是**头插**，后加的在外层。所以这里先落后加闸门
+    # —— 闸门最终在最外层，排在内核 CORS **之前**，可以先拒后放（内核那个 CORS
+    # 是 `allow_origins=["*"] + allow_credentials=True`，会把请求 Origin 原样回显）。
+    from .access_gate import AccessGate, DesktopAccessGate, GateHolder  # noqa: PLC0415
+
+    def _fresh_gate() -> AccessGate | None:
+        return AccessGate(access_token, access_host, access_port) if access_token else None
+
+    if not getattr(app.state, "desktop_middleware_ready", False):
+        # **先把闸门造好再装**：若先装一个空 holder、稍后再赋令牌，中间就存在一段
+        # 「装着闸门但放行一切」的窗口。生产路径上 attach() 在启动前，那一段不可达；
+        # 但"应用已启动后再 attach"（测试、将来的热重载）是真实可达的（复核指出）。
+        holder = GateHolder(_fresh_gate())
+        _add_middleware_anytime(app, DesktopNoStore)
+        _add_middleware_anytime(app, DesktopAccessGate, holder=holder)
+        app.state.desktop_access_gate = holder
+        app.state.desktop_middleware_ready = True
+    else:
+        holder = app.state.desktop_access_gate
+        if access_token:
+            # 中间件不可卸载（Starlette），所以换令牌 = 换 holder.gate。
+            # 见 access_gate.GateHolder —— 那是为了同一进程里几百个用例不互相污染。
+            holder.gate = AccessGate(access_token, access_host, access_port)
+
+    if holder.gate is None:
+        # 说大声点：这个组合（桌面界面 + 无鉴权）意味着**用户访问的任意网页**
+        # 都能驱动本机这个手里有 shell 的 agent。见 access_gate 模块开头的推导。
+        logger.warning(
+            "桌面壳未提供访问令牌 —— 本地服务处于无鉴权状态，"
+            "任何网页都能调用它的 /api/* 与 /ws"
+        )
+
     if getattr(app.state, "desktop_routes_attached", False):
         # 幂等：第二次不改路由表，所以返回的必须是**首次**的实际结论。
         # （独立评审指出：这里以前返回的是本次重算的值 —— 「首次资源缺失(False)、
@@ -455,10 +518,6 @@ def attach(app: FastAPI, *, desktop_dir: Path | None, ui_active: bool = True) ->
     # 倒着插，清单顺序即最终顺序（可读性：清单从上到下就是匹配优先级）。
     for route in reversed(routes):
         app.router.routes.insert(0, route)
-    # 静态资源禁缓存：否则升级后 WebView 会拿旧的 JS/CSS 继续跑（见 DesktopNoStore）。
-    # add_middleware 必须在应用开始处理请求之前调用 —— attach() 正是这个时机。
-    app.add_middleware(DesktopNoStore)
-
     app.state.desktop_routes_attached = True
     app.state.desktop_ui_mounted = mounted
 

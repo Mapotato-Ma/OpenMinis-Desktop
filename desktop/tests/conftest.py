@@ -19,3 +19,20 @@ def isolated_app_context(tmp_path, monkeypatch):
     context.set_app_context(context.AppContext(data_dir=home, cache_dir=tmp_path / "minis-cache"))
     yield
     context.reset_app_context()
+
+
+@pytest.fixture(autouse=True)
+def close_desktop_gate_afterwards():
+    """每个用例跑完都把访问闸门放行。
+
+    内核 app 是**进程级单例**，而 pytest 把 `tests/` 与 `desktop/tests/` 跑在同一个
+    进程里。装了闸门之后中间件卸载不掉，所以只要有一个用例 `attach()` 带上令牌，
+    同进程后面所有打 `/api/*` 的用例都会 403。这里统一在用例结束后清掉
+    （`GateHolder.gate = None` 即放行，见 desktop/access_gate.py）。
+    """
+    yield
+    from openminis.server.main import app  # noqa: PLC0415
+
+    holder = getattr(app.state, "desktop_access_gate", None)
+    if holder is not None:
+        holder.gate = None
