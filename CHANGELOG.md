@@ -1,5 +1,44 @@
 # 变更日志
 
+## v0.4.2 — 修「清空数据把工作区也删了」引发的连锁 + 正则片段被误判越界（2026-09-30）
+
+现场反馈「还是有问题的」+ 一整份日志。日志把两条独立的 bug 摆得很清楚，都已修并带护栏。
+
+### 修复①：一键清空数据不再删掉工作区（分组）
+`clear_all_chat_data()` 原来连**分组**一起删。工作区不是聊天记录、是**配置** ——
+它带着用户绑定的真实项目目录。删掉之后前端 localStorage 里缓存的
+`currentWorkspace` 变成悬空 id，于是：
+
+```
+PATCH /chats/sessions/<sid>/workspace  → 404  工作空间不存在
+→ 会话没归入工作区 → shell 退回空的 db-<会话id> 沙箱 → agent 看不到项目文件
+```
+
+日志证据：`desktop clear-data: {'sessions': 4, 'messages': 10, 'folders': 1, 'markers': 4}`。
+现在只清会话/消息/压缩标记，工作区与路径绑定原样保留；
+前端遇到 404 也不再卡死，而是清掉悬空 id、退回默认并提示重选。
+
+### 修复②：正则/转义片段被当成「工作区之外的路径」
+`tr -d '\r'`、`sed 's/\s\+//'`、`grep -P '\d{2}'` 这类命令**全被越界守卫拦下**：
+`_TOKEN_RE` 把引号当分隔符剥掉，`\r` / `\s+` 各自成为独立 token，以反斜杠开头 →
+Windows 上 `ntpath.isabs('\\r')` 为真 → 解析成盘根下的 `C:\r` → 判越界。
+日志里 agent **连续 14 次被拦**并触发 `CRITICAL effect_tool_runaway streak=14`。
+现在 `_looks_like_path()` 认得转义片段（`\r` `\n` `\t` `\s+` `\d{2}` `\w` `\x00`），
+真正的反斜杠路径（`\Windows\System32`、UNC `\\server\share`）照旧拦。
+
+### 修复③：发送前把会话钉进工作区（agent 不再在空沙箱里转）
+首条消息不带 `session_id` 时由服务端建会话，前端拿到 id 后**从来没绑定过工作区**；
+更早版本建的**老会话也从未绑过**。现在两条路都补上：`send()` 发消息前 `await` 绑定
+（幂等），`chatSession` 收到服务端新建的 id 时也立刻绑定。空工作区不动 —— 那可能是
+用户有意让会话待在默认沙箱。
+
+### 护栏（都做过反向自检：撤回修复必红）
+- `tests/test_guard.py::test_regex_escapes_are_not_paths` / `test_path_like_backslash_tokens_still_count` / `test_scan_escape_allows_common_text_commands`
+- `tests/test_chat_sessions.py::test_clear_all_chat_data_keeps_workspaces`
+
+> 注意：修复②**只在 Windows 上会显形** —— POSIX 下 `\r` 解析成 `<cwd>/\r`，本来就在
+> 工作区内。所以护栏里那条按平台无关的 `_looks_like_path()` 断言来锁。
+
 ## v0.4.1 — 修「agent 看不到工作区文件」+ 重复输出诊断 + 一键清空数据（2026-09-30）
 
 三件事，都带回归护栏。

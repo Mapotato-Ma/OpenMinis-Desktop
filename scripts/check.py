@@ -79,7 +79,11 @@ STEPS = [
             "scripts",
         ],
         needs="ruff",
-        timeout=180,
+        # 这台开发机是 iPhone 上的 iSH（比原生慢 15~20 倍）。这个步骤单跑只要
+        # ~0.8s，但**紧跟在整套 pytest 之后**时会超过 180s：跑完 844 个测试后
+        # 冷启一个 21MB 的 ruff 二进制，在模拟层 + 内存压力下会拖很久 ——
+        # 实测两次全量运行都在 180.0s 处被判失败，单跑却全绿。放宽到 600s。
+        timeout=600,
         hint="pip install ruff（CI 的 verify.yml 装 dev 依赖，那边一定会跑）",
     ),
     Step(

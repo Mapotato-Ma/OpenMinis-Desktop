@@ -21,11 +21,15 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..core.context import app_context
 from ..core.logging import get_logger
 from ..data.model.agent_tool_definition import AgentToolDefinition, AgentToolParam
 from .tool_execution_result import ToolExecutionResult
+
+if TYPE_CHECKING:  # PORT-FIX: 注解里用到 httpx，但运行时从不求值（见下）
+    import httpx
 
 logger = get_logger(__name__)
 

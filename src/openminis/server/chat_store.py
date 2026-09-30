@@ -364,32 +364,36 @@ async def delete_message(session_id: str, message_id: str) -> bool:
 
 
 async def clear_all_chat_data() -> dict[str, int]:
-    """Wipe every chat session, message, folder and compact marker.
+    """Wipe chat sessions, messages and compact markers — but KEEP workspaces.
 
-    Deliberately touches ONLY conversation tables — providers, models, soul,
-    memory, skills and every other setting live outside the chat DAO and are
-    left completely alone. This backs the desktop "一键清空数据（保留供应商）"
-    button whose whole point is ruling out corrupt history without forcing the
-    user to reconfigure their model provider.
+    Deliberately touches ONLY conversation content. Two categories are treated
+    as *configuration* and left completely alone:
+
+    * providers / models / soul / memory / skills — they live outside the chat
+      DAO entirely, so this function can't reach them;
+    * **workspaces (folders) and their real-path bindings** — a workspace like
+      ``AI智控 → E:\\code\\...`` is setup the user configured, not history.
+      Deleting it used to break the very thing we rely on: the session's shell
+      + file tools boot inside that bound folder. If clear-data removed the
+      folder, the frontend's cached ``currentWorkspace`` then pointed at a
+      dead id → "把会话放进工作区失败：工作空间不存在" and the agent lost sight
+      of the project. So folders survive; only their sessions are emptied.
 
     Returns per-category counts so the UI/log can confirm what was removed.
     """
     await ensure_db()
-    counts = {"sessions": 0, "messages": 0, "folders": 0, "markers": 0}
+    counts = {"sessions": 0, "messages": 0, "folders_kept": 0, "markers": 0}
     async with _get_db().session() as s:
         dao = ChatDao(s)
         sessions = await dao.list_sessions()
-        folders = await dao.list_folders()
         counts["sessions"] = len(sessions)
-        counts["folders"] = len(folders)
+        counts["folders_kept"] = len(await dao.list_folders())
         for sess in sessions:
             msgs = await dao.load_messages(sess.id)
             counts["messages"] += len(msgs)
             await dao.delete_compact_markers(sess.id)
             await dao.delete_messages(sess.id)
             await dao.delete_session(sess.id)
-        for folder in folders:
-            await dao.delete_folder(folder.id)
     counts["markers"] = counts["sessions"]  # markers cleared per session above
 
     # Drop in-process caches + loop guards so a fresh chat starts truly empty.

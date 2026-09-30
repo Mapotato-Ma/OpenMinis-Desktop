@@ -475,6 +475,9 @@ function handleFrame(f) {
       if (f.sessionId && f.sessionId !== state.sessionId) {
         state.sessionId = f.sessionId;
         updateSessionHeader();
+        // 服务端替我们新建了会话（首条消息没带 session_id）→ 立刻归到面板的工作区。
+        // 否则 agent 的 shell 起在空的 `db-<会话id>` 沙箱里，看不到用户的项目。
+        if (currentWorkspace) bindSessionWorkspace(currentWorkspace);
       }
       break;
     case 'usage':
@@ -517,7 +520,13 @@ function handleFrame(f) {
 }
 
 /* ── send ────────────────────────────────────────────────────────────── */
-function send() {
+/** send() 是 async（发送前要 await 把会话绑进工作区）；这里兜住 rejection，
+    否则一次网络抖动会变成静默的「未处理的 Promise 拒绝」，用户只看到没反应。 */
+function sendNow() {
+  send().catch((e) => toast('发送失败：' + ((e && e.message) || e), 'err'));
+}
+
+async function send() {
   const box = $('input');
   const typed = box.value.trim();
   const attachMd = attachmentMarkdown();
@@ -561,6 +570,13 @@ function send() {
   $('btnStop').hidden = false;
   setStatusTurn('思考中…');
   beginTurn();
+
+  // 发消息前先把会话钉到面板当前的工作区 —— agent 的 shell 就在那个目录里启动。
+  // 这里必须 await：绑定没落地就直接发，agent 会在空的 `db-<会话id>` 沙箱里转，
+  // 看不到用户的项目（用户实测：面板里明明有文件，agent 说工作区是空的）。
+  // 老会话（v0.4.1 之前建的）从来没绑过，这一步正好补上，是幂等的。
+  // currentWorkspace 为空时不动 —— 那可能是用户有意让会话待在默认沙箱。
+  if (state.sessionId && currentWorkspace) await bindSessionWorkspace(currentWorkspace);
 
   wsSend({ type: 'chat', text, session_id: state.sessionId || undefined });
 }
@@ -804,7 +820,18 @@ async function bindSessionWorkspace(folderId) {
       body: JSON.stringify({ folderId: folderId || null }),
     });
   } catch (e) {
-    toast('把会话放进工作区失败：' + e.message, 'err');
+    // 工作区已不存在（例如被别处删掉、或本地 localStorage 里留了个旧 id）：
+    // 别把会话卡死在一个死掉的绑定上 —— 退回默认工作区并刷新选择器，让用户
+    // 能重新选。历史上「清空数据顺手删了 folder」触发过这条，会连带
+    // 「shell 没进项目目录 → agent 看不到文件」。
+    if (/不存在|not found|404/i.test(String(e.message || ''))) {
+      currentWorkspace = '';
+      try { localStorage.removeItem(WS_KEY); } catch { /* private mode */ }
+      await loadWorkspaces();
+      toast('原工作区已不存在，已退回默认工作目录，请重新选择项目目录', 'err');
+    } else {
+      toast('把会话放进工作区失败：' + e.message, 'err');
+    }
   }
 }
 
@@ -2229,7 +2256,7 @@ function onKeydown(ev) {
     : (ev.key === 'Enter' && mod);
   if (wantSend && document.activeElement === $('input')) {
     ev.preventDefault();
-    send();
+    sendNow();
     return;
   }
   if (ev.key === 'Enter' && document.activeElement === $('termInput')) {
@@ -2261,7 +2288,7 @@ function wire() {
   $('btnReloadSessions').addEventListener('click', loadSessions);
   $('sessionFilter').addEventListener('input', (e) => { state.filter = e.target.value; renderSessions(); });
 
-  $('btnSend').addEventListener('click', send);
+  $('btnSend').addEventListener('click', sendNow);
   $('btnStop').addEventListener('click', stopTurn);
   $('input').addEventListener('input', autoGrow);
   $('input').addEventListener('keydown', onKeydown);

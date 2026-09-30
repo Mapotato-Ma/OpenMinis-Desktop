@@ -158,6 +158,23 @@ def _path_candidates(command: str) -> list[str]:
 #: 无扩展名、无更多分隔符的 ``/xxx`` 一律当 flag。
 _FLAG_TOKEN_RE = re.compile(r"^/[A-Za-z0-9]{1,4}$")
 
+# PORT-FIX: 正则/转义片段不是路径（``\r`` ``\n`` ``\t`` ``\s+`` ``\d{2}`` ``\w`` ``\x00``）。
+# ``_TOKEN_RE`` 会把引号当分隔符剥掉，于是 ``tr -d '\r'`` / ``sed 's/\s\+//'`` 里的
+# ``\r`` ``\s+`` 会各自成为独立 token；它们以反斜杠开头 → 在 Windows 上
+# ``ntpath.isabs('\\r')`` 为真 → 被解析成盘根下的 ``C:\r`` → 判「工作区之外」而拦下。
+# 实测后果：agent 连续 14 次被拦（``effect_tool_runaway streaks=14``），正常的
+# 文本处理命令全做不了。见 NOTICE.md 偏离表。
+# 只匹配「反斜杠 + 1~2 个字母 + 可选量词」与 ``\xHH``，**不碰**真正以反斜杠开头的
+# Windows 路径（``\Windows\System32``、UNC ``\\server\share`` 都没有这种形状）。
+_REGEX_ESCAPE_RE = re.compile(
+    r"^\\[A-Za-z]{1,2}(?:[+*?]|\{\d+(?:,\d*)?\})*$"
+    r"|^\\x[0-9A-Fa-f]{2}$"
+)
+
+def _is_regex_escape(token: str) -> bool:
+    """这个 token 是正则/转义片段（``\\r`` ``\\s+`` ``\\x00``）而不是路径吗？"""
+    return bool(_REGEX_ESCAPE_RE.match(token))
+
 #: 会切换会话目录的命令。
 _CD_RE = re.compile(
     r"(?:^|[|;&]\s*)(?:cd|chdir|set-location|pushd)\s+([^\n|;&]+)", re.IGNORECASE
@@ -209,6 +226,8 @@ def _looks_like_path(token: str) -> bool:
     if not raw or "://" in raw:
         return False
     if _FLAG_TOKEN_RE.match(raw):
+        return False
+    if _is_regex_escape(raw):  # PORT-FIX: `\r` `\s+` 是正则片段，不是路径
         return False
     if raw.lower() in _PSEUDO_PATHS:  # `> /dev/null` 不是写到外面
         return False

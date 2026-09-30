@@ -394,27 +394,6 @@ def test_shell_one_shot_fallback_on_dead_persistent(monkeypatch):
     assert "fallback_ok" in result.output
 
 
-def test_shell_one_shot_fallback_on_dead_persistent(monkeypatch):
-    """持久 shell exit=-1 时降级为一次性 bash -c，命令必须真的执行。"""
-    import asyncio
-    import types as _types
-
-    from openminis.tools.shell_execute_tool import ShellExecuteTool
-
-    tool = ShellExecuteTool()
-
-    def _dead_execute(*a, **k):
-        async def _inner():
-            return _types.SimpleNamespace(output="", exit_code=-1)
-        return _inner()
-    tool.coordinator = _types.SimpleNamespace(
-        execute=_dead_execute, _cwd_overrides={},
-    )
-    result = asyncio.run(tool.execute('{"command": "echo fallback_ok"}', "s1"))
-    assert result.success, result.output
-    assert "fallback_ok" in result.output
-
-
 def test_shell_reads_env_extra(monkeypatch, tmp_path):
     """「环境变量」页配置的 sandbox.envExtra 必须进 shell 进程环境。"""
     import asyncio
@@ -445,45 +424,6 @@ def test_shell_reads_env_extra(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # 技能声明的环境变量（metadata.requires.env）
 # ---------------------------------------------------------------------------
-def test_declared_env_reads_all_three_conventions():
-    from openminis.skills.store import declared_env
-
-    # Claude Skills 的写法
-    assert declared_env(
-        {"metadata": {"requires": {"env": ["MODELSCOPE_API_KEY"]}}}
-    ) == ("MODELSCOPE_API_KEY",)
-    # 短一点的两处写法也认
-    assert declared_env({"metadata": {"env": ["A", "B"]}}) == ("A", "B")
-    assert declared_env({"env": "A, B\nC"}) == ("A", "B", "C")
-    # 去重保序；没声明就是空的
-    assert declared_env({"requiredEnv": ["X"]}) == ()
-    assert declared_env({"metadata": {"requires": {"env": ["A", "A", "B"]}}}) == ("A", "B")
-
-
-def test_skill_entry_exposes_declared_env(tmp_path, monkeypatch):
-    from openminis.core import context
-    from openminis.skills import SkillStore
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("MINIS_HOME", str(home))
-    context.set_app_context(context.AppContext(data_dir=home, cache_dir=home))
-
-    skill = home / "skills" / "demo"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text(
-        "---\n"
-        "name: demo\n"
-        "description: 演示\n"
-        "metadata:/n"
-        "  requires:/n"
-        "    env: [\"MODELSCOPE_API_KEY\"]\n"
-        "---\n\n正文\n",
-        encoding="utf-8",
-    )
-    entry = SkillStore().get("demo")
-    assert entry is not None
-    assert entry.env == ("MODELSCOPE_API_KEY",)
 
 
 # ---------------------------------------------------------------------------

@@ -195,7 +195,11 @@ class ConfigAuditLog:
         with self._lock:
             row = self._conn.execute(f"SELECT COUNT(*) FROM {self.TABLE}").fetchone()
         count = row[0] if row is not None else 0
-        return Usage(count=count, capacity=self.MAX_ROWS)
+        # PORT-FIX: `Usage` 是本类的**嵌套类**，而方法体里的名字解析**不查类作用域**
+        # （只查局部 → 闭包 → 全局 → 内置），所以裸写 `Usage(...)` 会抛
+        # `NameError: name 'Usage' is not defined`（实测复现）。改成 `self.Usage`。
+        # 这个函数当时没有任何调用方，所以一直没暴露；config-audit 界面接上就会炸。
+        return self.Usage(count=count, capacity=self.MAX_ROWS)
 
     @dataclass
     class Usage:

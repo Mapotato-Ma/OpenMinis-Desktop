@@ -514,6 +514,41 @@ def test_scan_escape_still_blocks_real_absolutes(env):
 
 
 # ---------------------------------------------------------------------------
+# 正则/转义片段不是路径（Windows 上实测把正常命令全拦死了）
+# ---------------------------------------------------------------------------
+def test_regex_escapes_are_not_paths(env):
+    """``tr -d '\\r'`` / ``sed 's/\\s\\+//'`` 里的转义片段不该被当成路径。
+
+    ``_TOKEN_RE`` 把引号当分隔符剥掉，于是 ``\\r`` ``\\s+`` ``\\n`` 各自成为独立
+    token；它们以反斜杠开头 → Windows 上 ``ntpath.isabs('\\\\r')`` 为真 → 解析成
+    盘根下的 ``C:\\r`` → 判「工作区之外」。实测后果：agent 连续 14 次被拦
+    （``effect_tool_runaway streaks=14``），正常的文本处理一条都跑不了。
+    """
+    from openminis.sandbox.guard import _looks_like_path
+
+    for frag in (r"\r", r"\n", r"\t", r"\s", r"\s+", r"\d{2}", r"\w", r"\x00"):
+        assert not _looks_like_path(frag), f"{frag!r} 被误判成路径"
+        assert not scan_escape(f"tr -d '{frag}'", cwd=str(Path.cwd())).risky
+
+
+def test_path_like_backslash_tokens_still_count(env):
+    """修掉转义片段，不等于把反斜杠开头的真路径也放掉。"""
+    from openminis.sandbox.guard import _looks_like_path
+
+    assert _looks_like_path(r"\Windows\System32")
+    assert _looks_like_path(r"\\server\share")
+    assert _looks_like_path("C:\\Users\\x")
+
+
+def test_scan_escape_allows_common_text_commands(env):
+    """日志里真实被拦的命令：cwd 在工作区内时必须放行。"""
+    cwd = str(Path.cwd())
+    assert scan_escape(r"tr -d '\r' < in.txt > out.txt", cwd).reasons == []
+    assert scan_escape(r"sed -i 's/\s\+//g' f.txt", cwd).reasons == []
+    assert scan_escape(r"grep -P '\d{2}' log.txt", cwd).reasons == []
+
+
+# ---------------------------------------------------------------------------
 # 会话自己的工作目录 = 它的沙箱根（工作区绑了真实目录时）
 # ---------------------------------------------------------------------------
 def test_session_workspace_dir_is_its_own_sandbox_root(env, tmp_path):

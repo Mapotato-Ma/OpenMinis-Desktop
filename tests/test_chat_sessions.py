@@ -65,23 +65,44 @@ async def test_sessions_ordered_newest_first_and_delete(isolated_chat_db):
 
 
 @pytest.mark.asyncio
-async def test_clear_all_chat_data_wipes_sessions_and_folders(isolated_chat_db):
-    """[T-clear-chat-data] 一键清空：会话/消息/分组全清，计数如实返回。
+async def test_clear_all_chat_data_keeps_workspaces(isolated_chat_db, tmp_path):
+    """[T-clear-chat-data] 一键清空：会话/消息全清，**工作区（分组）保留**。
 
     供应商等设置不在 chat_store 里，这个函数天然碰不到它们 —— 是「清数据但
-    保留供应商」按钮的后端。"""
+    保留供应商」按钮的后端。
+
+    工作区同理属于**配置**不是聊天记录：它带着用户绑定的真实项目目录，删了会
+    连带毁掉「agent 在项目目录里干活」这条链路（实测：清空后前端缓存的工作区
+    id 变悬空 → 「把会话放进工作区失败：工作空间不存在」→ shell 退回空的
+    ``db-<会话id>`` 沙箱 → agent 看不到用户的文件）。"""
+    from openminis.server import workspaces
+
     a = await chat_store.create_session()
     b = await chat_store.create_session()
     await chat_store.append_turn(a.id, "user", "一")
     await chat_store.append_turn(a.id, "assistant", "答一")
     await chat_store.append_turn(b.id, "user", "二")
 
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    ws = await workspaces.create_workspace("AI智控")
+    workspaces.set_workspace_path(ws.id, str(proj))
+    await workspaces.assign_session_workspace(a.id, ws.id)
+
     counts = await chat_store.clear_all_chat_data()
     assert counts["sessions"] == 2
     assert counts["messages"] == 3
     assert await chat_store.list_sessions() == []
-    # 清空后还能正常新建，说明表结构没被动坏
+
+    # 工作区与它绑定的真实目录都还在，且能重新装会话
+    kept = await workspaces.list_workspaces()
+    assert [w.id for w in kept] == [ws.id]
+    assert kept[0].path == str(proj)
     c = await chat_store.create_session()
+    assert await workspaces.assign_session_workspace(c.id, ws.id) is True
+    assert await workspaces.sandbox_dir_for_session(c.id) == proj.resolve()
+
+    # 清空后还能正常新建，说明表结构没被动坏
     assert await chat_store.get_session(c.id) is not None
 
 
