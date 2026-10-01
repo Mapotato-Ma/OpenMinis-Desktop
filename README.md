@@ -177,6 +177,7 @@ Python 导入完 `.pyc` 就不持有文件句柄，所以运行中重命名 `pay
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、为什么、验证到哪一步（包括没做到的） |
 | [`NOTICE.md`](NOTICE.md) | 上游来源与偏离清单 |
 | [`docs/adr/`](docs/adr) | 架构决策记录 |
+| [`docs/notes/`](docs/notes) | 开发过程笔记（验证闭环的规格与 issue 清单、界面缩放与供应商导入的计划） |
 
 ---
 

@@ -133,7 +133,12 @@ def _ask(count: int, root: Path) -> bool:
         f"是否解除锁定并继续启动？\n\n  位置：{root}\n  带标记的文件：{count} 个\n\n"
         "选「否」将退出。" + MANUAL_HINT
     )
-    answer = fatal.message_box(text, title="OpenMinis Desktop — 需要解除文件锁定")
+    # yes_no=True 是**必须的**：漏了它，弹出来的是「只有一个确定」的框，
+    # 返回值是 "ok" 而不是 "yes"，于是用户点了确定却被当成「拒绝」→ 直接退出。
+    # （真机上就是这么翻车的：用户看到只有「确定」的弹窗，点了之后应用还是起不来。）
+    answer = fatal.message_box(
+        text, title="OpenMinis Desktop — 需要解除文件锁定", yes_no=True
+    )
     if answer is None:
         logger.error("需要解除文件锁定，但这里弹不出对话框（%d 个文件）", count)
         return False

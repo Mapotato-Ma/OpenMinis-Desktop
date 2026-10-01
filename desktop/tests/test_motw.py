@@ -130,6 +130,30 @@ def test_prompt_falls_back_to_the_dialog(tmp_path, monkeypatch):
     assert motw.guard(tmp_path) == "unblocked"
     assert "解除锁定" in seen["text"]
     assert str(tmp_path) in seen["text"]  # 告诉用户动的是哪个目录
+    # 必须要求「是/否」两个按钮。少了这个断言，假函数会把 bug 一起吞掉 ——
+    # 真机上出现过：弹的是只有一个「确定」的框，用户点了却被当成拒绝。
+    assert seen["kwargs"].get("yes_no") is True, "弹窗必须是是/否，不能只有一个确定"
+
+
+def test_the_dialog_really_shows_yes_and_no(tmp_path, monkeypatch):
+    """上面那条盯的是调用方。这条盯 fatal 自己：yes_no=True 时确实带上 MB_YESNO 位。"""
+    captured = {}
+
+    class _User32:
+        @staticmethod
+        def MessageBoxW(hwnd, text, title, flags):
+            captured["flags"] = flags
+            return fatal._IDYES
+
+    monkeypatch.setattr(fatal.os, "name", "nt")
+    monkeypatch.setattr(fatal, "_shown", set())
+    monkeypatch.setitem(sys.modules, "ctypes", type(sys)("ctypes"))
+    sys.modules["ctypes"].windll = type("w", (), {"user32": _User32})()
+    assert fatal.message_box("x", yes_no=True) == "yes"
+    assert captured["flags"] & fatal.MB_YESNO, "没带上 MB_YESNO，弹出来只有确定按钮"
+    # 不用要按钮的那种调用不该带 MB_YESNO
+    fatal.message_box("x")
+    assert not captured["flags"] & fatal.MB_YESNO
 
 
 def test_no_dialog_available_means_no_consent(tmp_path, monkeypatch):

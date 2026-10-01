@@ -1,5 +1,56 @@
 # 变更日志
 
+## v0.4.9 — 修「解除锁定的弹窗点了确定还是起不来」（真机上抓到的）（2026-10-01）
+
+用户在新电脑上看到那个弹窗，**点「确定」之后应用还是起不来**。截图一看，按钮只有一个
+「确定」—— 那就说明它压根没弹成「是/否」。
+
+### 根因：调用时漏了 `yes_no=True`
+
+`desktop/motw.py` 的 `_ask()` 是这么写的：
+
+```python
+answer = fatal.message_box(text, title="OpenMinis Desktop — 需要解除文件锁定")
+```
+
+`message_box` 的 `yes_no` 默认是 `False`，所以弹的是 **MB_OK**（只有一个「确定」），
+返回值是 `"ok"` 而不是 `"yes"` → `consent=False` → `guard()` 返回 `"declined"` →
+**当成"用户拒绝"直接退出**。用户看到的现象就是：点了确定，什么都没发生。
+
+### 更值得记的是：**测试把它掩盖了**
+
+当时那条测试是这么写的：
+
+```python
+def fake_box(text, **kwargs):     # 收下 kwargs，然后什么都不看
+    seen["kwargs"] = kwargs
+    return "yes"
+monkeypatch.setattr(fatal, "message_box", fake_box)
+```
+
+假函数把 `**kwargs` 收下就扔了，所以「没传 `yes_no`」这件事**在测试里根本不存在** ——
+绿得好好的。测试替实现把 bug 一起吞了。
+
+修法两头都补：
+
+1. 调用处补上 `yes_no=True`（并留注释说明漏了会怎样）；
+2. 那条测试的假函数**改成必须断言** `kwargs.get("yes_no") is True`；
+3. 再加一条盯 `fatal.message_box` 自己的：`yes_no=True` 时必须真的带上 `MB_YESNO` 位
+   （把 `ctypes.windll.user32` 换成一个假的，看落下来的 flags）。
+
+### 验证
+
+* `desktop/tests/test_motw.py` **20 项**（新增 2 条护栏）
+* **反向自检**：撤掉 `yes_no=True` → 1 项红（正是真机上的那个 bug）；
+  把 `MB_YESNO` 从 `0x04` 改成 `0x00` → 1 项红
+* 服务器 `python scripts/check.py` 四步全绿：**950 passed / 2 skipped**
+
+### 顺带
+
+* `.scratch/`（10 份开发过程笔记）挪到 `docs/notes/` —— 内容留着，但不再挡在仓库门面上；
+  README 的「文档」表里加了一行指过去。
+
+
 ## v0.4.8 — 「检查更新」失败不再一次就放弃（国内到 GitHub 会抖）（2026-10-01）
 
 用户报：v0.4.7 发布后点「检查更新」，状态显示
