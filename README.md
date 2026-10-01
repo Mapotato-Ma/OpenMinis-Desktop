@@ -46,6 +46,9 @@
 
 ![设置页](docs/images/settings.jpg)
 
+<sub>两张截图都取自无头模式（同一个界面在浏览器标签页里打开，所以看不到 Windows 标题栏）。
+Windows 上它是原生窗口 —— WebView2 引擎级缩放，文字按真实字号渲染。</sub>
+
 | 键 | 作用 |
 |---|---|
 | `Ctrl+K` | 命令面板 |
