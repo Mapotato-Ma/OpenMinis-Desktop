@@ -146,6 +146,18 @@ def test_nothing_removed_reports_unfixable(tmp_path, monkeypatch):
     assert motw.guard(tmp_path, ask=True) == "unfixable"
 
 
+def test_the_running_exe_is_left_alone(tmp_path, monkeypatch):
+    """正在跑的 exe 自己带不带标记都无所谓：它已经起来了，而且文件被占用、去改它
+    又正是杀软爱盯的动作（删除 MOTW = MITRE T1553.005）。"""
+    exe = _marked(tmp_path, "OpenMinisDesktop.exe")
+    dll = _marked(tmp_path, "Python.Runtime.dll")
+    monkeypatch.setattr(motw, "_running_exe", lambda: exe)
+
+    assert motw.guard(tmp_path, ask=True) == "unblocked"
+    assert (exe.parent / f"{exe.name}{motw.STREAM}").exists(), "不该去动正在运行的 exe"
+    assert not (dll.parent / f"{dll.name}{motw.STREAM}").exists(), "该动的必须动到"
+
+
 def test_install_root_is_none_outside_a_frozen_build(monkeypatch):
     """源码运行时 ``sys.executable`` 是 python.exe —— 旁边是整个解释器目录，
     绝不能去动它。"""

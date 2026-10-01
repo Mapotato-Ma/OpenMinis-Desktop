@@ -140,6 +140,17 @@ def _ask(count: int, root: Path) -> bool:
     return answer == "yes"
 
 
+def _running_exe() -> Path | None:
+    """正在运行的那个 exe。它自己带不带标记都无所谓 —— 它已经跑起来了；而且它的文件
+    被占用（改不动），去改它又正是杀软爱盯的动作（删除 MOTW，MITRE T1553.005）。"""
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        return Path(sys.executable).resolve()
+    except Exception:  # pragma: no cover
+        return None
+
+
 def guard(root: Path | None = None, *, ask: bool | None = None) -> str:
     """在**加载 .NET 之前**处理 MOTW。返回发生了什么：
 
@@ -156,7 +167,7 @@ def guard(root: Path | None = None, *, ask: bool | None = None) -> str:
     if root is None or not root.is_dir():
         return "skipped"
 
-    marked = find_marked(root)
+    marked = [p for p in find_marked(root) if p != _running_exe()]
     if not marked:
         return "clean"
 

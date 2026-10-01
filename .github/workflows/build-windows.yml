@@ -231,6 +231,12 @@ jobs:
           if ($marked.Count -lt 100) { Write-Error "标记没打上（只有 $($marked.Count) 个）"; exit 1 }
           Write-Host "已给 $($marked.Count) 个文件打上网络来源标记（模拟浏览器下载 + 解压）"
 
+          # 主 exe 单独放行 —— 模拟用户已经在 SmartScreen 上点了「仍要运行」。
+          # 不放行的话，带标记的 exe 会直接被 SmartScreen 拦掉（报
+          # "The operation was canceled by the user"），那测到的就不是 .NET 加载了。
+          # 真实用户点的就是这一步，之后翻车的是 .NET 加载 DLL 那一环。
+          Unblock-File -LiteralPath "$root\OpenMinisDesktop.exe"
+
           # (1) 对照组：不解除锁定时，它确实起不来吗？没这一步，下面的"自愈成功"
           #     可能只是碰巧（.NET 可能根本没复现）。
           $env:OPENMINIS_MOTW = "ignore"
