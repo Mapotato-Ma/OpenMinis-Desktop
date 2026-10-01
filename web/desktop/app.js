@@ -3882,9 +3882,18 @@ async function checkUpdate() {
   const btn = $('btnCheckUpdate');
   if (btn) btn.setAttribute('loading', '');
   updateHint({ phase: 'checking' });
+  // 检查失败时「可用版本」必须跟着变成未知 —— 否则会显示上一次成功时的「已是最新」，
+  // 和同时显示的「失败」自相矛盾（用户实际截图发过来问过这个）。
+  const failed = (e) => {
+    updateHint({ phase: 'failed', error: e });
+    const latest = $('updateLatest');
+    if (latest) latest.textContent = '未知（检查失败）';
+    const apply = $('btnApplyUpdate');
+    if (apply) apply.hidden = true;
+  };
   try {
     const r = await api('/desktop/update');
-    if (r.ok === false) { updateHint({ phase: 'failed', error: r.error }); return; }
+    if (r.ok === false) { failed(r.error); return; }
     const latest = $('updateLatest');
     if (latest) latest.textContent = r.available ? 'v' + r.latest : '已是最新';
     updateHint({ phase: r.available ? 'idle' : 'done', note: r.available ? r.reason : '' });
@@ -3898,7 +3907,7 @@ async function checkUpdate() {
     const restart = $('btnRestartUpdate');
     if (restart) restart.hidden = true;
   } catch (e) {
-    updateHint({ phase: 'failed', error: e.message });
+    failed(e.message);
   } finally {
     if (btn) btn.removeAttribute('loading');
   }

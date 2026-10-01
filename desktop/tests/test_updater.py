@@ -17,6 +17,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -363,6 +364,175 @@ def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
     monkeypatch.setattr(shell_id, "REPO", fake)
     assert shell_id.compute() == before, "转成 CRLF 之后壳指纹变了 —— 行尾没归一化"
 
+
+
+# ── 抖动的网络：必须重试 ────────────────────────────────────────────────
+#
+# 真实用户报过：上次点「检查更新」虽然慢但出来了，这次报
+# 「连不上更新服务：The read operation timed out」。从国内到 GitHub 就是时通时不通
+# （实测同一地址连测 10 次，1.1s ~ 6.1s 都有），失败一次就结束等于"时灵时不灵"。
+
+
+class _FakeResp:
+    """够用的假响应：read(n) 逐块吐，吐完给空。"""
+
+    def __init__(self, payload: bytes) -> None:
+        self._left = payload
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            data, self._left = self._left, b""
+            return data
+        data, self._left = self._left[:n], self._left[n:]
+        return data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _timeout():
+    return urllib.error.URLError(TimeoutError("The read operation timed out"))
+
+
+def _manifest_bytes(version="9.9.9", digest="ab" * 32):
+    import json as _json
+
+    return _json.dumps(
+        {
+            "format": 1,
+            "version": version,
+            "shellId": "x" * 16,
+            "assets": {
+                "payload": {
+                    "url": "https://example.invalid/update.zip",
+                    "sha256": digest,
+                    "bytes": 10,
+                }
+            },
+        }
+    ).encode()
+
+
+@pytest.fixture(autouse=True)
+def _no_sleeping(monkeypatch):
+    """重试的退避不能在测试里真的睡。"""
+    monkeypatch.setattr(updater, "RETRY_BACKOFF_S", (0.0, 0.0), raising=False)
+
+
+def test_check_retries_a_flaky_network(monkeypatch):
+    calls = []
+
+    def fake_open(request, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise _timeout()
+        return _FakeResp(_manifest_bytes())
+
+    monkeypatch.setattr(updater, "_open", fake_open)
+    info = updater.fetch_manifest("https://example.invalid/latest.json")
+    assert info.version == "9.9.9"
+    assert len(calls) == 2, "应该试第二次"
+
+
+def test_check_always_failing_says_how_many_times_it_tried(monkeypatch):
+    calls = []
+
+    def fake_open(request, timeout):
+        calls.append(1)
+        raise _timeout()
+
+    monkeypatch.setattr(updater, "_open", fake_open)
+    with pytest.raises(updater.UpdateError) as err:
+        updater.fetch_manifest("https://example.invalid/latest.json")
+    # 写死数字，**不要**写成 == updater.CHECK_ATTEMPTS —— 那样把常量改成 1 之后
+    # 断言依然成立，等于没测（这条自我满足的写法在反向自检里被抓出来过）。
+    assert len(calls) == 3
+    assert "已自动重试" in str(err.value)
+    assert "超时（连上了，但没等到数据）" in str(err.value)
+
+
+def test_a_404_is_not_retried(monkeypatch):
+    """还没发过版本不是网络问题，再试一百次也一样。"""
+    calls = []
+
+    def fake_open(request, timeout):
+        calls.append(1)
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(updater, "_open", fake_open)
+    with pytest.raises(updater.UpdateError) as err:
+        updater.fetch_manifest("https://example.invalid/latest.json")
+    assert len(calls) == 1
+    assert "还没有发布过版本" in str(err.value)
+
+
+def test_a_500_is_retried(monkeypatch):
+    calls = []
+
+    def fake_open(request, timeout):
+        calls.append(1)
+        raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", {}, None)
+
+    monkeypatch.setattr(updater, "_open", fake_open)
+    with pytest.raises(updater.UpdateError):
+        updater.fetch_manifest("https://example.invalid/latest.json")
+    assert len(calls) == 3, "502 是服务端抽风，该重试"
+
+
+def test_the_budgets_are_actually_retries():
+    """兜住上一条：光把常量调小，上面那些写死数字的断言会红，但这条会先指出原因。"""
+    assert updater.CHECK_ATTEMPTS >= 2, "检查更新至少要试两次（国内到 GitHub 会抖）"
+    assert updater.DOWNLOAD_ATTEMPTS >= 2, "下载大文件更要重试"
+
+
+def test_download_retries_and_throws_away_the_partial_file(tmp_path, monkeypatch):
+    body = b"Z" * 5000
+    import hashlib
+
+    asset = updater.Asset(
+        url="https://example.invalid/update.zip",
+        sha256=hashlib.sha256(body).hexdigest(),
+        bytes=len(body),
+    )
+    seen = []
+
+    def fake_open(request, timeout):
+        seen.append(1)
+        if len(seen) == 1:
+            # 下到一半断掉：写点东西进去，再抛 —— 半截文件必须被清掉
+            (tmp_path / "update.zip").write_bytes(body[:100])
+            raise _timeout()
+        return _FakeResp(body)
+
+    monkeypatch.setattr(updater, "_open", fake_open)
+    got = updater.download(asset, tmp_path)
+    assert len(seen) == 2
+    assert got.read_bytes() == body, "重试之后必须是完整的文件，不能接着半截写"
+
+
+def test_download_reports_a_bad_checksum_after_retrying(tmp_path, monkeypatch):
+    body = b"Z" * 100
+    asset = updater.Asset(
+        url="https://example.invalid/update.zip", sha256="00" * 32, bytes=len(body)
+    )
+    calls = []
+    monkeypatch.setattr(
+        updater, "_open", lambda r, t: (calls.append(1), _FakeResp(body))[1]
+    )
+    with pytest.raises(updater.UpdateError) as err:
+        updater.download(asset, tmp_path)
+    assert "校验不过" in str(err.value)
+    assert len(calls) == 3
+    assert not (tmp_path / "update.zip").exists(), "坏包不能留在盘上"
+
+
+def test_network_errors_are_translated_into_words():
+    assert "超时" in updater._describe(_timeout())
+    assert "TLS" in updater._describe(urllib.error.URLError(Exception("certificate verify failed")))
 
 def test_cleanup_removes_old_downloads(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "updates_dir", lambda: tmp_path)

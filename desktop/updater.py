@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -43,6 +44,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 #: 固定地址：`releases/latest` 永远指向最新的 release，应用里不用写版本号，
 #: 也不吃 GitHub API 的限流（它是 release 资产，不是 API）。
@@ -60,11 +63,77 @@ CHECK_TIMEOUT_S = 15
 DOWNLOAD_TIMEOUT_S = 60
 _CHUNK = 1 << 16
 
+#: 重试。**必须重试**：从国内到 GitHub 是"时通时不通"—— 实测同一个地址连续 10 次里
+#: 有 2 次要 5.9 秒以上（1.1s ~ 6.1s 抖动），偶发直接读超时。失败一次就结束，在用户
+#: 眼里就是"这功能时灵时不灵"：真实用户报过，上一次点能出来，这一次报
+#: 「连不上更新服务：The read operation timed out」。
+#:
+#: 抖动通常是瞬时的，所以退避几秒再试比"把超时调大"有效得多 —— 调大只是让界面干等。
+CHECK_ATTEMPTS = 3
+DOWNLOAD_ATTEMPTS = 3
+RETRY_BACKOFF_S = (2.0, 6.0)
+
 ProgressFn = Callable[[int, int], None]
 
 
 class UpdateError(RuntimeError):
-    """更新过程中的可展示错误（界面直接把 message 显示给用户）。"""
+    """更新过程中的可展示错误（界面直接把 message 显示给用户）。
+
+    ``retryable`` 是给重试用的：网络抖一下值得再试，HTTP 404 或者清单不是合法
+    JSON 再试一百次也一样。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _open(request: urllib.request.Request, timeout: float):
+    """唯一一处真正发请求的地方 —— 测试用它注入假网络。"""
+    return urllib.request.urlopen(request, timeout=timeout)  # noqa: S310
+
+
+def _describe(exc: BaseException) -> str:
+    """把底层网络异常翻成一句人话。用户会直接把这句话截图发过来。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code} {exc.reason}"
+    reason = getattr(exc, "reason", exc)
+    text = str(reason) or type(reason).__name__
+    lowered = text.lower()
+    if isinstance(reason, TimeoutError) or "timed out" in lowered:
+        return "超时（连上了，但没等到数据）"
+    if "getaddrinfo" in lowered or "name or service not known" in lowered:
+        return f"域名解析失败（DNS）：{text}"
+    if "certificate" in lowered or "ssl" in lowered:
+        return f"TLS 出错：{text}"
+    if "connection" in lowered or "refused" in lowered or "unreachable" in lowered:
+        return f"连不上：{text}"
+    return text
+
+
+def _retry(what: str, attempts: int, run: Callable[[], Any]) -> Any:
+    """跑 ``run``，失败就退避重试。只重试"值得重试"的：见 ``UpdateError.retryable``。
+
+    最后一次失败时把"试了几次"缀在错误里 —— 用户看到的是一个稳定的失败，而不是
+    一个不知道试没试过的报错。
+    """
+    last: UpdateError | None = None
+    for index in range(attempts):
+        try:
+            return run()
+        except UpdateError as exc:
+            last = exc
+            if not exc.retryable or index == attempts - 1:
+                break
+            wait = RETRY_BACKOFF_S[min(index, len(RETRY_BACKOFF_S) - 1)]
+            logger.warning(
+                "%s 第 %d/%d 次失败（%s）—— %.0f 秒后重试", what, index + 1, attempts, exc, wait
+            )
+            time.sleep(wait)
+    assert last is not None
+    if last.retryable and attempts > 1:
+        raise UpdateError(f"{last}（已自动重试 {attempts} 次）") from None
+    raise last
 
 
 @dataclass(frozen=True)
@@ -158,21 +227,32 @@ def parse_manifest(raw: Any) -> UpdateInfo:
     return info
 
 
-def fetch_manifest(url: str, *, timeout: float = CHECK_TIMEOUT_S) -> UpdateInfo:
+def _fetch_once(url: str, timeout: float) -> UpdateInfo:
     request = urllib.request.Request(url, headers={"User-Agent": "OpenMinisDesktop"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310
+        with _open(request, timeout) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            # 还没有发布过任何 release —— 不是错误，是"没有更新"。
-            raise UpdateError("还没有发布过版本") from None
-        raise UpdateError(f"读更新清单失败：HTTP {exc.code}") from None
+            # 还没有发布过任何 release —— 不是错误，是"没有更新"。重试也没用。
+            raise UpdateError("还没有发布过版本", retryable=False) from None
+        # 5xx 是服务端抽风，值得再试；4xx 是我们自己的问题，再试也一样。
+        raise UpdateError(
+            f"读更新清单失败：{_describe(exc)}", retryable=exc.code >= 500
+        ) from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise UpdateError(f"连不上更新服务：{exc}") from None
+        raise UpdateError(f"连不上更新服务：{_describe(exc)}") from None
     except ValueError as exc:
-        raise UpdateError(f"更新清单不是合法 JSON：{exc}") from None
+        raise UpdateError(f"更新清单不是合法 JSON：{exc}", retryable=False) from None
     return parse_manifest(raw)
+
+
+def fetch_manifest(
+    url: str, *, timeout: float = CHECK_TIMEOUT_S, attempts: int = CHECK_ATTEMPTS
+) -> UpdateInfo:
+    """拉清单。**会重试** —— 见 ``RETRY_BACKOFF_S`` 上的说明（国内到 GitHub 抖动）。"""
+    logger.debug("检查更新：%s（最多试 %d 次）", url, attempts)
+    return _retry("检查更新", attempts, lambda: _fetch_once(url, timeout))
 
 
 @dataclass(frozen=True)
@@ -224,16 +304,15 @@ def plan(
 # ---------------------------------------------------------------------------
 # 下载
 # ---------------------------------------------------------------------------
-def download(asset: Asset, dest_dir: Path, *, on_progress: ProgressFn | None = None) -> Path:
-    """流式下载并**按清单里的 sha256 校验**；不匹配就删掉并报错。"""
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    name = asset.url.rsplit("/", 1)[-1] or "update.bin"
-    target = dest_dir / name
+def _download_once(
+    asset: Asset, target: Path, on_progress: ProgressFn | None
+) -> str:
+    """下**一次**。返回 sha256；出错就删掉半截文件再抛。"""
     digest = hashlib.sha256()
     done = 0
     request = urllib.request.Request(asset.url, headers={"User-Agent": "OpenMinisDesktop"})
     try:
-        with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_S) as resp:  # noqa: S310
+        with _open(request, DOWNLOAD_TIMEOUT_S) as resp:
             total = int(resp.headers.get("Content-Length") or asset.bytes or 0)
             with target.open("wb") as fh:
                 while True:
@@ -247,15 +326,37 @@ def download(asset: Asset, dest_dir: Path, *, on_progress: ProgressFn | None = N
                         on_progress(done, total)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         target.unlink(missing_ok=True)
-        raise UpdateError(f"下载失败：{exc}") from None
+        if on_progress is not None:
+            on_progress(0, 0)  # 重试会从头下，把进度条收回零，否则看着像卡住了
+        raise UpdateError(f"下载失败：{_describe(exc)}") from None
 
     got = digest.hexdigest()
     if asset.sha256 and got != asset.sha256:
         target.unlink(missing_ok=True)
-        # 报清楚：下载被截断/被换了包，两种都要知道。
+        # 报清楚：下载被截断/被换了包，两种都要知道。截断值得重试一次（大文件走
+        # 抖动网络时很常见），被换了包就不是重试能解决的了 —— 但两者都只是"再下一遍"。
         raise UpdateError(
             f"校验不过（期望 {asset.sha256[:16]}…，实际 {got[:16]}…），已丢弃下载的文件"
         )
+    return got
+
+
+def download(
+    asset: Asset,
+    dest_dir: Path,
+    *,
+    on_progress: ProgressFn | None = None,
+    attempts: int = DOWNLOAD_ATTEMPTS,
+) -> Path:
+    """流式下载并**按清单里的 sha256 校验**；不匹配就删掉并报错。
+
+    大文件在抖动的网络上是"下到一半断掉"的重灾区（39 MB 的整包尤其如此），所以这里
+    也要重试：每次从头下，半截文件在重试前就删掉了。
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = asset.url.rsplit("/", 1)[-1] or "update.bin"
+    target = dest_dir / name
+    _retry("下载", attempts, lambda: _download_once(asset, target, on_progress))
     return target
 
 
