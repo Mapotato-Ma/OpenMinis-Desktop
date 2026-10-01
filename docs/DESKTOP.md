@@ -443,6 +443,49 @@ CI 里的验证步骤很关键：**GUI 构建没有控制台**，所以唯一的
 `Start-Process --no-window --port 8799` 之后 `/api/health` 是否 200、
 `/_desktop/` 是否返回桌面页面。只看「构建成功」是不够的。
 
+### 自己构建
+
+```bat
+git clone <this repo>
+cd OpenMinisDesktop
+build-desktop.bat
+```
+
+需要 Windows + Python 3.11+（`py -3` 或 `python` 在 PATH 里）。脚本会自己建 `.venv`、
+装依赖、跑 PyInstaller、组装 `payload/`，产物在 `dist\OpenMinisDesktop\`。
+
+### 从源码跑（任何平台）
+
+```bash
+pip install -e . "pywebview>=5.0"
+python desktop_main.py                 # 原生窗口
+python desktop_main.py --browser       # 没有 GUI 工具链时，退回浏览器标签页
+python desktop_main.py --no-window     # 只跑后端（服务器 / 无头模式）
+python desktop_main.py --upstream-ui   # 用上游移动端界面
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--host` / `--port` | 绑定地址与端口，默认 `127.0.0.1:8765`；端口被占用时自动换一个 |
+| `--browser` / `--no-window` | 浏览器标签页 / 只跑后端 |
+| `--width` / `--height` | 初始窗口尺寸，默认 1440×900 |
+| `--upstream-ui` | `/` 用上游移动端界面 |
+| `--debug` | 打开 WebView devtools 与详细日志 |
+
+### 验证
+
+**唯一入口**是 `python scripts/check.py`（CI 跑的就是它），四步走完才算过：
+
+| 步 | 内容 |
+|---|---|
+| pytest | `tests/` + `desktop/tests/` |
+| lint | 静态检查未定义 / 重复定义的名字（ruff F821/F811） |
+| frontend | `npm run check`（界面的几个一致性检查） |
+| smoke | `scripts/smoke_test.py`，起真的 ASGI 栈 |
+
+`--fast` 跳过冒烟测试。换平台之后这份基线必须重跑 —— 同一套测试在本地 POSIX 与
+CI 的 Windows 上红的地方可以完全不同（见下面的验证记录）。
+
 ---
 
 ## 6. 验证记录

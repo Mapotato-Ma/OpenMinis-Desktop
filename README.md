@@ -9,7 +9,7 @@
 一个能真正在你机器上执行命令的桌面 agent 工作台 ——
 对话、工具调用、文件树、内置终端、改动 diff，全在一个窗口里。
 
-[**下载**](#下载) · [界面](#界面) · [它是什么](#它是什么) · [桌面壳做了什么](#桌面壳做了什么) · [从源码跑](#从源码跑) · [文档](#文档)
+[**下载**](#下载) · [界面](#界面) · [它是什么](#它是什么) · [桌面壳做了什么](#桌面壳做了什么) · [已知限制](#已知限制) · [文档](#文档)
 
 ![主界面](docs/images/overview.jpg)
 
@@ -21,16 +21,14 @@
 
 ## 下载
 
-**→ [最新版本](../../releases/latest)** · 免安装，解压即用，**不需要装 Python 或 Node**。
-
-| 文件 | 大小 | 用途 |
-|---|---|---|
-| `OpenMinisDesktop-portable.zip` | 39.5 MB | 完整程序，解压后双击文件夹里的 `OpenMinisDesktop.exe` |
-| `OpenMinisDesktop-update.zip` | 2.4 MB | 只更新内核与界面时用的载荷包，**由应用自己下载**，一般不用手动拿 |
-| `latest.json` | 1 KB | 更新清单，应用里点「检查更新」时读的就是它 |
+**→ [下载 `OpenMinisDesktop-portable.zip`](../../releases/latest)** · 约 40 MB · 免安装，
+解压后双击文件夹里的 `OpenMinisDesktop.exe`。**不需要装 Python 或 Node。**
 
 解压后进 **设置 → 模型服务** 填一个 API Key（OpenAI、Anthropic，或任意 OpenAI 兼容网关），
 就能开始对话。
+
+以后的版本不用再手动下：在界面里点 **设置 → 关于 → 检查更新** 即可。
+只改内核与界面时，更新包只有 2~3 MB。
 
 > **双击没反应？** Windows 会给「从网上下载的文件」打上来源标记（MOTW），
 > 而它的自带解压工具会把这个标记传染给解压出来的每一个文件 —— .NET 因此拒绝加载 DLL。
@@ -135,54 +133,6 @@ Python 导入完 `.pyc` 就不持有文件句柄，所以运行中重命名 `pay
 
 ---
 
-## 从源码跑
-
-### 自己构建
-
-```bat
-git clone <this repo>
-cd OpenMinisDesktop
-build-desktop.bat
-```
-
-需要 Windows + Python 3.11+（`py -3` 或 `python` 在 PATH 里）。脚本会自己建 `.venv`、
-装依赖、跑 PyInstaller、组装 `payload/`，产物在 `dist\OpenMinisDesktop\`。
-
-### 直接跑源码（任何平台）
-
-```bash
-pip install -e . "pywebview>=5.0"
-python desktop_main.py                 # 原生窗口
-python desktop_main.py --browser       # 没有 GUI 工具链时，退回浏览器标签页
-python desktop_main.py --no-window     # 只跑后端（服务器 / 无头模式）
-python desktop_main.py --upstream-ui   # 用上游移动端界面
-```
-
-| 参数 | 说明 |
-|---|---|
-| `--host` / `--port` | 绑定地址与端口，默认 `127.0.0.1:8765`；端口被占用时自动换一个 |
-| `--browser` / `--no-window` | 浏览器标签页 / 只跑后端 |
-| `--width` / `--height` | 初始窗口尺寸，默认 1440×900 |
-| `--upstream-ui` | `/` 用上游移动端界面 |
-| `--debug` | 打开 WebView devtools 与详细日志 |
-
-### 验证
-
-**唯一入口**是：
-
-```bash
-python scripts/check.py
-```
-
-它跑四步：全部测试（`tests/` + `desktop/tests/`）、静态检查（ruff F821/F811）、
-前端检查（`npm run check`）、桌面壳冒烟测试。当前 **949 passed / 2 skipped**。
-
-CI（`.github/workflows/build-windows.yml`）在 `windows-latest` 上每次提交都会：
-构建便携版 → 断言内核确实从 `payload/` 加载 → 带窗口探一次原生缩放能力 →
-**模拟浏览器下载（给产物打上 MOTW）再启动一次，验证自愈** → 产更新清单 → 挂 release。
-另有一个 `Verify` 工作流跑 `check.py` 全量。
-
----
 
 ## 已知限制
 
@@ -219,7 +169,7 @@ CI（`.github/workflows/build-windows.yml`）在 `windows-latest` 上每次提�
 
 | 文件 | 内容 |
 |---|---|
-| [`docs/DESKTOP.md`](docs/DESKTOP.md) | 架构与实现细节：进程模型、为什么用运行时挂载、界面协议、打包、MOTW、已知限制 |
+| [`docs/DESKTOP.md`](docs/DESKTOP.md) | 架构与实现细节：进程模型、为什么用运行时挂载、界面协议、MOTW、**自己构建 / 从源码跑 / 参数 / 验证入口** |
 | [`docs/ARCH-REVIEW-2026-09-30.md`](docs/ARCH-REVIEW-2026-09-30.md) | 一次**抛开项目自有规矩**的纯架构检查（6 条按重要性排序的结论，后续三步改造就是从它来的） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、为什么、验证到哪一步（包括没做到的） |
 | [`NOTICE.md`](NOTICE.md) | 上游来源与偏离清单 |
