@@ -176,8 +176,17 @@ def _is_regex_escape(token: str) -> bool:
     return bool(_REGEX_ESCAPE_RE.match(token))
 
 #: 会切换会话目录的命令。
+#:
+#: PORT-FIX(cd-target): 目标只取**第一个参数**，不能一路吃到行尾。
+#: 原来是 ``([^\n|;&]+)`` —— 不停在空格，于是
+#: ``cd /c/Users/me/openminis/workspace 2>/dev/null`` 抓下来的"路径"是
+#: ``/c/Users/me/openminis/workspace 2>/dev/null``，拿去判定必然"越界"。
+#: 后果：**agent 连自己的沙盒目录都进不去**，于是换个写法再试、再被拦，
+#: 一路空转到 max_turns（真机日志：一轮对话 20+ 个回合，每回合都在撞这个）。
+#: 三种写法都要认：带双引号、带单引号、裸词。
 _CD_RE = re.compile(
-    r"(?:^|[|;&]\s*)(?:cd|chdir|set-location|pushd)\s+([^\n|;&]+)", re.IGNORECASE
+    r"""(?:^|[|;&]\s*)(?:cd|chdir|set-location|pushd)\s+(?:"([^"]+)"|'([^']+)'|([^\s\n|;&]+))""",
+    re.IGNORECASE,
 )
 
 #: 重定向写出（``> 路径`` / ``>> 路径``）。
@@ -348,7 +357,7 @@ def scan_escape(command: str, cwd: str = "") -> DeleteRisk:
 
     # 1) cd 家族
     for m in _CD_RE.finditer(command):
-        target = m.group(1).strip()
+        target = next((g for g in m.groups() if g), "").strip()
         if not target or target == "-":
             continue
         if _resolve_outside(target, cwd):

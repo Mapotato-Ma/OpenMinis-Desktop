@@ -1,5 +1,54 @@
 # 变更日志
 
+## v0.4.11 — 修「一直在回复」：cd 目标解析把重定向也吃进去了（2026-10-01）
+
+用户报「感觉怪怪的，模型回复的怪怪的，一直在回复」，并把日志包发了回来。
+
+### 日志说的比人准
+
+那一轮 agent 跑了 **20+ 个回合**（`turn=21` / `turn=22` / `turn=23` …），
+每回合的 `sse_frames` 上千而 `visible_chars` 只有几十 —— 不是复读
+（`repeat_fired=False`），是**一直在撞墙、换个写法再撞**：
+
+```
+WARNING sandbox guard[escape] blocked tool=shell_execute cwd=F:\桌面
+        reasons=目录越界：cd 目标 /c/Users/22679/openminis/workspace 2>/dev/null 在工作区之外
+INFO    agent.runtime: tool_ms name=shell_execute ms=0 ok=True
+```
+
+注意两件事：① 被当成"路径"的是 `…/workspace 2>/dev/null`；
+② 命令其实被拦了，**但工具回报 `ok=True`**（返回的是那句拦截说明）——
+模型看到"成功"，于是换个写法再试。
+
+### 根因：`_CD_RE` 不停在空格
+
+```python
+_CD_RE = re.compile(r"(?:^|[|;&]\s*)(?:cd|chdir|…)\s+([^\n|;&]+)")
+                                                          ↑ 到换行/管道/分号为止
+```
+
+`cd <路径> 2>/dev/null` 抓下来的目标是 `…/workspace 2>/dev/null`，判定必然越界 ——
+**agent 连自己的沙盒目录都进不去**。改成只取第一个参数，三种写法都认
+（双引号 / 单引号 / 裸词，带空格的路径不能被截断）。
+
+### 验证
+
+* `tests/test_guard.py` **47 项**（新增 1 条，平台无关写法）
+* **反向自检**：把正则改回原来那版 → 新测试变红
+* 服务器 `python scripts/check.py` 四步全绿：**962 passed / 2 skipped**
+
+### 日志里另外几件事（不是 bug，但值得知道）
+
+1. **其余越界拦截是对的**。那次任务要碰 `F:\桌面`、`C:\Users\…\AppData\Local\DesktopOrganizer`
+   —— 确实在工作区之外，守卫拦得没错。要让 agent 在这些目录里干活，得先把**会话绑到那个工作区**。
+2. **12 次「出站内容含明文凭据」拦截**：agent 读到的文件里有长十六进制串（疑似密钥），
+   守卫把发往模型和界面的内容拦下了。这是设计如此 —— 但代价是模型看不到那段内容。
+3. **`sse_frames` 远大于 `visible_chars`**：`deepseek-flash` 是推理模型，
+   默认 `effort=high`，每回合要在思考上花掉上万帧、5~40 秒。不是 bug，是这类模型的性子。
+4. **主 agent 的回合上限是 200**（`MAX_AGENT_TURNS`，与上游 Kotlin 一致）；
+   循环保护只在"整轮全被拦"时触发，所以上面那种"每轮都有 ok=True"的空转拦不住。
+
+
 ## v0.4.10 — 修「所有 OpenAI 兼容的服务商都聊不了天」（一个点少写了）（2026-10-01）
 
 用户报：配好 DeepSeek 的 key，**拉取模型列表成功**，但「测试连接」失败；

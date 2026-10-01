@@ -334,6 +334,24 @@ def test_scan_escape_blocks_cd_outside(env):
     assert OUTSIDE in risk.targets
 
 
+def test_scan_escape_reads_only_the_first_cd_argument(env):
+    """PORT-FIX(cd-target)：``cd <自己人目录> 2>/dev/null`` 不能被当成越界。
+
+    真机（2026-10-01）：agent 被要求整理桌面，它想先 ``cd`` 回自己的沙盒
+    —— 而那条命令带着 ``2>/dev/null``。原来的正则一路吃到行尾，于是被判「越界」，
+    agent 换个写法再试、再被拦，一轮对话空转了 20+ 个回合（用户描述：一直在回复）。
+    """
+    ws = Path(env) / "workspace"
+    ws.mkdir(exist_ok=True)
+    # 回自己家：不该拦
+    assert not scan_escape(f"cd {ws} 2>/dev/null").risky
+    assert not scan_escape(f"cd {ws} && ls").risky
+    # 带引号且路径里有空格：整段都要取到（而不是截到空格为止就以为目标到了）
+    assert scan_escape(f'cd "{OUTSIDE}/sp ace"').risky, "带空格的越界路径漏了"
+    # 裸词越界：照拦
+    assert scan_escape(f"cd {OUTSIDE}").risky
+
+
 def test_scan_escape_blocks_cd_dotdot_beyond_root(env):
     ws = Path(env) / "workspace"
     risk = scan_escape("cd ../../..", cwd=str(ws / "sub" / "dir"))
