@@ -37,10 +37,28 @@ _trace_mark("python")
 # no console, and the first log call would otherwise kill startup.
 _LOG_PATH = ensure_console_streams()
 
+from desktop.fatal import install as install_fatal_guard  # noqa: E402
+from desktop.fatal import report_fatal  # noqa: E402
+
+# 任何没人接的异常都要留下证据并让用户看见 —— 无控制台的窗口版最糟的失败模式是
+# 「双击没反应」。见 desktop/fatal.py。
+install_fatal_guard()
+
 from desktop.app import main  # noqa: E402
 
 if __name__ == "__main__":
     os.environ.setdefault("OPENMINIS_DESKTOP", "1")
     if _LOG_PATH is not None:
         print(f"[openminis] no console attached — logging to {_LOG_PATH}", flush=True)
-    raise SystemExit(main())
+    try:
+        _code = main()
+    except SystemExit:
+        raise
+    except BaseException as _exc:  # noqa: BLE001 - 兜底就是它的职责
+        report_fatal(
+            _exc,
+            context="应用启动失败（在窗口出现之前就退出了）。",
+            hint="把上面这段和日志文件发给开发者即可定位。",
+        )
+        _code = 1
+    raise SystemExit(_code)

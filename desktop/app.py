@@ -32,7 +32,7 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from desktop import __version__, paths  # noqa: E402
+from desktop import __version__, motw, paths  # noqa: E402
 
 # 与 desktop_main.py 同一件事（直接跑这个文件时引导脚本不在场）。幂等。
 paths.install_payload_path()
@@ -161,6 +161,18 @@ def main(argv: list[str] | None = None) -> int:
 
     storage = paths.data_root() / "webview"
     app_root = paths.app_root()
+
+    # 加载 .NET 之前最后一道关：从网上下载解压出来的文件带着 MOTW，.NET 会拒绝加载
+    # 这些 DLL，pythonnet 起不来，窗口就永远建不出来。必须赶在 `import webview`
+    # 之前（下面那条路径里才第一次 import 它）。见 desktop/motw.py。
+    motw_state = motw.guard()
+    if motw_state in {"declined", "unfixable"}:
+        logger.error(
+            "文件带着「来自网络」的标记，不解除的话窗口后端加载不了（%s）\n%s",
+            motw_state,
+            motw.MANUAL_HINT,
+        )
+        return 1
 
     # Window first: the user gets a window in the time it takes to unpack the
     # exe and start WebView2, instead of waiting for the whole kernel as well.

@@ -94,6 +94,16 @@ python scripts/smoke_test.py
 |---|---|---|
 | 窗口外壳 | `desktop/` | pywebview 原生窗口（Windows 走 WebView2），uvicorn 跑在后台线程，单实例复用，窗口关闭即停后端 |
 | 桌面界面 | `web/desktop/` | 纯 HTML/CSS/JS，**无构建步骤**，IDE 风格三栏 + 终端抽屉 + 命令面板 |
+### 第一次运行
+
+下载 zip 解压后直接双击 `OpenMinisDesktop.exe`。**如果双击没反应**：Windows 会给
+「从网上下载的文件」打上 `Zone.Identifier` 标记（MOTW），而它的自带解压工具会把这个
+标记传染给解压出来的每一个文件 —— .NET 拒绝加载带标记的 DLL，窗口就建不出来。
+
+应用会自己检测到并**弹窗问你要不要解除锁定**，点「是」即可。也可以事先避开：用
+7-Zip / Bandizip 解压（第三方工具不传染这个标记），或者先右键 zip → 属性 → 勾
+「解除锁定」再解压。详见 `docs/DESKTOP.md` 的「网络来源标记」一节。
+
 | 打包 | `packaging/`, `.github/workflows/` | PyInstaller **便携版（onedir）** + 可覆盖载荷 `payload/`，CI 在 windows-latest 上构建并验证 |
 
 ### 为什么用运行时挂载而不是改内核

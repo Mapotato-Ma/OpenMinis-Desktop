@@ -207,6 +207,78 @@ jobs:
           Compress-Archive -Path dist\OpenMinisDesktop -DestinationPath dist\OpenMinisDesktop-portable.zip
           Get-Item dist\OpenMinisDesktop-portable.zip | Select-Object Name, Length
 
+      - name: Simulate a browser download (MOTW) and verify the app heals itself
+        shell: pwsh
+        # 真实用户的文件**永远**来自浏览器下载：Windows 会给每个文件加上
+        # ``Zone.Identifier``（MOTW），而 .NET 拒绝从带这个标记的文件里加载程序集 ——
+        # v0.4.6 的便携版就这样在一台新电脑上「双击没反应」（pythonnet 的
+        # Python.Runtime.dll 加载失败 → 退出码 1 → 窗口版没有控制台，什么都看不见）。
+        #
+        # 而 CI 的文件都是本机构建的，**天生没有这个标记**，所以永远发现不了这一类
+        # 问题。这里人为打上标记，把自动化流程和真实用户之间这段结构性盲区补掉。
+        run: |
+          $root = "dist\OpenMinisDesktop"
+          function Marked-Files {
+            @(Get-ChildItem $root -Recurse -File | Where-Object {
+              $null -ne (Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue)
+            })
+          }
+          Get-ChildItem $root -Recurse -File | ForEach-Object {
+            Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier `
+                        -Value "[ZoneTransfer]`nZoneId=3" -Encoding ascii
+          }
+          $marked = Marked-Files
+          if ($marked.Count -lt 100) { Write-Error "标记没打上（只有 $($marked.Count) 个）"; exit 1 }
+          Write-Host "已给 $($marked.Count) 个文件打上网络来源标记（模拟浏览器下载 + 解压）"
+
+          # (1) 对照组：不解除锁定时，它确实起不来吗？没这一步，下面的"自愈成功"
+          #     可能只是碰巧（.NET 可能根本没复现）。
+          $env:OPENMINIS_MOTW = "ignore"
+          $p = Start-Process -FilePath "$root\OpenMinisDesktop.exe" -ArgumentList "--port","8805" -PassThru
+          $alive = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 2
+            $p.Refresh(); if ($p.HasExited) { break }
+            try {
+              $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 "http://127.0.0.1:8805/api/health"
+              $alive = $true; break
+            } catch { }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if ($alive) {
+            Write-Host "::warning::带着 MOTW 也起来了 —— 这台机器的 .NET 没复现该问题，对照组无效（自愈断言仍然有效）"
+          } else {
+            Write-Host "对照组确认：带 MOTW 且不解除锁定时，应用起不来（退出码 $($p.ExitCode)）"
+          }
+
+          # (2) 打开自愈：必须能起来
+          $env:OPENMINIS_MOTW = "unblock"
+          $p = Start-Process -FilePath "$root\OpenMinisDesktop.exe" -ArgumentList "--port","8806" -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            $p.Refresh(); if ($p.HasExited) { break }
+            try {
+              $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 "http://127.0.0.1:8806/api/health"
+              $ok = $true; break
+            } catch { }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) {
+            $log = Join-Path $env:USERPROFILE 'openminis\logs\desktop.log'
+            Write-Host "--- desktop.log tail"
+            if (Test-Path $log) { Get-Content $log -Tail 25 }
+            Write-Error "自愈之后仍然起不来（退出码 $($p.ExitCode)）"
+            exit 1
+          }
+          Write-Host "自愈生效：解除锁定后应用正常启动"
+
+          # (3) 标记必须真的被清掉 —— 否则上面的"成功"可能只是碰巧 .NET 放行
+          $left = Marked-Files
+          if ($left.Count -gt 0) { Write-Error "自愈没清干净，还剩 $($left.Count) 个带标记的文件"; exit 1 }
+          Write-Host "标记已全部清除（$($marked.Count) 个）"
+          $env:OPENMINIS_MOTW = ""
+
       - name: Build the update manifest (latest.json)
         shell: pwsh
         # 应用内"检查更新"就是去 releases/latest/download/latest.json 拉这个文件
@@ -260,4 +332,10 @@ jobs:
 
             **更新**：装好之后在界面里「设置 → 关于」点「检查更新」就行 —— 内核与界面的
             更新只有 2~3 MB，装完点一下重启生效，不用重下整包。
+
+            **解压后双击没反应？** 那是 Windows 给「从网上下载的文件」打的标记
+            （MOTW）：Windows 自带解压工具会把它传染给解压出来的每一个文件，而 .NET
+            拒绝加载带这个标记的 DLL。应用现在会**自己弹窗问你要不要解除锁定**，点
+            「是」即可；也可以一开始就用 7-Zip 之类解压，或先跑一句
+            `Get-ChildItem . -Recurse -File | Unblock-File`。
 

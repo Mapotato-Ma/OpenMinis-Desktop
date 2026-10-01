@@ -361,6 +361,57 @@ v0.1.0 的「模型服务」页**没有保存按钮**，于是出现了一个非
 
 ---
 
+## 4.5 网络来源标记（MOTW）：便携版在别人电脑上打不开的头号原因
+
+**症状**：用户从 GitHub 下载 `OpenMinisDesktop-portable.zip`，解压、双击 exe →
+SmartScreen 弹一次 → 点「仍要运行」→ **什么都没有**（任务管理器里也没有进程）。
+第二次双击连 SmartScreen 都不弹，鼠标转两圈就没了。
+
+**日志**（`%USERPROFILE%\openminis\logs\desktop.log`，无控制台版的 stderr 就重定向到
+这里）：
+
+```
+File "webview\platforms\winforms.py", line 17, in <module>
+    import clr
+RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+  from ...\_internal\pythonnet\runtime\Python.Runtime.dll
+```
+
+**机制**：Windows 给「从网络下载来的文件」写一个 `Zone.Identifier` 备用数据流（MOTW），
+**而 Windows 自带的解压工具会把它传染给解压出来的每一个文件**。.NET 拒绝从带这个标记的
+文件加载程序集（`HRESULT: 0x80131515`「不支持操作」）→ pythonnet 起不来 → pywebview 建不出
+窗口 → `webview.start()` 抛异常 → 退出码 1。窗口版没有控制台，所以用户端只看到「双击没
+反应」。
+
+注意**不止一个文件**：只解除 `Python.Runtime.dll` 的话，错误会转移到
+`Microsoft.Web.WebView2.Core.dll`（pywebview 自己的 .NET 桥）。所以要么整个文件夹一起
+解除，要么一开始就用 7-Zip / Bandizip 解压（第三方解压工具不传染这个标记）。
+
+**为什么 CI 抓不到**：CI 上所有文件都是**本机构建**的，天生没有标记；而真实用户的文件
+**永远**来自浏览器下载。这是自动化流程和真实用户之间一个结构性的盲区，靠"多加断言"是
+补不上的 —— 所以 `build-windows.yml` 里现在会**人为给产物打上标记**再启动一次。
+
+**为什么当初是 onefile 的时候没这问题**：PyInstaller 的 onefile 每次启动把内容解到
+`%TEMP%\_MEIxxxx`，那些文件是**当场写出来的**、没有标记；而 onedir（便携版）的文件就躺在
+用户解压出来的目录里，带着下载时继承的标记。**换成便携版是 v0.4.5 的功能升级，副作用就是
+这个** —— 所以 v0.4.6 的那次发布，等于把一个只在真实用户机器上才出现的问题带了出去。
+
+**处理**（`desktop/motw.py`）：
+
+* 在建窗口**之前**（也就是 `import webview` 之前）扫一遍安装目录，发现有带标记的文件就
+  用 `user32.MessageBoxW` 弹窗问用户 —— 这个对话框不依赖 WebView2 也不依赖 pythonnet，
+  所以在这条路上一定弹得出来；
+* 用户点「是」才解除，`OPENMINIS_MOTW=unblock` 供 CI 无人值守，`ignore` 完全跳过；
+* **刻意不做「静默解除」**：删除 MOTW 是攻击者的常用手法（MITRE T1553.005），偷偷做容易
+  招杀软误报，也不尊重用户；
+* 只在**打包版**里做（源码运行时 `sys.executable` 旁边是整个解释器目录，不该去动）；
+* 只在**要开窗口**的那条路上做 —— `--no-window` 根本不加载 .NET，没有这个问题。
+
+配套（`desktop/fatal.py`）：启动期任何没人接的异常都写日志**并弹原生对话框**，带上异常
+类型、末尾几行堆栈和日志路径。同一个「双击没反应」的坑已经咬过三次（v0.3.5 的钩子签名、
+v0.4.6 的 MOTW、以及任何一次窗口还没画出来就抛异常），三次都是因为**无控制台 = 什么都看
+不见**。
+
 ## 5. 打包
 
 `packaging/OpenMinisDesktop.spec`。几个必须显式声明的东西，漏一个就是运行时

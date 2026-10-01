@@ -1,5 +1,74 @@
 # 变更日志
 
+## v0.4.7 — 修「便携版在新电脑上双击没反应」（MOTW）（2026-10-01）
+
+**这是一个真实用户报上来的 bug，而且是 v0.4.5 换成便携版时带出去的。**
+
+### 现场
+
+用户在一台没装过这个软件的电脑上：下载 zip → 解压 → 双击 exe → SmartScreen 弹一次 →
+点「仍要运行」→ **什么都没有**，任务管理器里也没有进程。重启电脑再双击，连 SmartScreen
+都不弹，鼠标转两圈，还是什么都没有。
+
+日志里是（`%USERPROFILE%\openminis\logs\desktop.log`）：
+
+    File "webview\platforms\winforms.py", line 17, in <module>
+        import clr
+    RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+      from ...\_internal\pythonnet\runtime\Python.Runtime.dll
+
+### 根因
+
+Windows 给「从网络下载来的文件」写一个 `Zone.Identifier` 备用数据流（MOTW），
+**而 Windows 自带的解压工具会把它传染给解压出来的每一个文件**。.NET 拒绝从带这个标记的
+文件里加载程序集（`HRESULT: 0x80131515`）→ pythonnet 起不来 → pywebview 建不出窗口 →
+`webview.start()` 抛异常 → 退出码 1。窗口版没有控制台，所以用户只看到「双击没反应」。
+
+**为什么以前没事**：v0.2.0 发的是单文件 exe，PyInstaller 每次启动把内容解到
+`%TEMP%\_MEIxxxx`，那些文件是**当场写出来的、没有标记**；而 onedir（便携版）的文件就躺在
+用户解压出来的目录里，带着下载时继承的标记。换成便携版是 v0.4.5 的功能升级（更新只下
+2~3 MB），副作用就是这个。
+
+**为什么 CI 抓不到**：CI 的文件都是本机构建的，天生没有标记；真实用户的文件**永远**来自
+浏览器下载。这是自动化流程和真实用户之间一个结构性的盲区。
+
+同款问题在别的项目里也有记录（pywebview #1638、XHS-Downloader #459、jiuwenswarm #6107）。
+
+### 修了什么
+
+1. **启动前自检 + 一键修复**（`desktop/motw.py`）：在建窗口**之前**（也就是 `import webview`
+   之前）扫一遍安装目录，发现有带标记的文件就用 `user32.MessageBoxW` 弹窗问一句「是否解除
+   锁定并继续启动？」—— 这个对话框不依赖 WebView2 也不依赖 pythonnet，所以这条路上一定弹
+   得出来。用户点「是」才动手。
+   `OPENMINIS_MOTW=unblock` 供 CI 无人值守，`ignore` 完全跳过。
+   **刻意不做静默解除**：删除 MOTW 是攻击者的常用手法（MITRE T1553.005），偷偷做容易招杀软
+   误报，也不尊重用户。只在打包版里做（源码运行时 `sys.executable` 旁边是整个解释器目录），
+   且只在要开窗口的那条路上做（`--no-window` 根本不加载 .NET）。
+2. **再也不静默失败**（`desktop/fatal.py`）：启动期任何没人接的异常都写日志**并弹原生对话框**
+   —— 带上异常类型、末尾几行堆栈和日志路径。同一个「双击没反应」的坑已经咬过三次
+   （v0.3.5 的钩子签名、这次的 MOTW、以及任何一次窗口还没画出来就抛异常），三次都是因为
+   **无控制台 = 什么都看不见**。
+3. **CI 回归测试**：给构建产物**人为打上 `Zone.Identifier`**（模拟浏览器下载 + 解压）再启动，
+   断言 ① 不解除锁定时确实起不来（对照组，否则"自愈成功"可能只是碰巧）② 打开自愈后能起来
+   ③ 标记真的被清掉了（不是碰巧 .NET 放行）。
+4. 文档：`docs/DESKTOP.md` 新增 4.5 节（机制、为什么 CI 抓不到、为什么 onefile 时期没这问题）；
+   README 与发布说明写了「解压后双击没反应怎么办」。
+
+### 验证
+
+* `desktop/tests/test_motw.py` **18 项** + **8 条反向自检**（撤回「真去删除」→ 3 项红；
+  撤回「先问用户」→ 2 项红；撤回「弹窗」→ 2 项红；撤回「保住异常类型的截断」→ 1 项红）
+* 本地桌面测试 **157 项**
+* 服务器 `python scripts/check.py` 四步全绿
+* CI 打包版实测：见流水线里 "Simulate a browser download (MOTW)" 那一步
+
+### 注意
+
+壳改了（`app.py` / `launcher.py` / `desktop_main.py` + 两个新模块 + 版本号），所以
+**v0.4.6 的用户点「检查更新」会正确地被告知这次需要整包**，而不是 2.35 MB 的载荷 —— 这正是
+壳指纹那条判据在起作用。
+
+
 ## v0.4.6 — 架构第 3 步：应用内一键更新（对标 CC Switch 那套）（2026-09-30）
 
 界面上点一个按钮就能更新，和 CC Switch 一样。做法也照搬它：应用去拉一个**固定地址**

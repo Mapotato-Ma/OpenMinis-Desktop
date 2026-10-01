@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import fatal, motw
 from . import startup_trace as trace
 from .server_runner import BootCancelled, DesktopServer, start_server
 from .window import run_window, start_gui, create_window
@@ -311,8 +312,19 @@ def run_window_first(
     exit_code = 0
     try:
         start_gui(storage_path=storage_path, debug=plan.debug)
-    except Exception:
+    except Exception as exc:
         logger.exception("the GUI loop failed")
+        # 窗口后端起不来（最常见是 .NET / WebView2 没就绪）时，用户端**什么都看不到**：
+        # 无控制台、窗口也没画出来。这里必须弹一个原生对话框，否则又回到
+        # 「双击没反应」那个谜题。见 desktop/fatal.py。
+        fatal.report_fatal(
+            exc,
+            context="窗口界面启动失败（后端是 .NET + WebView2）。",
+            hint=(
+                "若这台电脑上的文件是从网上下载解压来的，先试解除锁定：\n"
+                + motw.MANUAL_HINT
+            ),
+        )
         exit_code = 1
     finally:
         state.mark_closing()
