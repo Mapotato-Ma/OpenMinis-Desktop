@@ -58,12 +58,22 @@ def _diagnose(exc: BaseException, conf: dict[str, Any], model: str) -> dict[str,
                     f"是否有该模型的权限，以及它是否属于 {ptype} 协议的服务商。",
         }
     if status == 404 or "not found" in low or "no such model" in low:
-        return {
-            "error": text,
-            "hint": f"HTTP 404。要么 Base URL 路径不对（当前 {base_url}），"
-                    f"要么模型 ID「{model}」在该服务商不存在 —— "
-                    f"可以先点「拉取模型列表」看它到底提供哪些。",
-        }
+        hint = (
+            f"HTTP 404。先看两件事：① Base URL 对不对（当前 {base_url}）；"
+            f"② 模型 ID「{model}」在不在 —— 点「拉取模型列表」能看到它提供哪些。"
+        )
+        # 第三种可能，也是真机上踩过的那一种：**实例类型选错了**。
+        # Anthropic 引擎打 {base}/v1/messages，OpenAI 兼容的服务打 {base}/chat/completions。
+        # 最坑的是「拉取模型列表」走的是 OpenAI 风格的 GET /models，
+        # 所以类型选错时它**照样会成功** —— 很容易被当成"地址和密钥都没问题"的证据。
+        if _dialect_of(conf) == "anthropic" and "anthropic" not in base_url.lower():
+            hint += (
+                f" ③ **实例类型**：当前选的是 Anthropic 协议，请求会发到 "
+                f"{base_url}/v1/messages；DeepSeek、七牛云、通义、自建网关这类 "
+                f"OpenAI 兼容的服务要把类型改成 OpenAI（请求发到 /chat/completions）。"
+                f"注意「拉取模型列表」走的是 OpenAI 风格，类型选错时它反而会成功。"
+            )
+        return {"error": text, "hint": hint}
     if status == 429 or "rate limit" in low or "quota" in low:
         return {
             "error": text,
@@ -80,6 +90,20 @@ def _diagnose(exc: BaseException, conf: dict[str, Any], model: str) -> dict[str,
         }
     return {"error": text, "hint": "调用失败。可以先用「拉取模型列表」确认地址和密钥通不通。"}
 
+
+def _dialect_of(conf: dict[str, Any]) -> str:
+    """这个实例的线协议（``anthropic`` / ``openai``）。
+
+    问内核的 ``engine_for``，别自己按名字猜 —— 类型名到引擎的映射在内核那边，
+    两处各写一份迟早会不一致。拿不到就退化成空串（提示里少一句而已，不影响功能）。
+    """
+    ptype = str(conf.get("type") or "")
+    try:
+        from openminis.settings.chat_service import engine_for  # noqa: PLC0415
+
+        return str(engine_for(ptype) or "")
+    except Exception:  # pragma: no cover - 内核没起来时不该拖垮提示
+        return ""
 
 async def probe_provider(provider_id: str) -> dict[str, Any]:
     """Send ``ping`` to the stored config of ``provider_id`` and report back.
@@ -99,6 +123,16 @@ async def probe_provider(provider_id: str) -> dict[str, Any]:
                 "hint": "先保存设置，再回来测试。"}
 
     model = str(conf.get("model") or "").strip()
+    if not model:
+        # 少了这句，内核的 _model_for 会去取一个本移植里不存在的默认模型名，
+        # 抛出来的是 ``AttributeError: type object 'LLMModel' has no attribute
+        # 'gpt_4o_mini'`` —— 对用户毫无意义。复现时撞到过。
+        return {
+            "ok": False,
+            "stage": "setup",
+            "error": "这个实例还没填模型 ID",
+            "hint": "点「拉取模型列表」看看它提供哪些，挑一个填进「模型 ID」。",
+        }
 
     # Anything wrong with the *config* (missing key, engine not ported) fails
     # here rather than on the wire, and the message is already user-facing.

@@ -43,6 +43,7 @@
 | `src/openminis/tools/image_gen_tool.py`（导入区） | 加 `if TYPE_CHECKING: import httpx` | `_generate_once(client: "httpx.AsyncClient", …)` 用的是**字符串注解**，运行时从不求值（文件已有 `from __future__ import annotations`），但静态检查报 F821「未定义的名字」。补一个只在类型检查期存在的导入，运行时行为零变化 |
 | `tests/test_scheduled.py` / `test_settings.py` / `test_skills.py` / `test_subagent_events.py` / `test_subagents.py`（共 21 处同名重定义） | 删掉**被遮蔽的那一份**死定义 | 上游的合并残留：同名函数定义两次，Python 只保留最后一个 → 前面那份永远不运行（F811）。其中 20 组逐字节相同，1 组（`test_skill_entry_exposes_declared_env`）死的那份把 `"metadata:\n"` 写成 `"metadata:/n"`（YAML 会解析失败），活的才是对的。删除前后 pytest 收集数**都是 124**，证明这些代码确实从未运行 |
 | `pyproject.toml`（`[tool.pytest.ini_options]`） | `testpaths` 加上 `desktop/tests` | 桌面壳自己的测试（`desktop/` 是本项目新增的代码）不该混进上游的 `tests/` 目录里 |
+| `src/openminis/provider/openai/openai_provider.py`（`_raw_stream_message` 里的 `repeat_diag` 导入） | `from ..core.repeat_diag` → **`from ...core.repeat_diag`**，并加 `# PORT-FIX(import-depth)` 注释 | 这个文件在 `openminis/provider/openai/` 里，比 `openminis` **低三层**，`..core` 只到 `openminis.provider` → 去找不存在的 `openminis.provider.core`。后果不是诊断功能失效，而是**所有 OpenAI 兼容的服务商**（OpenAI / 七牛云 / DeepSeek / 自建网关）一到流式那一步就 `ModuleNotFoundError`，对话根本走不下去 —— 从 v0.4.1 起跨了九个版本没人发现。`src/openminis/core/repeat_diag.py` 一直都在，只是少了一个点。同类：`src/openminis/plugins/drivers/__init__.py` 的 `from .base` → `from ..base`（在 `TYPE_CHECKING` 里，运行时无害，但同样是错的）。护栏：`desktop/tests/test_relative_imports.py` 用 AST 静态解析全部相对导入 |
 
 上游修好之后删掉这些改动即可回到「一行未改」——判据是 `curl` 一份上游 `main`
 的对应文件，确认问题已经不在。

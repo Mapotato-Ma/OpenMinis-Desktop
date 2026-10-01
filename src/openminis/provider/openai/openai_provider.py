@@ -314,7 +314,13 @@ class OpenAIProvider(LLMProvider):
         think_parser = ThinkPrefixStreamParser()
         # PORT-FIX(desktop diagnostics): watch the visible stream for a runaway
         # repeat (the "输出一直重复一大段" field report). Logs once per response.
-        from ..core.repeat_diag import StreamRepeatWatch
+        # PORT-FIX(import-depth): 这里是 ``provider/openai/``，比 ``openminis`` 低三层，
+        # 要用 ``...core``。原来写成 ``..core``，解析成不存在的
+        # ``openminis.provider.core.repeat_diag`` → **所有 OpenAI 兼容服务商**
+        # （OpenAI / 七牛云 / DeepSeek / 自建网关）一到流式那一步就抛
+        # ModuleNotFoundError，对话根本走不下去。2026-10-01 用户报「选 openai 也是
+        # 调用失败」时抓到的。src/openminis/core/repeat_diag.py 一直都在。
+        from ...core.repeat_diag import StreamRepeatWatch
 
         repeat_watch = StreamRepeatWatch(label=f"openai-stream[{self.model.id}]")
         # count raw SSE frames + visible chars so the log shows whether a relay

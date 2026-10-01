@@ -55,7 +55,7 @@ _restart_hook: dict[str, Callable[[], None] | None] = {"fn": None}
 def set_restart_hook(fn: Callable[[], None] | None) -> None:
     """壳在窗口建好之后把"怎么正常退出"告诉这里（见 desktop/launcher.py）。"""
     _restart_hook["fn"] = fn
-DESKTOP_UI_VERSION = "0.4.9"
+DESKTOP_UI_VERSION = "0.4.10"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -163,16 +163,17 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         logger.info("desktop clear-data: %s", counts)
         return JSONResponse({"ok": True, "cleared": counts}, headers=_NO_STORE)
 
-    async def _logs_bundle(request: Any) -> Any:  # noqa: ARG001
-        """打包全部日志成一个 zip 供下载 —— 排障时用户把它发回来即可。
+    def _logs_zip() -> bytes:
+        """把两处日志打成一个 zip。
 
-        收集两处：内核 ``cache_dir/logs``（``minis.log*``，含本次新增的
-        ``[repeat-diag]`` 行）与桌面壳 ``data_root/logs``（``desktop.log``）。
+        收集两处：内核 ``cache_dir/logs``（``minis.log*``，含 ``[repeat-diag]``
+        行）与桌面壳 ``data_root/logs``（``desktop.log``）。
+
+        「下载」与「存到磁盘」两个端点共用这一份 —— 两份实现迟早会漂移成
+        两种内容，而排障恰恰要求它们是同一件事。
         """
         import io  # noqa: PLC0415
         import zipfile  # noqa: PLC0415
-
-        from starlette.responses import Response  # noqa: PLC0415
 
         from .paths import data_root  # noqa: PLC0415
 
@@ -195,6 +196,10 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
                 for p in sorted(root.glob("*")):
                     if not p.is_file():
                         continue
+                    # 别把之前存下来的日志包再包进去 —— 写进同一目录会让它越滚越大，
+                    # 而且排障时收到一堆套娃 zip 毫无意义。
+                    if p.name.startswith("openminis-logs-") and p.suffix == ".zip":
+                        continue
                     arc = f"{root.name}/{p.name}"
                     if arc in seen:
                         continue
@@ -206,14 +211,49 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
                         continue
             if added == 0:
                 zf.writestr("README.txt", "还没有任何日志文件。跑一轮对话后再下载。\n")
-        data = buf.getvalue()
+        return buf.getvalue()
+
+    async def _logs_bundle(request: Any) -> Any:  # noqa: ARG001
+        """把日志 zip 作为响应体发回去（浏览器模式用）。"""
+        from starlette.responses import Response  # noqa: PLC0415
+
         return Response(
-            content=data,
+            content=_logs_zip(),
             media_type="application/zip",
             headers={
                 "Content-Disposition": 'attachment; filename="openminis-logs.zip"',
                 "Cache-Control": "no-store",
             },
+        )
+
+    async def _logs_save(request: Any) -> JSONResponse:  # noqa: ARG001
+        """把日志 zip **写到磁盘上**，返回路径 —— 桌面壳里走这条。
+
+        为什么不靠页面自己下载：窗口是 WebView2，pywebview 没有接管下载事件，
+        页面里 ``blob:`` + ``<a download>`` 到底存不存、存到哪都不由我们说了算。
+        真机上的表现就是「点了按钮，提示说开始下载了，然后什么都没有」——
+        而工具条上那句提示还是我们自己写的，等于对用户撒谎。
+
+        既然这个壳本来就能写本地文件，就自己写、再把路径告诉用户，
+        并让他在文件管理器里直接看到（`explorer` 会选中那个文件）。
+        """
+        import time  # noqa: PLC0415
+
+        from .paths import data_root  # noqa: PLC0415
+
+        directory = data_root() / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"openminis-logs-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        try:
+            data = _logs_zip()
+            path.write_bytes(data)
+        except OSError as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"写入失败：{exc}"}, status_code=500, headers=_NO_STORE
+            )
+        logger.info("logs zip saved: %s (%d bytes)", path, len(data))
+        return JSONResponse(
+            {"ok": True, "path": str(path), "bytes": len(data)}, headers=_NO_STORE
         )
 
     async def _logs_where(request: Any) -> JSONResponse:  # noqa: ARG001
@@ -421,6 +461,8 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             Route("/api/desktop/clear-data", _clear_data, methods=["POST"], include_in_schema=False),
             # /api/desktop/logs —— 打包全部日志下载 / 告知日志目录。排障回路。
             Route("/api/desktop/logs", _logs_bundle, methods=["GET"], include_in_schema=False),
+            # 桌面壳里走这条：直接把 zip 写到日志目录并回报路径（见 _logs_save）。
+            Route("/api/desktop/logs/save", _logs_save, methods=["POST"], include_in_schema=False),
             Route("/api/desktop/logs/where", _logs_where, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/import/cc-switch", _import_scan, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/import/cc-switch", _import_entries, methods=["POST"], include_in_schema=False),

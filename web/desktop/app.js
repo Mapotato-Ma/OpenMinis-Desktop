@@ -2393,6 +2393,7 @@ function wire() {
   $('btnReloadSoul').addEventListener('click', loadSoul);
   $('btnResetSoul').addEventListener('click', resetSoul);
   { const b = $('btnDownloadLogs'); if (b) b.addEventListener('click', downloadLogs); }
+  { const b = $('btnOpenLogs'); if (b) b.addEventListener('click', openLogsFolder); }
   { const b = $('btnClearData'); if (b) b.addEventListener('click', clearAllData); }
   { const b = $('btnCheckUpdate'); if (b) b.addEventListener('click', checkUpdate); }
   { const b = $('btnApplyUpdate'); if (b) b.addEventListener('click', applyUpdate); }
@@ -3951,11 +3952,43 @@ async function restartForUpdate() {
   }
 }
 
-/** 下载全部日志（内核 + 桌面壳）打成一个 zip。 */
+function showLogSaved(path) {
+  const box = $('logSaved'), el = $('logSavedPath');
+  if (el) el.textContent = path || '—';
+  if (box) box.hidden = false;
+}
+
+/** 在文件管理器里定位到刚存下来的那份日志。 */
+function openLogsFolder() {
+  const el = $('logSavedPath');
+  const path = el ? el.textContent : '';
+  if (!path || path === '—') return;
+  if (HAS_BRIDGE() && window.pywebview.api.open_in_file_manager) {
+    window.pywebview.api.open_in_file_manager(path);
+  } else {
+    toast('请手动打开：' + path, 'err');
+  }
+}
+
+/** 打包全部日志（内核 + 桌面壳）成一个 zip。
+ *
+ * 桌面壳里**让后端直接写到磁盘上**，再把路径显示出来并给一个「打开所在文件夹」。
+ * 原因是窗口用的是 WebView2，pywebview 没有接管下载事件，页面里 blob + <a download>
+ * 到底存不存、存到哪都不由我们说了算 —— 真机上的表现就是「提示说已开始下载，
+ * 然后什么都没有」，而那句提示还是我们自己写的，等于对用户撒谎。
+ * 浏览器模式下才退回浏览器下载。
+ */
 async function downloadLogs() {
   const btn = $('btnDownloadLogs');
   if (btn) btn.setAttribute('loading', '');
   try {
+    if (HAS_BRIDGE()) {
+      const r = await api('/desktop/logs/save', { method: 'POST' });
+      if (r && r.ok === false) throw new Error(r.error || '保存失败');
+      showLogSaved(r && r.path);
+      toast('日志已保存，点「打开所在文件夹」就能看到');
+      return;
+    }
     const res = await fetch(API + '/desktop/logs');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const blob = await res.blob();

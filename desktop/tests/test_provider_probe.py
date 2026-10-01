@@ -165,3 +165,60 @@ async def test_probe_never_raises_on_hostile_input():
         assert isinstance(out, dict)
         assert out["ok"] is False
         assert out.get("error")
+
+
+# ── 404 的提示必须点出「实例类型选错了」这条 ─────────────────────────────
+#
+# 真机上踩过：DeepSeek 的实例类型选了 Anthropic → 请求发到
+# https://api.deepseek.com/v1/messages（DeepSeek 只有 OpenAI 那套接口）→ 404。
+# 而「拉取模型列表」走的是 OpenAI 风格的 GET /models，**类型选错时它照样成功** ——
+# 所以用户很容易把那次成功当成"地址和密钥都没问题"的证据，然后一直怀疑 Base URL。
+
+
+def _http_error(status: int) -> BaseException:
+    exc = RuntimeError(f"ProviderError: Provider error: HTTP {status}")
+    exc.status_code = status  # type: ignore[attr-defined]
+    return exc
+
+
+def test_the_404_hint_names_the_type_mismatch():
+    conf = {"type": "anthropic", "baseUrl": "https://api.deepseek.com",
+            "apiKey": "sk", "model": "deepseek-flash"}
+    out = provider_probe._diagnose(_http_error(404), conf, "deepseek-flash")
+    assert "OpenAI" in out["hint"], "没告诉用户该把类型改成 OpenAI"
+    assert "/v1/messages" in out["hint"], "没说明 Anthropic 协议会打到哪个路径"
+    assert "拉取模型列表" in out["hint"], "没提醒那个按钮在类型选错时也会成功"
+
+
+def test_the_404_hint_stays_quiet_when_the_type_matches_the_url():
+    """地址本来就是 Anthropic 的，就别再拿类型去烦用户。"""
+    conf = {"type": "anthropic", "baseUrl": "https://api.anthropic.com",
+            "apiKey": "sk", "model": "claude-x"}
+    out = provider_probe._diagnose(_http_error(404), conf, "claude-x")
+    assert "实例类型" not in out["hint"]
+
+
+def test_the_404_hint_still_leads_with_url_and_model():
+    """类型那条是**补充**，不能把原有的两条挤掉。"""
+    conf = {"type": "openAI", "baseUrl": "https://api.deepseek.com",
+            "apiKey": "sk", "model": "nope"}
+    out = provider_probe._diagnose(_http_error(404), conf, "nope")
+    assert "https://api.deepseek.com" in out["hint"]
+    assert "nope" in out["hint"]
+
+
+async def test_an_empty_model_id_gets_a_clean_message(record_build):
+    """没填模型 ID 时，别把内核那句 AttributeError 甩给用户。
+
+    复现时撞到过：空模型会让内核的 _model_for 去取一个本移植里不存在的默认模型，
+    报 ``type object 'LLMModel' has no attribute 'gpt_4o_mini'`` —— 用户看不懂，
+    也完全指不到"你没填模型"这件事上。
+    """
+    save_settings(providers={"p1": provider_conf(model="")}, activeProviderId="p1")
+
+    out = await probe_provider("p1")
+
+    assert out["ok"] is False
+    assert "模型 ID" in out["error"]
+    assert "gpt_4o_mini" not in str(out.get("error")), "又漏出内核那句原始报错了"
+    assert not record_build.calls, "没填模型就不该去建 provider（也就不会发请求）"

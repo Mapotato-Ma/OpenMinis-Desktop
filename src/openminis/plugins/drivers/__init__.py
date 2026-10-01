@@ -9,7 +9,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .base import ChannelAdapter
+    # 基类在 plugins/base.py，而本文件在 plugins/drivers/ 里 —— 是 ``..base``。
+    # 写成 ``.base`` 时运行时没事（TYPE_CHECKING 为假），但类型检查器会报错，
+    # 也说明这一行从没被人跑过。
+    from ..base import ChannelAdapter
 
 #: 驱动 id → 类。加平台就在这里加一行（并在 builtin/ 放一份插件清单）。
 _DRIVERS: dict[str, str] = {

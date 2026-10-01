@@ -1,5 +1,86 @@
 # 变更日志
 
+## v0.4.10 — 修「所有 OpenAI 兼容的服务商都聊不了天」（一个点少写了）（2026-10-01）
+
+用户报：配好 DeepSeek 的 key，**拉取模型列表成功**，但「测试连接」失败；
+按提示把类型从 Anthropic 改成 OpenAI 之后**还是失败**。
+
+### 真凶：一行相对导入少了一个点
+
+`src/openminis/provider/openai/openai_provider.py` 的流式循环里：
+
+```python
+from ..core.repeat_diag import StreamRepeatWatch
+```
+
+这个文件在 `openminis/provider/openai/`，比 `openminis` **低三层** ——
+`..core` 只到 `openminis.provider`，于是去找**不存在**的
+`openminis.provider.core`。而 `src/openminis/core/repeat_diag.py` 一直都在。
+
+**后果不是"诊断功能失效"，而是所有 OpenAI 兼容的服务商**
+（OpenAI / 七牛云 / DeepSeek / 自建网关）**一到流式那一步就 `ModuleNotFoundError`，
+对话根本走不下去**。从 v0.4.1（提交 `9503e76`）到 v0.4.9，跨了九个版本没人发现：
+
+* 单元测试把 provider 换成了假的，不去碰真流式循环；
+* 内核自带的 `tests/test_repeat_diag.py` 直接测那个模块，它的 import 路径是对的；
+* CI 只探活（`/api/health` 200），**从不真的发一句话**。
+
+### 怎么找到的
+
+用用户那套配置**在服务器上跑真代码**复现（隔离的 `MINIS_HOME`），拿完整堆栈 ——
+探针只回消息、把 traceback 吞了，所以之前只看到"调用失败"。
+中途还踩了一次自己：第一版复现加了 `PYTHONPATH`，跑起来报
+`No module named 'openminis.provider.core'` —— 但那是**路径带偏了**，
+连 `openminis.__file__` 都没打印。加了一行"我到底在跑哪份代码"才排掉。
+
+修完实测（同一个 key、同一套配置）：
+
+| 类型 / 地址 / 模型 | 修复前 | 修复后 |
+|---|---|---|
+| openAI · api.deepseek.com · deepseek-flash | `ModuleNotFoundError` | **ok，828ms，回复 "pong 🏓"** |
+| openAI · api.deepseek.com/v1 · deepseek-flash | 同上 | **ok，978ms** |
+| openAI · api.deepseek.com · deepseek-v4-pro | 同上 | **ok，1169ms** |
+| anthropic · api.deepseek.com（类型选错的对照组） | HTTP 404 | HTTP 404（仍然如实报错） |
+
+### 护栏：用 AST 静态解析全部相对导入
+
+新增 `desktop/tests/test_relative_imports.py`：扫 `src/` `desktop/` `scripts/`，
+把每个 `from ..a.b import x` 按所在包的层级换算成绝对路径，再看磁盘上有没有。
+
+用静态检查而不是"import 一遍试试"：import 需要装齐依赖、还可能带副作用（起服务、
+写文件），而**这类错误纯粹是路径算术**。代价也说清了 —— 它只能证明目标模块存在，
+不能证明名字（`StreamRepeatWatch`）真的在里面。
+
+顺带抓出**同类第二处**：`src/openminis/plugins/drivers/__init__.py` 的
+`from .base` 应该是 `from ..base`（在 `TYPE_CHECKING` 里，运行时无害，但同样是错的）。
+两处都补了 `NOTICE.md` 偏离表。
+
+**反向自检**：把 `...core` 改回 `..core` → 测试红；`..base` 改回 `.base` → 红。
+
+### 另外两个小问题（都是这次一起修的）
+
+1. **404 的提示太含糊**。类型选错（Anthropic 协议 + OpenAI 兼容的地址）会得到
+   `HTTP 404`，而提示只让人怀疑 Base URL 和模型 ID。现在会点名最坑的那条：
+   *Anthropic 引擎打 `{base}/v1/messages`，OpenAI 兼容的服务要选 OpenAI*，
+   并且提醒一句「**拉取模型列表走的是 OpenAI 风格，类型选错时它照样会成功**」——
+   用户正是被那次成功误导的。
+2. **下载日志压缩包点了没反应**。窗口是 WebView2，pywebview 没有接管下载事件，
+   页面里 `blob:` + `<a download>` 存不存、存到哪都不由我们说了算 ——
+   而界面上那句「日志已开始下载」还是我们自己写的，等于对用户撒谎。
+   现在桌面壳里改走 `POST /api/desktop/logs/save`：**后端直接写到
+   `<数据目录>/logs/openminis-logs-<时间戳>.zip`**，界面显示完整路径并给一个
+   「打开所在文件夹」（`explorer` 会选中那个文件）。浏览器模式才退回浏览器下载。
+   顺带：打包时**排除历史日志包**，否则存一次包里就多一层套娃。
+3. 空模型 ID 不再漏出内核那句 `AttributeError: … 'gpt_4o_mini'`，改成
+   「这个实例还没填模型 ID」。
+
+### 验证
+
+* 服务器 `python scripts/check.py` 四步全绿：**961 passed / 2 skipped**
+* 反向自检 3 条（`...core` / `..base` / 空模型护栏）全部"撤回必红"
+* 真实 API 实测见上表（用户自己的 DeepSeek key、真实网络）
+
+
 ## v0.4.9 — 修「解除锁定的弹窗点了确定还是起不来」（真机上抓到的）（2026-10-01）
 
 用户在新电脑上看到那个弹窗，**点「确定」之后应用还是起不来**。截图一看，按钮只有一个

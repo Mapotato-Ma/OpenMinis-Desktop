@@ -69,6 +69,7 @@ def test_every_desktop_route_lands_before_the_kernel_catch_all(ui_dir: Path):
         "/api/desktop/clear-data",
         "/api/desktop/logs",
         "/api/desktop/logs/where",
+        "/api/desktop/logs/save",
         "/",
         f"{DESKTOP_MOUNT_PATH}/",
     ):
@@ -306,3 +307,56 @@ def test_stamp_changes_when_the_file_changes(ui_dir: Path):
     os.utime(ui_dir / "app.js", (time.time() + 5, time.time() + 5))
     after = ui_mount.stamp_assets('<script src="./app.js"></script>', ui_dir)
     assert before != after, f"{before} == {after}"
+
+
+# ── 日志包：桌面壳里必须落到磁盘上 ──────────────────────────────────────
+def test_logs_save_writes_the_zip_and_reports_the_path(ui_dir):
+    """桌面壳里走这条：后端自己写盘，把路径回报给界面。
+
+    为什么不靠页面自己下载：窗口是 WebView2，pywebview 没有接管下载事件，
+    页面里 blob + <a download> 存不存、存到哪都不由我们说了算 ——
+    真机上的表现是「提示说已开始下载，然后什么都没有」，而那句提示还是我们自己写的。
+    """
+    import pathlib as _pathlib
+    import zipfile as _zipfile
+
+    from fastapi.testclient import TestClient
+
+    app = kernel_like_app()
+    attach(app, desktop_dir=ui_dir, ui_active=True)
+    with TestClient(app) as client:
+        r = client.post("/api/desktop/logs/save")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["path"]
+    path = _pathlib.Path(body["path"])
+    assert path.exists() and path.suffix == ".zip", "没真的写到磁盘上"
+    assert body["bytes"] == path.stat().st_size
+    with _zipfile.ZipFile(path) as zf:
+        assert zf.namelist(), "空的压缩包对排障没用"
+
+
+def test_the_saved_zip_is_exactly_what_the_download_endpoint_serves(ui_dir):
+    """两条路必须是**同一份内容**（同一个构造器）。
+
+    否则用户发回来的和界面上说的可能不是一回事，排障就白做了。
+    """
+    import pathlib as _pathlib
+
+    from fastapi.testclient import TestClient
+
+    app = kernel_like_app()
+    attach(app, desktop_dir=ui_dir, ui_active=True)
+    with TestClient(app) as client:
+        saved = client.post("/api/desktop/logs/save").json()
+        got = client.get("/api/desktop/logs")
+    assert got.status_code == 200
+    assert got.content == _pathlib.Path(saved["path"]).read_bytes()
+    # 而且下一次打包不能把上一次那个包再包进去（否则越滚越大）
+    with TestClient(app) as client:
+        again = client.post("/api/desktop/logs/save").json()
+    import zipfile as _zipfile
+
+    with _zipfile.ZipFile(again["path"]) as zf:
+        names = zf.namelist()
+    assert not [n for n in names if "openminis-logs-" in n], f"把历史日志包又包进去了: {names}"
