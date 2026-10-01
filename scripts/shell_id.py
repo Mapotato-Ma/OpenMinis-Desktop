@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -58,6 +59,14 @@ def _iter_shell_files() -> list[Path]:
     return sorted(out, key=lambda p: p.relative_to(REPO).as_posix())
 
 
+#: 只声明版本号的行。发版必然改它们，而它们**不影响壳的行为** ——
+#: 不排除的话，每次发版都会被判成"换壳"，2~3 MB 的载荷更新那条路永远走不到。
+#: （实测 v0.4.10 → v0.4.11：壳只差这三行，指纹却变了。）
+_VERSION_LINE_RE = re.compile(
+    rb"^[ \t]*(?:__version__|DESKTOP_UI_VERSION)[ \t]*=.*$", re.MULTILINE
+)
+
+
 def normalise(data: bytes) -> bytes:
     """把行尾统一成 LF 再算哈希。
 
@@ -67,7 +76,8 @@ def normalise(data: bytes) -> bytes:
 
     顺手也就容忍了用户本地编辑器改行尾的情况。
     """
-    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return _VERSION_LINE_RE.sub(b"", data)
 
 
 def compute() -> str:

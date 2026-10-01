@@ -534,6 +534,38 @@ def test_network_errors_are_translated_into_words():
     assert "超时" in updater._describe(_timeout())
     assert "TLS" in updater._describe(urllib.error.URLError(Exception("certificate verify failed")))
 
+def test_a_version_bump_alone_does_not_change_the_shell_id(tmp_path, monkeypatch):
+    """发版必然要改版本号 —— 它绝不能参与壳指纹。
+
+    否则**每一次发版都会被判成「换壳」**，2~3 MB 的载荷更新那条路永远走不到
+    （实测 v0.4.10 → v0.4.11：壳源码只差 `__version__` / `DESKTOP_UI_VERSION`
+    这三行，指纹却变了，于是整包那条路被走了十几遍）。
+    """
+    import re
+    import shutil
+
+    from scripts import shell_id
+
+    fake = tmp_path / "repo"
+    shutil.copytree(shell_id.REPO / "desktop", fake / "desktop",
+                    ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
+    shutil.copy2(shell_id.REPO / "desktop_main.py", fake / "desktop_main.py")
+    (fake / "packaging").mkdir()
+    shutil.copy2(shell_id.REPO / "packaging" / "OpenMinisDesktop.spec",
+                 fake / "packaging" / "OpenMinisDesktop.spec")
+
+    before = shell_id.compute()
+    for rel in ("desktop/__init__.py", "desktop/ui_mount.py"):
+        f = fake / rel
+        f.write_text(
+            re.sub(r'(__version__|DESKTOP_UI_VERSION) = "[^"]*"', r'\1 = "9.9.9"',
+                   f.read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(shell_id, "REPO", fake)
+    assert shell_id.compute() == before, "改个版本号就把壳指纹改了 —— 载荷更新会永远走不到"
+
+
 def test_cleanup_removes_old_downloads(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "updates_dir", lambda: tmp_path)
     old = tmp_path / "old.zip"
