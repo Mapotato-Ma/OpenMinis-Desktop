@@ -202,6 +202,16 @@ class OpenAIProvider(LLMProvider):
         host = (self.base_url or "").lower()
         self.is_openrouter = "openrouter" in host
         self.is_mistral = "mistral" in host or (model and "mistral" in (model.id or "").lower())
+        # PORT-FIX(deepseek-reasoning-echo): DeepSeek 文档要求**不要**把上一轮的
+        # ``reasoning_content`` 塞回请求（Mistral 那边是直接 422，这里是另一种坏法）。
+        # 塞回去的代价，2026-10-06 实测（真 key、真接口）：
+        #   ① 模型把自己的"打算"当成**已经说过的话**，于是在原地反复表态 ——
+        #      界面上就是「收到…」「明白…」「我再看下…」刷屏（用户原话：像在发神经）；
+        #   ② 每轮都把前面**所有**思考重发一遍，上下文随轮次平方级膨胀。
+        # 同一次实验里，不带该字段的那一轮反而更果断（直接报出看到了什么）。
+        self.is_deepseek = "deepseek" in host or bool(
+            model and "deepseek" in (model.id or "").lower()
+        )
         # [OpenMinis#191] Top-level cache_control passthrough for OpenRouter→Claude.
         self.needs_openrouter_anthropic_cache_control = self.is_openrouter and (
             model is not None and (model.id or "").startswith("anthropic/")
@@ -597,7 +607,7 @@ class OpenAIProvider(LLMProvider):
         # Reasoning echo rules — see Kotlin comments for the vendor rationale.
         model_always_reasons = self.model.supports_reasoning is True
         model_may_reason = self.model.supports_reasoning is not False
-        forbid_reasoning_field = self.is_mistral
+        forbid_reasoning_field = self.is_mistral or self.is_deepseek
         include_reasoning = (
             (thinking_level.is_enabled or model_always_reasons)
             and model_may_reason and not forbid_reasoning_field

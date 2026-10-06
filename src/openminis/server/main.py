@@ -778,16 +778,33 @@ def _spawn_bg(coro: Any) -> asyncio.Task[Any]:
 
 
 async def _handle_stop(client_id: str, msg: dict[str, Any]) -> None:
-    """中断某会话正在生成的一轮（前端「暂停」按钮）。"""
+    """中断某会话正在生成的一轮（前端「暂停」按钮）。
+
+    PORT-FIX(stop-frame): 没有 ``session_id`` 时**必须报错，不能谎报成功**。
+    旧版界面发的是 ``{"type": "stop"}``（不带 id），这里 ``_RUNNING_CHATS.get("")``
+    查不到任何任务、一个协程都没取消，却照样回 ``{"stopped": True}`` ——
+    用户看到「停止」像是生效了，模型在后台接着跑（2026-10-06 真机实测：
+    停止按钮从来没生效过）。现在把三种情况分开说清楚。
+    """
     sid = str(msg.get("session_id") or msg.get("sessionId") or "").strip()
+    if not sid:
+        logger.warning("stop frame arrived without a session id — refused")
+        await _safe_send(client_id, {
+            "type": "error",
+            "error": "停止失败：这一帧没有带会话 id，服务端不知道该停哪一轮",
+        })
+        return
     task = _RUNNING_CHATS.get(sid)
-    if task is not None and not task.done():
-        task.cancel()
+    stopped = task is not None and not task.done()
+    if stopped:
+        task.cancel()  # type: ignore[union-attr]
         # asyncio.wait 不会把子任务的取消抛给当前协程（`await task` 会）。
-        await asyncio.wait({task})
+        await asyncio.wait({task})  # type: ignore[arg-type]
         logger.info("chat stopped by client (%s)", sid)
+    else:
+        logger.info("stop requested but nothing is running (%s)", sid)
     await _safe_send(
-        client_id, {"type": "done", "sessionId": sid, "stopped": True}
+        client_id, {"type": "done", "sessionId": sid, "stopped": stopped}
     )
 
 

@@ -499,6 +499,11 @@ function handleFrame(f) {
         termBuffer = null;
         if (f.exitCode !== 0) termLine(`[退出码 ${f.exitCode}]`, 'err');
       } else {
+        if (f.stopped === false && state.streaming) {
+          // 服务端说「没有正在生成的一轮」——那就是这一轮已经结束了，
+          // 别显示"已停止"让人以为是自己停掉的。
+          toast('这一轮已经结束了，没有正在生成的内容', 'ok');
+        }
         endTurn();
       }
       break;
@@ -592,7 +597,10 @@ async function send() {
 }
 
 function stopTurn() {
-  wsSend({ type: 'stop' });
+  // 必须带 session_id：内核靠它去找「要取消的是哪一轮」（_RUNNING_CHATS[sid]）。
+  // 不带的话服务端查不到任务、什么都没取消，却照样回 done/stopped ——
+  // 界面看着像停了，模型在后台接着跑（用户实测：停止按钮从来没生效过）。
+  wsSend({ type: 'stop', session_id: state.sessionId || undefined });
   setStatusTurn('已请求停止…');
 }
 
