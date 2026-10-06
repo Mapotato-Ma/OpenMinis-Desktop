@@ -849,6 +849,21 @@ function renderWorkspacePicker() {
       ? 'agent 的 shell 就在这个目录里启动'
       : '未绑定目录：agent 只在内核默认沙箱里活动，看不到你自己的项目';
   }
+
+  // 顶部那颗「工作目录」芯片也得跟着走。它以前是**死的**：
+  //   ① 标签 `#wsPath` 全前端没人更新过 —— 永远显示字面量 "workspace"；
+  //   ② 点开的是 state.info.workspace，也就是**内核默认沙盒**，
+  //      跟左侧选中的项目目录根本不是一回事。
+  // 用户实测：左侧选了「桌面 · F:\桌面」，点中间那颗却打开
+  // C:\Users\…\openminis\workspace。
+  const chipLabel = $('wsPath');
+  if (chipLabel) chipLabel.textContent = shown ? (cur.name || '工作目录') : '默认沙盒';
+  const chip = $('wsChip');
+  if (chip) {
+    chip.title = shown
+      ? '工作目录：' + shown + ' — 点击在文件管理器中打开'
+      : '工作目录：内核默认沙盒（左侧还没选项目目录）— 点击打开';
+  }
 }
 
 /** 把当前会话归入某个工作区 —— **这一步才决定 agent 的 shell 在哪个目录里启动**。
@@ -1715,8 +1730,13 @@ function renderInfoTab(rows) {
 }
 
 function openWorkspace() {
-  const p = state.info && state.info.workspace;
+  // 芯片代表「当前工作目录」，所以优先打开**左侧选中的那个项目目录**；
+  // 只有确实没绑工作区时才退回内核默认沙盒，并且如实说出来。
+  const cur = workspaces.find((w) => w.id === currentWorkspace);
+  const bound = (cur && cur.path) || '';
+  const p = bound || (state.info && state.info.workspace);
   if (!p) { toast('工作目录未知'); return; }
+  if (!bound) toast('左侧还没选项目目录，打开的是内核默认沙盒');
   if (window.pywebview && window.pywebview.api && window.pywebview.api.open_in_file_manager) {
     window.pywebview.api.open_in_file_manager(p);
   } else {
