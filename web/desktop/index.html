@@ -184,7 +184,6 @@
         <div class="chat-title" id="chatTitle">未选择会话</div>
         <div class="chat-meta">
           <span class="meta-item" id="metaModel">—</span>
-          <button class="icon-btn" id="btnStop" title="停止生成" hidden><wa-icon library="om" name="square"></wa-icon> 停止</button>
         </div>
       </div>
 
@@ -211,6 +210,7 @@
               <input type="file" id="fileInput" multiple hidden />
             </div>
             <div class="composer-right">
+              <span class="composer-queue" id="queueHint" hidden></span>
               <span class="composer-hint" id="composerHint"></span>
               <span class="composer-usage" id="tokenUsage">—</span>
               <button class="send-btn" id="btnSend" title="发送 (Enter)"><wa-icon library="om" name="arrow-up"></wa-icon></button>

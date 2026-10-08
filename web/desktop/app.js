@@ -12,6 +12,7 @@ const API = '/api';
 const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
 
 const state = {
+  queue: [],   // 生成中收到的新消息排队，这一轮结束后自动发
   sessions: [],
   sessionId: null,
   openFiles: [],       // [{path, content, truncated, scrollTop}] —— 编辑器里开着的文件
@@ -418,6 +419,42 @@ function addToolCardToTurn(id, name, input) {
   scrollChat();
 }
 
+/* 生成状态只有一个开关：改 state.streaming 的地方都要顺手把输入区那颗按钮
+   从「发送」切成「停止」。以前停止键挂在右上角的会话标题栏里，离手太远；
+   用户要求「发出消息之后发送按钮就变成停止」。 */
+function setStreaming(v) {
+  state.streaming = !!v;
+  updateComposerButton();
+  renderQueue();
+}
+
+function updateComposerButton() {
+  const b = $('btnSend');
+  if (!b) return;
+  const stop = !!state.streaming;
+  b.classList.toggle('is-stop', stop);
+  b.title = stop ? '停止生成（输入框仍可发送，会自动排队）' : '发送 (Enter)';
+  const icon = b.querySelector('wa-icon');
+  if (icon) icon.setAttribute('name', stop ? 'square' : 'arrow-up');
+}
+
+/* 排队提示：生成中再发消息不会再被丢掉，这里如实显示排了几条。 */
+function renderQueue() {
+  const el0 = $('queueHint');
+  if (!el0) return;
+  const n = state.queue.length;
+  el0.hidden = n === 0;
+  el0.textContent = n ? `已排队 ${n} 条 · 这轮结束后自动发出` : '';
+}
+
+/** 这一轮结束后，把排队的第一条接上。 */
+async function flushQueue() {
+  if (state.streaming || !state.queue.length) { renderQueue(); return; }
+  const next = state.queue.shift();
+  renderQueue();
+  await sendTurn(next.text, next.typed, next.att);
+}
+
 function endTurn() {
   const t = state.turn;
   if (!t) return;
@@ -434,8 +471,7 @@ function endTurn() {
   if (t.text) addMessageActions(t.root, t.text);
   clearStreamCursor();
   state.turn = null;
-  state.streaming = false;
-  $('btnStop').hidden = true;
+  setStreaming(false);
   setStatusTurn('');
   scrollChat(true);
   loadSessions();
@@ -505,6 +541,7 @@ function handleFrame(f) {
           toast('这一轮已经结束了，没有正在生成的内容', 'ok');
         }
         endTurn();
+        flushQueue();
       }
       break;
     case 'error':
@@ -526,6 +563,9 @@ function handleFrame(f) {
         toast(f.error || '未知错误', 'err');
       }
       endTurn();
+      // 这一轮失败了也不能把排队的内容困住 —— 用户要求「不要发不出去」，
+      // 消息被静默吞掉是最糟的失败方式。
+      flushQueue();
       break;
     case 'pong':
       break;
@@ -544,12 +584,31 @@ function sendNow() {
 async function send() {
   const box = $('input');
   const typed = box.value.trim();
+  const att = state.attachments.slice();
   const attachMd = attachmentMarkdown();
   if (!typed && !attachMd) return;
-  if (state.streaming) { toast('上一条还在处理中'); return; }
 
   // 发给内核的文本 = 输入 + 附件路径引用（path-only，内核据此解析附件）。
   const text = [typed, attachMd].filter(Boolean).join('\n\n');
+
+  box.value = '';
+  state.attachments = [];
+  renderAttachments();
+  autoGrow();
+
+  if (state.streaming) {
+    // 生成中再发 = **排队**，内容不丢。
+    // 改前这里只 toast 一句「上一条还在处理中」就 return 了 —— 打好的字白打。
+    state.queue.push({ text, typed, att });
+    renderQueue();
+    return;
+  }
+
+  await sendTurn(text, typed, att);
+}
+
+/** 真正把一条消息送出去（手动发送和排队出队都走这里）。 */
+async function sendTurn(text, typed, att) {
 
   emptyNode().style.display = 'none';
   const node = el('div', 'msg user');
@@ -558,9 +617,9 @@ async function send() {
   role.appendChild(document.createTextNode('你'));
   node.appendChild(role);
   node.appendChild(el('div', 'msg-body', typed || '(附件)'));
-  if (state.attachments.length) {
+  if (att.length) {
     const strip = el('div', 'msg-attachments');
-    for (const a of state.attachments) {
+    for (const a of att) {
       if (a.kind === 'image') {
         const img = el('img', 'msg-attach-thumb');
         img.src = a.url;  // upload 已返回 /api/... 前缀，别再加
@@ -577,12 +636,7 @@ async function send() {
   $('messages').appendChild(node);
   scrollChat(true);
 
-  box.value = '';
-  state.attachments = [];
-  renderAttachments();
-  autoGrow();
-  state.streaming = true;
-  $('btnStop').hidden = false;
+  setStreaming(true);
   setStatusTurn('思考中…');
   beginTurn();
 
@@ -2352,8 +2406,10 @@ function wire() {
   $('btnReloadSessions').addEventListener('click', loadSessions);
   $('sessionFilter').addEventListener('input', (e) => { state.filter = e.target.value; renderSessions(); });
 
-  $('btnSend').addEventListener('click', sendNow);
-  $('btnStop').addEventListener('click', stopTurn);
+  $('btnSend').addEventListener('click', () => {
+    // 同一颗按钮：生成中按 = 停止，空闲按 = 发送（用户要求把停止从右上角挪进来）。
+    if (state.streaming) stopTurn(); else sendNow();
+  });
   $('input').addEventListener('input', autoGrow);
   $('input').addEventListener('keydown', onKeydown);
 

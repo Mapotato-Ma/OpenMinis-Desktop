@@ -570,6 +570,15 @@ kbd {
   display: grid; place-items: center;
 }
 .send-btn:hover { background: var(--accent-strong); }
+/* 生成中那颗按钮变成「停止」：同一个位置、同一个尺寸，只换颜色和图标。 */
+.send-btn.is-stop { background: var(--danger, #d64545); }
+.send-btn.is-stop:hover { background: var(--danger-strong, var(--danger, #b93a3a)); }
+.composer-queue {
+  color: var(--fg-muted, #8a94a6);
+  font-size: 12px;
+  margin-right: 8px;
+  white-space: nowrap;
+}
 .send-btn:disabled { background: var(--bg-active); color: var(--fg-faint); cursor: default; }
 
 /* ── inspector ─────────────────────────────────────────────────────────── */
