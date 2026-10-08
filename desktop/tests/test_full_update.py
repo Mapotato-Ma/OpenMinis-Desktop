@@ -175,7 +175,13 @@ def test_helper_scripts_go_out_in_the_ansi_codepage_on_windows(monkeypatch):
     assert updater.script_encoding() == "mbcs"
 
 
-def test_helper_scripts_use_utf8_off_windows():
+def test_helper_scripts_use_utf8_off_windows(monkeypatch):
+    """非 Windows 上没有 cmd，助手脚本用 utf-8 就够。
+
+    **必须显式固定平台**：写成裸断言的话，这条测试在 windows-latest 上必红
+    （那边 script_encoding() 返回 mbcs）—— CI 当场抓到过一次。
+    """
+    monkeypatch.setattr(updater.sys, "platform", "linux")
     assert updater.script_encoding() == "utf-8"
 
 
