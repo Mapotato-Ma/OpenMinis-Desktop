@@ -60,8 +60,14 @@ def test_cancelled_and_timed_out_commands_really_die(env, tmp_path):
         shell = PersistentShell(session_id="t1", cwd=tmp_path)
         try:
             # ① 取消路径（用户按停止）
+            # 命令里带一个**孙进程**（子 shell 后台任务）——只杀直接子进程的实现
+            # 会把它漏掉，而真实场景里干活的恰恰是这些孙子（curl / python / node）。
             task = asyncio.create_task(
-                shell.execute_command("sleep 4; echo x > leaked1.txt", timeout=60)
+                shell.execute_command(
+                    "( sleep 4; echo x > leaked1.txt ) & sleep 4; "
+                    "echo x > leaked1b.txt",
+                    timeout=60,
+                )
             )
             await asyncio.sleep(1.0)
             task.cancel()
@@ -83,14 +89,32 @@ def test_cancelled_and_timed_out_commands_really_die(env, tmp_path):
             assert not (tmp_path / "leaked2.txt").exists(), (
                 "超时后命令还在跑 —— 会污染下一条命令的输出"
             )
+            assert not (tmp_path / "leaked1b.txt").exists(), (
+                "孙进程（子 shell 后台任务）没被杀 —— 只杀了直接子进程"
+            )
 
             # ④ 被杀掉的 shell 要能自动重建，后续命令照常
+            #    （也是那条"读循环把下一条命令判成 exit=-1 → 一次性兜底把命令
+            #     再执行一遍"的回归位：这里必须拿到真回显，不能是 exit=-1）
             out, code = await shell.execute_command("echo alive", timeout=30)
             assert code == 0 and "alive" in out
         finally:
             await shell.stop()
 
     asyncio.run(scenario())
+
+
+def test_new_group_kwargs_matches_the_platform():
+    """进程组参数按平台给：POSIX 用 start_new_session（否则 killpg 会自杀）。"""
+    import os as _os
+
+    from openminis.sandbox.persistent_shell import new_group_kwargs
+
+    kwargs = new_group_kwargs()
+    if _os.name == "nt":
+        assert kwargs == {"creationflags": 0x00000200}
+    else:
+        assert kwargs == {"start_new_session": True}
 
 
 def test_coordinator_interrupt_covers_shell_and_fallback(env, monkeypatch, tmp_path):
@@ -119,3 +143,106 @@ def test_coordinator_interrupt_covers_shell_and_fallback(env, monkeypatch, tmp_p
     assert killed == [99], "一次性兜底的子进程没被杀"
     assert "db-k1" not in coord._shells, "杀完要把 shell 从表里摘掉（下次重建）"
     assert coord.interrupt("db-k1") == "没有正在跑的命令"
+
+
+def test_coordinator_interrupt_reaches_subagent_shells(env, monkeypatch, tmp_path):
+    """子代理的 shell（``<key>:sub:<id>``）也要在射程内。
+
+    开着子代理时**绝大部分工具调用发生在子代理里**（见 main.py 的群聊可视化
+    注释）—— 只按精确 key 杀的话，用户按了停止，子代理那条长命令还在跑，
+    正是「停止要把所有工具调用全部杀掉」没做到的那一半。
+    """
+    from openminis.sandbox import execution_coordinator as ec
+    from openminis.sandbox import persistent_shell as ps
+
+    monkeypatch.setattr(ps, "kill_process_tree", lambda pid, proc=None: "已终止进程组")
+
+    class _Proc:
+        pid = 7
+        returncode = None
+
+    coord = ec.ExecutionCoordinator()
+    for key in ("db-k1", "db-k1:sub:abc", "db-k1:sub:def", "db-k10"):
+        shell = ps.PersistentShell(session_id=key, cwd=tmp_path)
+        shell._process = _Proc()  # type: ignore[assignment]
+        coord._shells[key] = shell
+
+    note = coord.interrupt("db-k1")
+    # 自己 + 两个子代理，都被收掉
+    assert note.count("已终止进程组") == 3, note
+    assert "db-k10" in coord._shells, "前缀匹配不能误伤 db-k10（冒号才是分隔符）"
+    assert set(coord._shells) == {"db-k10"}
+
+
+def test_one_shot_fallback_cancel_kills_the_registered_process(env, monkeypatch, tmp_path):
+    """持久 shell 失效时走的一次性兜底：取消/超时必须杀掉子进程，且登记过。
+
+    独立复核（2026-10-08）的突变实测：把这条改动（kill + register_fallback）撤掉，
+    **57 个用例全绿** —— 也就是说「停止杀不掉」的另一条路径一行断言都没有。
+    """
+    import json
+    import types as _types
+
+    from openminis.sandbox import persistent_shell as ps
+    from openminis.tools import shell_execute_tool as st
+
+    killed: list[int] = []
+    events: dict = {}
+    real_kill = ps.kill_process_tree
+
+    def _fake_kill(pid, proc=None):  # noqa: ANN001 - 记账 + 真杀（别留残余进程）
+        killed.append(pid)
+        return real_kill(pid, proc)
+
+    monkeypatch.setattr(ps, "kill_process_tree", _fake_kill)
+
+    class _Coord:
+        _cwd_overrides: dict = {}
+
+        def cwd_for(self, session_id):  # noqa: ANN001
+            return str(tmp_path)
+
+        def execute(self, *a, **k):  # noqa: ANN002, ANN003
+            async def _inner():
+                return _types.SimpleNamespace(output="", exit_code=-1)
+            return _inner()
+
+        def register_fallback(self, session_id, proc):  # noqa: ANN001
+            events["reg"] = (session_id, proc.pid)
+
+        def unregister_fallback(self, session_id, proc):  # noqa: ANN001
+            events["unreg"] = (session_id, proc.pid)
+
+        def interrupt(self, session_id):  # noqa: ANN001
+            return "stub"
+
+    tool = st.ShellExecuteTool()
+    tool.coordinator = _Coord()
+
+    async def scenario() -> None:
+        # 取消路径（用户按停止）
+        task = asyncio.create_task(
+            tool.execute('{"command": "sleep 30", "tool_title": "t"}', "db-s1")
+        )
+        for _ in range(300):
+            if "reg" in events:
+                break
+            await asyncio.sleep(0.02)
+        assert "reg" in events, "兜底子进程没登记 —— 停止按钮就杀不到它"
+        assert events["reg"][0] == "db-s1", "登记的 key 要对得上（工具侧那个）"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert killed == [events["reg"][1]], "取消后没杀掉兜底子进程"
+
+        # 超时路径
+        killed.clear()
+        events.clear()
+        res = await tool.execute(
+            json.dumps({"command": "sleep 30", "timeout": 1, "tool_title": "t"}), "db-s1"
+        )
+        assert not res.success, "超时必须如实失败"
+        assert killed == [events["reg"][1]], "超时后没杀掉兜底子进程"
+        assert events.get("unreg", (None,))[0] == "db-s1", "跑完要注销登记"
+
+    asyncio.run(scenario())

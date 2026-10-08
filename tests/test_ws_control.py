@@ -144,9 +144,10 @@ def test_stop_without_session_id_falls_back_to_this_client(env, monkeypatch):
             sent.append(payload)
 
         monkeypatch.setattr(server_main, "_safe_send", fake_send)
-        monkeypatch.setattr(
-            server_main, "_interrupt_session_shell", lambda sid: "stub"
-        )
+        async def _fake_interrupt(sid: str) -> str:
+            return "stub"
+
+        monkeypatch.setattr(server_main, "_interrupt_session_shell", _fake_interrupt)
         server_main._RUNNING_CHATS.clear()
         server_main._RUNNING_BY_CLIENT.clear()
         task = asyncio.create_task(stuck())
@@ -195,11 +196,11 @@ def test_stop_kills_the_shell_and_dismisses_confirmations(env, monkeypatch):
             sent.append(payload)
 
         monkeypatch.setattr(server_main, "_safe_send", fake_send)
-        monkeypatch.setattr(
-            server_main,
-            "_interrupt_session_shell",
-            lambda sid: seen.setdefault("sid", sid) or "已终止进程树",
-        )
+        async def _fake_interrupt(sid: str) -> str:
+            seen["sid"] = sid
+            return "已终止进程树"
+
+        monkeypatch.setattr(server_main, "_interrupt_session_shell", _fake_interrupt)
         server_main._RUNNING_CHATS.clear()
         server_main._RUNNING_BY_CLIENT.clear()
         server_main._PENDING_CONFIRM.clear()
@@ -298,6 +299,134 @@ def test_interrupt_session_shell_uses_the_db_prefixed_key(env, monkeypatch):
     monkeypatch.setattr(shell_tool, "get_coordinator", lambda: _FakeCoordinator())
     from openminis.server import main as server_main
 
-    assert server_main._interrupt_session_shell("abc123") == "已终止进程树 (pid=1)"
-    assert seen["key"] == "db-abc123"
-    assert server_main._interrupt_session_shell("") == ""
+    async def scenario() -> None:
+        assert await server_main._interrupt_session_shell("abc123") == "已终止进程树 (pid=1)"
+        assert seen["key"] == "db-abc123"
+        assert await server_main._interrupt_session_shell("") == ""
+
+    asyncio.run(scenario())
+
+
+def test_stop_with_a_stale_id_uses_the_registered_one(env, monkeypatch):
+    """停止帧带的 id 跟真正在跑的那一轮不一致时，按**登记里的** id 走。
+
+    独立复核（2026-10-08）指出：帧里的 sid 若在库里已不存在，``_run_chat`` 会
+    另建一个 id 并推 ``chatSession`` 帧，界面随后学到新 id —— 于是"要停的"与
+    "登记的"分属两个 id。杀 shell 必须用登记的那个键（工具侧是 ``db-<sid>``），
+    回帧也要回登记的那个，界面才能把正确的会话标成结束。
+    """
+    from openminis.server import main as server_main
+
+    async def scenario() -> None:
+        sent: list[dict] = []
+        seen: dict = {}
+
+        async def fake_send(_cid: str, payload: dict) -> None:
+            sent.append(payload)
+
+        async def _fake_interrupt(sid: str) -> str:
+            seen["sid"] = sid
+            return "已终止进程树"
+
+        monkeypatch.setattr(server_main, "_safe_send", fake_send)
+        monkeypatch.setattr(server_main, "_interrupt_session_shell", _fake_interrupt)
+        server_main._RUNNING_CHATS.clear()
+        server_main._RUNNING_BY_CLIENT.clear()
+        task = asyncio.create_task(asyncio.sleep(30))
+        await asyncio.sleep(0)
+        server_main._register_running("real-id", task, "c1")
+
+        try:
+            await server_main._handle_stop("c1", {"sessionId": "stale-id"})
+            # 按 id 查不到 → 走连接兜底 → 拿的是登记里的 real-id
+            assert seen.get("sid") == "real-id", "杀 shell 用错 id 了"
+            assert sent[-1]["sessionId"] == "real-id", "回帧该用登记里的 id"
+            assert sent[-1]["stopped"] is True
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            server_main._RUNNING_CHATS.clear()
+            server_main._RUNNING_BY_CLIENT.clear()
+
+    asyncio.run(scenario())
+
+
+def test_stop_without_id_never_touches_another_clients_turn(env, monkeypatch):
+    """按连接兜底**只**停这条连接自己的那一轮 —— 别把别人的会话停了。"""
+    from openminis.server import main as server_main
+
+    async def scenario() -> None:
+        sent: list[dict] = []
+
+        async def fake_send(_cid: str, payload: dict) -> None:
+            sent.append(payload)
+
+        async def _fake_interrupt(sid: str) -> str:
+            return "stub"
+
+        monkeypatch.setattr(server_main, "_safe_send", fake_send)
+        monkeypatch.setattr(server_main, "_interrupt_session_shell", _fake_interrupt)
+        server_main._RUNNING_CHATS.clear()
+        server_main._RUNNING_BY_CLIENT.clear()
+        other = asyncio.create_task(asyncio.sleep(30))
+        mine = asyncio.create_task(asyncio.sleep(30))
+        await asyncio.sleep(0)
+        server_main._register_running("A", other, "c-other")
+        server_main._register_running("B", mine, "c1")
+
+        try:
+            await server_main._handle_stop("c1", {})  # 不带 id
+            assert mine.cancelled() or mine.done(), "自己的那一轮没被停掉"
+            assert not other.cancelled(), "把别的连接上在跑的一轮停了"
+        finally:
+            for t in (other, mine):
+                t.cancel()
+            await asyncio.gather(other, mine, return_exceptions=True)
+            server_main._RUNNING_CHATS.clear()
+            server_main._RUNNING_BY_CLIENT.clear()
+
+    asyncio.run(scenario())
+
+
+def test_stale_session_id_in_the_frame_is_registered_under_the_new_one(env, monkeypatch):
+    """帧里的 sid 在库里不存在 → ``_run_chat`` 另建一个 id，登记必须落在新 id 上。
+
+    这是与"首轮根本没带 id"并列的第二条真实现场路径（复核 2026-10-08 指出）：
+    界面稍后会从 ``chatSession`` 帧学到新 id，用户按停止时手里拿的是**新 id** ——
+    登记若还挂在旧 id 上，一样查不到、一样停不下来。
+    """
+    from openminis.server import main as server_main
+
+    async def scenario() -> None:
+        seen: dict = {}
+
+        def _snapshot_setup(*_a, **_k):
+            seen["running"] = dict(server_main._RUNNING_CHATS)
+            seen["by_client"] = dict(server_main._RUNNING_BY_CLIENT)
+            raise server_main.ChatSetupError("到此为止（测试只关心登记）")
+
+        async def fake_send(_cid: str, payload: dict) -> None:
+            pass
+
+        monkeypatch.setattr(server_main, "_safe_send", fake_send)
+        monkeypatch.setattr(server_main, "build_chat_setup", _snapshot_setup)
+        server_main._RUNNING_CHATS.clear()
+        server_main._RUNNING_BY_CLIENT.clear()
+
+        await server_main._handle_chat("c1", {"text": "你好", "session_id": "ghost-id"})
+        entry = server_main._RUNNING_BY_CLIENT.get("c1")
+        assert entry is not None
+        try:
+            await asyncio.wait_for(asyncio.shield(entry[1]), timeout=60)
+        except asyncio.TimeoutError:  # pragma: no cover
+            entry[1].cancel()
+        assert seen, "这一轮根本没跑起来"
+
+        running = seen.get("running") or {}
+        sid = seen["by_client"]["c1"][0]
+        # 新 id 必须登记上（帧里那个失效的 id 也留着无妨：任务结束时两个键一起
+        # 清掉，停止按哪个键都能停到同一轮）
+        assert sid and sid != "ghost-id", "没换成新 id"
+        assert sid in running, "另建 id 之后没登记 —— 界面拿着新 id 来停止会查不到"
+
+    asyncio.run(scenario())

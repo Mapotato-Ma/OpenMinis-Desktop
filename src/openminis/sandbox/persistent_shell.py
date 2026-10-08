@@ -74,14 +74,26 @@ def kill_process_tree(pid: int, proc: Any = None) -> str:
         try:
             import subprocess as _sp
 
-            _sp.run(
+            done = _sp.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
                 timeout=10,
+                text=True,
+                errors="replace",
             )
-            return f"已终止进程树 (pid={pid})"
-        except Exception as exc:  # pragma: no cover - 杀不掉就退回单进程
-            logger.debug("taskkill failed: %s", exc)
+            # **必须看返回码**：taskkill 失败（父 shell 已退出 →「没有找到进程」、
+            # 权限不足、跨会话/提权子进程）时返回非 0，不看就会**谎报成功** ——
+            # 用户以为停住了，进程还在跑，而且状态已被清掉、第二次按停止只会拿到
+            # 「没有正在跑的命令」（独立复核 2026-10-08 指出：那样等于把
+            # "停止停不下来" 原样保留，只是日志从 nothing is running 变成
+            # 已终止进程树）。
+            if done.returncode == 0:
+                return f"已终止进程树 (pid={pid})"
+            detail = (done.stderr or done.stdout or "").strip().splitlines()
+            logger.warning("taskkill rc=%s pid=%s: %s",
+                           done.returncode, pid, detail[-1][:200] if detail else "?")
+        except Exception as exc:
+            logger.warning("taskkill raised for pid=%s: %s", pid, exc)
     else:
         try:
             os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -257,6 +269,8 @@ class PersistentShell:
         self._is_starting = False
         self._pending: Optional[_CommandCallback] = None
         self._reader_task: Optional[asyncio.Task[None]] = None
+        #: 上一次没杀掉的 pid（下次中断再试一次，见 interrupt_now）。
+        self._unreaped_pid: Optional[int] = None
         self._lock = asyncio.Lock()
         # PORT: set by the reader task when stdout hits EOF. Needed because
         # ``Process.returncode`` is filled in asynchronously by the event loop
@@ -432,6 +446,12 @@ class PersistentShell:
         except Exception as exc:
             logger.error("PersistentShell[%s]: read loop died: %s", self.session_id, exc)
         finally:
+            # 如果这个读循环属于**已经被中断掉**的那个进程，就到此为止：它的
+            # finally 再去动共享状态（_dead / _pending）会把**下一条**命令判成
+            # exit=-1 —— 上层据此走一次性兜底，于是那条命令被**再执行一遍**
+            # （对 git push / rm 这类命令就是事故）。独立复核 2026-10-08 指出。
+            if self._process is not proc:
+                return
             # stdout hit EOF — the shell is gone. Mark it dead BEFORE resolving
             # the in-flight command so ``is_alive`` stops lying immediately
             # (see the ``_dead`` note in ``__init__``).
@@ -474,8 +494,14 @@ class PersistentShell:
 
         Returns ``(output, exit_code)``. Mirrors Kotlin's contract including the
         "[Shell not running]" diagnostic on a dead shell and exit ``124`` on
-        timeout (the shell itself is left alive — a hung command must not force
-        a cold restart of the session's environment).
+        timeout.
+
+        # PORT-FIX(interrupt-kills): 超时**不再**保留 shell。原先的说明是
+        "a hung command must not force a cold restart" —— 但那条挂住的命令会
+        一直占着这个 shell 的输出管道，它的余音会掺进**下一条**命令的回显里
+        （现场症状：模型看到两段输出拼在一起，以为命令写错了）。所以超时与
+        取消都走 ``interrupt_now()``：杀掉整棵进程树，下一条命令从干净 shell
+        重新开始。
         """
         await self.ensure_started()
 
@@ -515,7 +541,8 @@ class PersistentShell:
             note = self.interrupt_now()
             logger.warning("PersistentShell[%s]: command timed out after %ss; %s",
                            self.session_id, int(timeout), note)
-            return f"[Command timed out after {int(timeout)}s]", 124
+            return (f"[Command timed out after {int(timeout)}s]"
+                    "（该命令已被终止，shell 已重建：cd / export / 后台任务需重新执行）", 124)
         except asyncio.CancelledError:
             # 用户按了「停止」：把这条工具调用**真的杀掉**，而不是只丢掉等待。
             note = self.interrupt_now()
@@ -532,14 +559,40 @@ class PersistentShell:
 
         杀掉之后 shell 就没了 —— 下一条命令经 ``ensure_started()`` 自动重建
         （约 1 秒 + 环境变量重注入），比留着一个脏 shell 强。
+
+        杀不掉时（独立复核指出的场景：taskkill 权限不足 / 进程已提权）会把 pid
+        记在 ``_unreaped_pid`` 上，**下一次按停止再试一次** —— 不然那个 pid 在
+        Python 侧就再无引用，用户按第二下只会看到"没有正在跑的命令"。
         """
+        notes: list[str] = []
+        if self._unreaped_pid:
+            notes.append("上次残留：" + kill_process_tree(self._unreaped_pid))
+            self._unreaped_pid = None
+
         proc = self._process
+        if proc is None or proc.returncode is not None:
+            self._dead = True
+            self._pending = None
+            self._process = None
+            return "；".join(notes) if notes else "shell 已经停了"
+
+        note = kill_process_tree(proc.pid, proc)
+        if note.startswith("无法"):
+            self._unreaped_pid = proc.pid
+        notes.append(note)
+
+        # 读循环还挂在那个已经死掉的 stdout 上：不收掉它，它的 finally 会把
+        # **下一次**命令判成 exit=-1（→ 触发一次性兜底把命令**再执行一遍**，
+        # 对 git push / rm 这类命令就是事故）。见 _read_loop 里的同款防护。
+        reader = self._reader_task
+        self._reader_task = None
+        if reader is not None:
+            reader.cancel()
+
         self._dead = True
         self._pending = None
         self._process = None
-        if proc is None or proc.returncode is not None:
-            return "shell 已经停了"
-        return kill_process_tree(proc.pid, proc)
+        return "；".join(notes)
 
 
     # --- environment ------------------------------------------------------

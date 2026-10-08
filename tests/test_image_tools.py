@@ -309,6 +309,36 @@ def test_read_image_does_not_pretend_an_outside_path_is_missing(store, workspace
     assert "工作区" in res.output, "要说清该怎么改（先拷进工作区）"
 
 
+def test_read_image_rejects_windows_looking_outside_paths(store, workspace):
+    r"""Windows 形态的"根路径"同样要如实拒绝，不能当成工作区相对。
+
+    现场就是这条：``\tmp\minis-shots\shot-....png``（浏览器截图默认目录在
+    Windows 上的形态）。在 Linux 上 ``Path("\\tmp\\x")`` 是**相对**路径 ——
+    只看 ``is_absolute()`` 拦不住，必须显式认前导分隔符与盘符。
+    """
+    _setup_chat(store)
+    from openminis.settings.catalog import build_tool_registry
+
+    reg = build_tool_registry(["read_image"])
+    for bad in ("\\tmp\\minis-shots\\shot-1.png", "C:\\tmp\\shot-1.png"):
+        res = asyncio.run(reg["read_image"].executor(
+            json.dumps({"path": bad, "tool_title": "看图"}), "sess"))
+        assert res.success is False, bad
+        assert "Cannot resolve path" in res.output, f"{bad} 被当成了工作区相对路径"
+
+
+def test_read_image_still_accepts_absolute_paths_inside_the_workspace(store, workspace):
+    """新的越界判定不能把"工作区内的绝对路径"也一起拒了（附件走的就是这种）。"""
+    _setup_chat(store)
+    png = _png(workspace)  # <ws>/sess/t.png
+    from openminis.settings.catalog import build_tool_registry
+
+    reg = build_tool_registry(["read_image"])
+    res = asyncio.run(reg["read_image"].executor(
+        json.dumps({"path": str(png), "tool_title": "看图"}), "sess"))
+    assert res.success is True, res.output
+
+
 # ---------------------------------------------------------------------------
 # 最大边长可配
 # ---------------------------------------------------------------------------

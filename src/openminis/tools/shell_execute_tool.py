@@ -111,15 +111,14 @@ class ShellExecuteTool:
         from .path_utils import workspace_root
 
         try:
-            from ..sandbox.persistent_shell import (
-                detect_shell_spec,
-                kill_process_tree,
-                new_group_kwargs,
-            )
+            # 走**模块属性**而不是 from-import：这样测试（和任何调用方）能
+            # monkeypatch 掉 persistent_shell.kill_process_tree 观察真实行为 ——
+            # 复核指出这条改动原本一行断言都没有（撤掉后 57 个用例全绿）。
+            from ..sandbox import persistent_shell as _ps
 
             from ..core.logging import get_logger
 
-            spec = detect_shell_spec()
+            spec = _ps.detect_shell_spec()
         except Exception:
             return None
         cwd = None
@@ -149,7 +148,7 @@ class ShellExecuteTool:
                 cwd=cwd,
                 env=run_env,
                 errors="replace",
-                **new_group_kwargs(),
+                **_ps.new_group_kwargs(),
             )
         except Exception as exc:
             logger.warning("one-shot shell fallback spawn failed: %s", exc)
@@ -159,14 +158,14 @@ class ShellExecuteTool:
             try:
                 out, err = await asyncio.to_thread(proc.communicate, timeout=limit)
             except _sp.TimeoutExpired:
-                kill_process_tree(proc.pid, proc)
+                _ps.kill_process_tree(proc.pid, proc)
                 return f"[Command timed out after {int(limit)}s]", 124
             except asyncio.CancelledError:
                 # 用户按了停止 —— 杀掉，别留孤儿进程在后台继续跑。
-                kill_process_tree(proc.pid, proc)
+                _ps.kill_process_tree(proc.pid, proc)
                 raise
             except Exception as exc:  # pragma: no cover - 兜底绝不能把异常抛上去
-                kill_process_tree(proc.pid, proc)
+                _ps.kill_process_tree(proc.pid, proc)
                 logger.warning("one-shot shell fallback failed: %s", exc)
                 return None
         finally:

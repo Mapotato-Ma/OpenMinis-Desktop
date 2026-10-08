@@ -223,23 +223,36 @@ class ExecutionCoordinator:
         调用点是取消路径，所以这里是**同步**的：任何 ``await`` 都可能被第二次
         取消打断，于是「停止」又退化成「只丢下等待」。返回一句人话给日志。
 
+        **按前缀匹配**：子代理的内层循环用的是 ``<session>:sub:<subagent_id>``
+        （另一个 shell），而「开着子代理时绝大部分工具调用都发生在这里」（见
+        ``main.py`` 的群聊可视化注释）。只按精确 key 杀的话，子代理那条长命令
+        根本不在射程内 —— 用户按了停止，它还在跑。分隔符取冒号，所以
+        ``db-abc`` 不会误伤 ``db-abcd``。
+
         杀完 shell 就没了，下一条命令会自动重建（``ensure_started``）——
         用户要的是「停下」，不是「保留那个脏 shell」。
         """
         notes: list[str] = []
-        shell = self._shells.pop(session_id, None)
-        if shell is not None:
-            notes.append(shell.interrupt_now())
-        proc = self._fallback_procs.pop(session_id, None)
-        if proc is not None:
-            try:
-                proc.kill()
-                notes.append("已终止一次性兜底进程")
-            except Exception as exc:  # pragma: no cover - 进程可能已经退出
-                logger.debug("fallback proc kill failed: %s", exc)
+
+        def _match(key: str) -> bool:
+            return key == session_id or key.startswith(session_id + ":")
+
+        for key in [k for k in self._shells if _match(k)]:
+            shell = self._shells.pop(key, None)
+            if shell is not None:
+                notes.append(f"{key}: {shell.interrupt_now()}")
+        for key in [k for k in self._fallback_procs if _match(k)]:
+            proc = self._fallback_procs.pop(key, None)
+            if proc is not None:
+                try:
+                    proc.kill()
+                    notes.append(f"{key}: 已终止一次性兜底进程")
+                except Exception as exc:  # pragma: no cover - 进程可能已经退出
+                    logger.debug("fallback proc kill failed (%s): %s", key, exc)
         # 环境变量注入缓存跟着 shell 一起作废，下一条命令重新注入。
-        self._last_injected_env.pop(session_id, None)
-        self._last_injected_keys.pop(session_id, None)
+        for key in [k for k in self._last_injected_env if _match(k)]:
+            self._last_injected_env.pop(key, None)
+            self._last_injected_keys.pop(key, None)
         return "；".join(notes) if notes else "没有正在跑的命令"
 
     def register_fallback(self, session_id: str, proc: Any) -> None:

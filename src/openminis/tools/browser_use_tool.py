@@ -24,19 +24,26 @@ __all__ = ["BrowserUseTool", "BROWSER_ACTIONS"]
 
 
 def _screenshot_dir(session_id: str) -> Optional[Path]:
-    """截图默认目录：本会话工作区下的 ``browser-shots/``。
+    """截图默认目录：本会话工作区下的 ``.minis/shots/``。
 
     必须是**工作区内**的目录，否则 read_image（只在工作区里解析路径）读不回来。
     拿不到工作区就返回 None —— 那时退回驱动自带的默认值，宁可不改行为。
+
+    用点目录是为了不污染用户的真实项目目录：工作区常常就是他的代码仓库，
+    冒出一个 ``browser-shots/`` 会直接出现在 ``git status`` 里（独立复核建议）。
     """
     try:
         from .shell_execute_tool import get_coordinator
 
-        base = Path(get_coordinator().cwd_for(session_id))
+        raw = get_coordinator().cwd_for(session_id)
     except Exception:  # pragma: no cover - 协调器不可用就不改默认值
         return None
+    # 空串要当"拿不到"：``Path("")`` 是 ``.``，会在**服务进程的工作目录**里
+    # 建目录并返回相对路径，read_image 照样读不回来 —— 那就白改了。
+    if not raw:
+        return None
     try:
-        target = base / "browser-shots"
+        target = Path(raw) / ".minis" / "shots"
         target.mkdir(parents=True, exist_ok=True)
         return target
     except Exception:  # pragma: no cover - 目录建不出来也别让工具炸

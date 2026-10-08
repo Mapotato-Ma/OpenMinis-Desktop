@@ -223,6 +223,26 @@ def test_danger_mode_does_not_redact_outbound_text(env):
     assert "Xk92dLm3q" not in sanitize_outbound(text, where="llm", session_id="s1")
 
 
+def test_danger_mode_still_scrubs_machine_paths(env):
+    """危险模式只跳过**凭据脱敏**，路径改写照旧。
+
+    路径改写不是"拦"，它是出站/回填的约定（模型看到 /var/minis/workspace/…，
+    回填给工具才解析得回来）。这条断言防止有人把整个 sanitize 段一起跳过。
+    """
+    from openminis.sandbox.guard import DANGER_MODE, NORMAL_MODE
+
+    machine = str(env / "workspace" / "a.png")
+    guard.set_mode(DANGER_MODE)
+    try:
+        out = sanitize_outbound(
+            f"图在这里：{machine}", where="llm", session_id="s1", scrub_paths=True
+        )
+    finally:
+        guard.set_mode(NORMAL_MODE)
+    assert machine not in out, "危险模式下路径改写被一起跳过了"
+    assert "/var/minis/workspace/" in out
+
+
 def test_sanitize_message_parts_redacts_tool_results(env):
     from openminis.data.model import LLMMessage
     from openminis.data.model.agent_content_part import Text, ToolResult

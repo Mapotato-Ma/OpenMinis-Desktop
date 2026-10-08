@@ -1078,6 +1078,16 @@ def sanitize_outbound(
                     output=f"[{where}] " + "；".join(h.sample for h in hits),
                 )
                 text = cleaned
+    else:
+        # 危险模式不脱敏，但**要留一条日志**：这个模式下「沙箱」页面不再记凭据
+        # 事件（用户要的就是"什么都别管"），日志就是唯一的审计尾巴 ——
+        # 不然哪天想回头看"我到底把什么凭据发出去了"会一片空白。
+        _cleaned, _hits = redact_secrets(text)
+        if _hits:
+            logger.warning(
+                "危险模式：%s 出站内容含 %d 处明文凭据（%s），按用户设置未脱敏",
+                where, len(_hits), "、".join(h.label for h in _hits[:3]),
+            )
     if scrub_paths:
         from ..tools.path_utils import scrub_machine_paths
 

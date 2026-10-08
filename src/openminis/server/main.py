@@ -706,12 +706,19 @@ _RUNNING_CHATS: dict[str, asyncio.Task[None]] = {}
 
 #: 同一条连接上正在跑的轮次，key = client_id。
 #:
-#: **为什么还要这一份**：新会话的第一条消息**没有 session_id**（id 是服务端在
-#: ``_run_chat`` 里才创建的，随 ``chatSession`` 帧回给界面）。那时若只按会话 id
-#: 登记，这一轮就**根本没进表** —— 界面随后从帧里学到 id，用户按停止时带着这个
-#: id 来查，查不到就回「没在跑」，模型在后台继续。2026-10-08 现场日志：
-#: ``stop requested but nothing is running (891db6…)``，然后工具继续跑到用户
-#: 重启 App 为止。按连接登记是**兜底**：用户按的是自己的停止键，停就是了。
+#: **为什么还要这一份**（两条真实路径，任一都能让停止失效）：
+#:
+#: 1. 新会话的第一条消息**没有 session_id** —— id 是服务端在 ``_run_chat`` 里
+#:    才创建的，随 ``chatSession`` 帧回给界面。那时若只按会话 id 登记，这一轮
+#:    就**根本没进表**；
+#: 2. 帧里的 session_id 在库中已不存在（会话被删/换过库）时，``_run_chat`` 会
+#:    **另建一个 id**，界面随后从 ``chatSession`` 帧学到新 id —— 登记与查找就
+#:    分属两个 id 了。
+#:
+#: 两种情况下界面都会拿着一个"服务端没登记过"的 id 来按停止，查不到就回
+#: 「没在跑」，模型在后台继续。2026-10-08 现场日志：
+#: ``stop requested but nothing is running (891db6…)``，工具继续跑到用户重启 App。
+#: 按连接登记是**兜底**：用户按的是自己的停止键，停就是了。
 _RUNNING_BY_CLIENT: dict[str, tuple[str, asyncio.Task[None]]] = {}
 
 
@@ -740,28 +747,48 @@ def _register_running(
         _RUNNING_BY_CLIENT[client_id] = (sid, task)
 
 
-def _dismiss_pending_confirms() -> int:
+def _dismiss_pending_confirms(session_id: str = "") -> int:
     """把还没被回答的沙箱确认弹窗按「拒绝」结掉（停止时用）。
 
     不这么做的话：用户按停止，界面还挂着一个等他点的确认框，而等它的那个工具
     已经取消了 —— 点下去没有任何反应，只能重启界面。
+
+    只收**本会话**挂着的框（``session_id`` 传工具侧那个 ``db-<sid>``，子代理的
+    ``<sid>:sub:<x>`` 也算本会话）：机器人通道/定时任务并发跑时，别替别人的
+    会话按"拒绝"。``set_result`` 在竞态下会抛，包一层 —— 它要是冒泡出去，
+    外层会把连接直接断掉。
     """
     n = 0
-    for fut in list(_PENDING_CONFIRM.values()):
-        if not fut.done():
+    for rid, fut in list(_PENDING_CONFIRM.items()):
+        if fut.done():
+            continue
+        owner = _PENDING_CONFIRM_SESSION.get(rid, "")
+        if session_id and owner and not (
+            owner == session_id or owner.startswith(session_id + ":")
+        ):
+            continue
+        try:
             fut.set_result("deny")
             n += 1
+        except Exception:  # pragma: no cover - 竞态下 future 可能刚好被结掉
+            logger.debug("dismiss pending confirm %s failed", rid, exc_info=True)
     return n
 
 
-def _interrupt_session_shell(sid: str) -> str:
-    """杀掉该会话正在跑的命令（连子孙一起）。无 sid 时什么也不做。"""
+async def _interrupt_session_shell(sid: str) -> str:
+    """杀掉该会话正在跑的命令（连子孙一起，含子代理的 shell）。无 sid 时不动。
+
+    丢到线程里执行：Windows 上 ``taskkill`` 是起进程 + 同步等待，跑在事件循环
+    里会把**所有**会话的收帧、ping/pong 一起冻住（独立复核 2026-10-08）。
+    取消路径上那个同步版本（``execute_command`` 里的 ``interrupt_now``）没法
+    这么办 —— 它必须在丢掉等待之前完成，那里我们接受这点阻塞。
+    """
     if not sid:
         return ""
     try:
         from ..tools.shell_execute_tool import get_coordinator
 
-        return get_coordinator().interrupt(f"db-{sid}")
+        return await asyncio.to_thread(get_coordinator().interrupt, f"db-{sid}")
     except Exception:  # pragma: no cover - 中断失败不该影响停止帧的回应
         logger.debug("session shell interrupt failed", exc_info=True)
         return ""
@@ -865,12 +892,13 @@ async def _handle_stop(client_id: str, msg: dict[str, Any]) -> None:
     stopped = task is not None
     if stopped:
         assert task is not None
+        # 会话 id 用登记里的那个（权威），帧里带的只当参考。
+        key = registered or sid
         task.cancel()
-        dismissed = _dismiss_pending_confirms()
+        dismissed = _dismiss_pending_confirms(f"db-{key}")
         # 取消协程只停住「等待」：命令本身还在持久 shell 里跑，一次性兜底
         # 还占着工作线程。这里把进程树真收掉，才对得起按钮上的"停止"。
-        # 会话 id 用登记里的那个（权威），帧里带的只当参考。
-        note = _interrupt_session_shell(registered or sid)
+        note = await _interrupt_session_shell(key)
         try:
             # asyncio.wait 不会把子任务的取消抛给当前协程（`await task` 会）。
             # 加超时：工具卡在不可中断的线程里时，别把收帧循环一起挂住。
@@ -884,9 +912,11 @@ async def _handle_stop(client_id: str, msg: dict[str, Any]) -> None:
     else:
         logger.info("stop requested but nothing is running (%s)",
                     sid or f"client={client_id}")
+    # 回帧里的 id 用**登记里的那个**：兜底命中时帧里带的 id 跟真正在跑的那一轮
+    # 不是同一个（界面按它 endTurn 就会把另一条会话标成结束）。
     await _safe_send(
         client_id,
-        {"type": "done", "sessionId": sid or registered, "stopped": stopped},
+        {"type": "done", "sessionId": registered or sid, "stopped": stopped},
     )
 
 
@@ -949,6 +979,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 # 沙箱确认：界面弹一条「这条命令要不要放行」，工具在那边 await 这条结果。
 _CONFIRM_SEQ = 0
 _PENDING_CONFIRM: dict[str, asyncio.Future[str]] = {}
+#: request_id -> 工具侧的 sessionId（``db-<sid>`` / ``<sid>:sub:<x>``）。
+#: 停止时按它只收本会话挂着的确认框。
+_PENDING_CONFIRM_SESSION: dict[str, str] = {}
 
 
 async def _ask_guard_confirm(payload: dict[str, Any]) -> str:
@@ -961,6 +994,7 @@ async def _ask_guard_confirm(payload: dict[str, Any]) -> str:
     loop = asyncio.get_running_loop()
     fut: asyncio.Future[str] = loop.create_future()
     _PENDING_CONFIRM[request_id] = fut
+    _PENDING_CONFIRM_SESSION[request_id] = str(payload.get("sessionId") or "")
     frame = {"type": "guard_confirm", "requestId": request_id, **payload}
     try:
         for cid in list(manager.active):
@@ -974,6 +1008,7 @@ async def _ask_guard_confirm(payload: dict[str, Any]) -> str:
         return "unavailable"
     finally:
         _PENDING_CONFIRM.pop(request_id, None)
+        _PENDING_CONFIRM_SESSION.pop(request_id, None)
 
 
 async def _handle_guard_answer(client_id: str, msg: dict[str, Any]) -> None:
