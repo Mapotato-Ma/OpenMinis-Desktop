@@ -849,6 +849,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await _handle_chat(client_id, msg)
             elif msg_type == "stop":
                 await _handle_stop(client_id, msg)
+            elif msg_type == "guard_confirm_answer":
+                await _handle_guard_answer(client_id, msg)
             elif msg_type == "shell":
                 await _handle_shell(client_id, msg)
             else:
@@ -860,6 +862,48 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         logger.exception("ws handler crashed")
         manager.disconnect(client_id)
         raise
+
+
+# 沙箱确认：界面弹一条「这条命令要不要放行」，工具在那边 await 这条结果。
+_CONFIRM_SEQ = 0
+_PENDING_CONFIRM: dict[str, asyncio.Future[str]] = {}
+
+
+async def _ask_guard_confirm(payload: dict[str, Any]) -> str:
+    """把守卫的拦截送到界面问一句，等用户点。多个客户端时谁先答算谁的。"""
+    global _CONFIRM_SEQ
+    if not manager.active:
+        return "unavailable"
+    _CONFIRM_SEQ += 1
+    request_id = f"gq-{_CONFIRM_SEQ}"
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[str] = loop.create_future()
+    _PENDING_CONFIRM[request_id] = fut
+    frame = {"type": "guard_confirm", "requestId": request_id, **payload}
+    try:
+        for cid in list(manager.active):
+            await _safe_send(cid, frame)
+        logger.info("guard confirm sent (%s)", request_id)
+        return await fut
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.debug("guard confirm failed", exc_info=True)
+        return "unavailable"
+    finally:
+        _PENDING_CONFIRM.pop(request_id, None)
+
+
+async def _handle_guard_answer(client_id: str, msg: dict[str, Any]) -> None:
+    rid = str(msg.get("requestId") or "")
+    fut = _PENDING_CONFIRM.get(rid)
+    if fut is None or fut.done():
+        return
+    raw = str(msg.get("decision") or "")
+    if raw not in ("once", "session", "always", "deny"):
+        raw = "deny"
+    fut.set_result(raw)
+    logger.info("guard confirm answered: %s -> %s", rid, raw)
 
 
 async def _handle_chat(client_id: str, msg: dict[str, Any]) -> None:

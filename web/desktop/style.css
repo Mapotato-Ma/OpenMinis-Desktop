@@ -572,6 +572,39 @@ kbd {
 .send-btn:hover { background: var(--accent-strong); }
 /* 生成中那颗按钮变成「停止」：同一个位置、同一个尺寸，只换颜色和图标。 */
 .send-btn.is-stop { background: var(--danger, #d64545); }
+
+/* 沙箱确认弹层：独立于 #modalOverlay，只有回答按钮能关掉它。 */
+.guard-confirm {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  width: min(680px, calc(100vw - 48px));
+  z-index: 60;
+  background: var(--bg-raised, #1b2130);
+  border: 1px solid var(--danger, #d64545);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  padding: 14px 16px;
+}
+.guard-confirm .gc-head { font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.guard-confirm .gc-why { color: var(--fg-muted, #8a94a6); font-size: 12px; margin: 6px 0; }
+.guard-confirm .gc-where { color: var(--fg-faint, #6b7280); font-size: 12px; }
+.guard-confirm .gc-cmd {
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-sunken, #0f1420);
+  font-size: 12px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.guard-confirm .gc-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.chip-danger { border-color: var(--danger, #d64545); color: var(--danger, #d64545); }
+.guard-mode-row { display: flex; flex-direction: column; gap: 6px; }
+
 .send-btn.is-stop:hover { background: var(--danger-strong, var(--danger, #b93a3a)); }
 .composer-queue {
   color: var(--fg-muted, #8a94a6);

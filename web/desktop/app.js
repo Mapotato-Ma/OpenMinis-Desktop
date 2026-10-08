@@ -12,6 +12,7 @@ const API = '/api';
 const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
 
 const state = {
+  pendingConfirm: '',   // 正在等用户回答的沙箱确认 requestId
   queue: [],   // 生成中收到的新消息排队，这一轮结束后自动发
   sessions: [],
   sessionId: null,
@@ -496,6 +497,10 @@ function setStatusTurn(txt) {
 /* ── frame dispatch ──────────────────────────────────────────────────── */
 function handleFrame(f) {
   switch (f.type) {
+    case 'guard_confirm':
+      // 沙箱拦下了一条命令 —— 当场问用户，别让内核白等超时。
+      showGuardConfirm(f);
+      break;
     case 'delta':
       // Chat and shell deltas share a frame type; only chat carries a
       // sessionId. While a terminal command is in flight, route the
@@ -2361,6 +2366,8 @@ function onKeydown(ev) {
   if (ev.key === 'Escape') {
     if (!$('settingsOverlay').hidden) { confirmCloseSettings(); return; }
     if (state.palette.open) { closePalette(); return; }
+    // 沙箱确认还在等回答时，Esc 等于拒绝（别让内核白等 180 秒）。
+    if (state.pendingConfirm) { answerGuardConfirm('deny'); return; }
     if (!$('modalOverlay').hidden) { $('modalOverlay').hidden = true; return; }
     if ($('editor').classList.contains('file-open')) {
       if (state.currentFile) closeTab(state.currentFile); else closeFileView();
@@ -2705,6 +2712,9 @@ function wireInterfacePane() {
   on('uiFontSans', 'change', (e) => UiPrefs.set('fontSans', e.target.value));
   on('uiFontMono', 'change', (e) => UiPrefs.set('fontMono', e.target.value));
   on('uiCompact', 'change', (e) => UiPrefs.set('compact', e.target.checked));
+  // 危险模式：开关在「沙箱」页，顶栏芯片常驻警示。
+  on('guardModeDanger', 'change', (e) => toggleGuardMode(e.target.checked));
+  loadGuardMode();
   on('uiReduceMotion', 'change', (e) => UiPrefs.set('reduceMotion', e.target.checked));
   on('uiStatusbar', 'change', (e) => UiPrefs.set('showStatusbar', e.target.checked));
   on('uiRestoreSession', 'change', (e) => UiPrefs.set('restoreLastSession', e.target.checked));
@@ -4272,4 +4282,87 @@ async function importFromCcSwitch() {
   renderModelsHealth();
   updateDirtyUI();
   toast(n ? `已导入 ${n} 个供应商 —— 确认后点「保存」才生效` : '没有导入任何项');
+}
+
+
+/* ── 沙箱确认：内核拦下一条命令时送 guard_confirm 过来，这里当场问用户 ──────────
+   以前是硬拦：命令直接失败，用户得去「沙箱」页手动放行，再让 agent 重发一遍。
+   现在四个选择：允许一次 / 本次会话允许 / 总是允许 / 拒绝。
+   弹层是独立元素（不共用 #modalOverlay），只有回答按钮和 Esc 能关它 ——
+   否则关掉弹层会让内核一直等到超时。 */
+function showGuardConfirm(f) {
+  state.pendingConfirm = f.requestId || '';
+  const old = $('guardConfirm');
+  if (old) old.remove();
+  const box = el('div', 'guard-confirm');
+  box.id = 'guardConfirm';
+
+  const head = el('div', 'gc-head');
+  head.appendChild(ic('shield'));
+  head.appendChild(document.createTextNode('沙箱拦下了一条命令'));
+  box.appendChild(head);
+
+  const why = el('div', 'gc-why');
+  why.textContent = (f.reasons || []).join('；') || '命中了沙箱守卫规则';
+  box.appendChild(why);
+  if (f.cwd) box.appendChild(el('div', 'gc-where', '工作目录：' + f.cwd));
+
+  const pre = el('pre', 'gc-cmd');
+  pre.textContent = f.command || '';
+  box.appendChild(pre);
+
+  const row = el('div', 'gc-actions');
+  const mk = (label, decision, kind) => {
+    const b = el('button', 'btn ' + (kind || ''), label);
+    b.addEventListener('click', () => answerGuardConfirm(decision));
+    return b;
+  };
+  row.appendChild(mk('拒绝', 'deny', 'ghost'));
+  row.appendChild(mk('允许一次', 'once'));
+  row.appendChild(mk('本次会话允许', 'session'));
+  row.appendChild(mk('总是允许', 'always'));
+  box.appendChild(row);
+
+  document.body.appendChild(box);
+}
+
+function answerGuardConfirm(decision) {
+  const rid = state.pendingConfirm;
+  const box = $('guardConfirm');
+  if (box) box.remove();
+  state.pendingConfirm = '';
+  if (!rid) return;
+  wsSend({ type: 'guard_confirm_answer', requestId: rid, decision });
+  toast(decision === 'deny' ? '已拒绝这条命令' : '已放行，agent 继续执行',
+        decision === 'deny' ? 'err' : 'ok');
+}
+
+/* ── 危险模式：开关在「沙箱」页，顶栏挂常驻警示 ── */
+async function loadGuardMode() {
+  try {
+    const d = await api('/guard/mode');
+    setGuardModeUi((d && d.mode) === 'danger');
+  } catch { /* 老内核没有这个接口：静默跳过 */ }
+}
+
+function setGuardModeUi(danger) {
+  const cb = $('guardModeDanger');
+  if (cb) cb.checked = !!danger;
+  const chip = $('dangerChip');
+  if (chip) chip.hidden = !danger;
+}
+
+async function toggleGuardMode(danger) {
+  try {
+    const d = await api('/guard/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode: danger ? 'danger' : 'normal' }),
+    });
+    setGuardModeUi((d && d.mode) === 'danger');
+    toast(danger ? '危险模式已开启：沙箱不再拦截任何命令' : '已回到正常模式：沙箱恢复拦截',
+          danger ? 'err' : 'ok');
+  } catch (e) {
+    toast('切换失败：' + e.message, 'err');
+    loadGuardMode();
+  }
 }

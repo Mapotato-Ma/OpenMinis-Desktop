@@ -191,14 +191,19 @@ class ShellExecuteTool:
         try:
             from ..sandbox.guard import check_shell_command
 
-            blocked = check_shell_command(
-                command,
-                session_id=session_id,
-                cwd=self.coordinator.cwd_for(session_id),
-            )
+            # 先落成一个变量：下面问用户「要不要放行」时要用同一个 cwd。
+            # （第一版直接写了个不存在的名字 cwd —— ruff 的 F821 本该在写盘前就拦下它。）
+            cwd = self.coordinator.cwd_for(session_id)
+            blocked = check_shell_command(command, session_id=session_id, cwd=cwd)
         except Exception:  # pragma: no cover - 守卫故障不该让 shell 整体失效
             logger.exception("sandbox guard failed")
             blocked = None
+        if blocked is not None:
+            # 不再一拦到底：先问用户（界面弹一条确认）。用户点头就**当场执行**，
+            # 模型不用重发那条命令；拒绝/超时维持原来的拦截行为。
+            blocked = await _ask_user_to_allow(
+                blocked, command=command, session_id=session_id, cwd=cwd
+            )
         if blocked is not None:
             return ToolExecutionResult(blocked, True, tool_title=tool_title)
         try:
@@ -321,3 +326,44 @@ def install_coordinator(coordinator: ExecutionCoordinator) -> None:
     """Point the default tool at an externally-owned coordinator (server/CLI)."""
     global _shared
     _shared = coordinator
+
+
+async def _ask_user_to_allow(
+    blocked: str, *, command: str, session_id: str, cwd: str
+) -> Optional[str]:
+    """把拦截结果送进界面问一句。
+
+    放行 → 返回 ``None``（调用方接着执行这条命令）；其余情况返回要回给模型的文案。
+    只有接了客户端（桌面界面）才会问：纯 CLI / 没人在线时 ``confirm.ask()`` 直接
+    返回 ``unavailable``，行为跟以前一模一样（硬拦），不会把 agent 挂住。
+    """
+    from ..sandbox import confirm
+    from ..sandbox.guard import guard
+
+    event = guard.last_event()
+    if event is None or event.command != command:
+        # 拿不到对应的事件（比如守卫在别处也记了一条）就别问，老老实实拦。
+        return blocked
+    decision = await confirm.ask(
+        {
+            "eventId": event.id,
+            "family": event.family,
+            "command": command,
+            "cwd": cwd,
+            "sessionId": session_id,
+            "targets": list(event.targets),
+            "reasons": list(event.reasons),
+        }
+    )
+    if decision == "unavailable":
+        return blocked
+    if decision in ("once", "session", "always"):
+        if decision != "once":
+            # 本次会话 / 永久放行：写进白名单，下一同类命令不再问。
+            guard.allow(event.id, decision)
+        return None
+    note = {
+        "deny": "用户拒绝了这条命令，换一条安全的做法。",
+        "timeout": "等用户确认超时，已按拒绝处理。",
+    }.get(decision, "用户没有放行这条命令。")
+    return f"{blocked}\n\n{note}"

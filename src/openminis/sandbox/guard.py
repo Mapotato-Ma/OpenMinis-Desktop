@@ -58,6 +58,10 @@ MAX_EVENTS = 300
 #: 放行范围。
 SCOPES = ("once", "session", "always")
 
+#: 守卫模式。``danger`` = 危险模式：**一条都不拦**（由用户显式开启）。
+NORMAL_MODE = "normal"
+DANGER_MODE = "danger"
+
 MASK = "「已拦截·敏感信息」"
 
 
@@ -652,6 +656,8 @@ class Guard:
         self._persistent_loaded = False
         #: 实时检测流水（内存态，不落盘）：每条被扫描的命令一行。
         self._live: deque[dict[str, Any]] = deque(maxlen=50)
+        self._mode: Optional[str] = None
+        self._mode_for: str = ""  # 上面那份缓存对应的数据目录
 
     def note_scan(
         self, *, command: str, cwd: str, family: str, reasons: list[str]
@@ -674,6 +680,50 @@ class Guard:
     # -- 路径 ---------------------------------------------------------
     def _events_path(self) -> Path:
         return app_context().data_dir / "guard_events.json"
+
+    def _mode_path(self) -> Path:
+        return app_context().data_dir / "guard_mode.json"
+
+    def mode(self) -> str:
+        """当前守卫模式：``normal``（照常拦）或 ``danger``（一律放行）。
+
+        缓存键里带上**数据目录**，不能只缓存一个字符串：同一个进程里换了
+        ``MINIS_HOME``／换了 app_context 时（测试就是这种场景），上一个目录的
+        "危险模式"会串到下一个目录去 —— 实测会把一整批「本该被拦」的测试全带红。
+        """
+        try:
+            path = self._mode_path()
+        except Exception:  # pragma: no cover - 拿不到目录就按正常模式
+            return NORMAL_MODE
+        key = str(path)
+        if self._mode is None or self._mode_for != key:
+            self._mode = NORMAL_MODE
+            self._mode_for = key
+            try:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    raw = str(data.get("mode") or "")
+                    if raw in (NORMAL_MODE, DANGER_MODE):
+                        self._mode = raw
+            except Exception:  # pragma: no cover - 读不到就当正常模式
+                logger.debug("guard mode load failed", exc_info=True)
+        return self._mode
+
+    def set_mode(self, mode: str) -> str:
+        """切换模式并落盘，返回实际生效的模式。"""
+        self._mode = DANGER_MODE if mode == DANGER_MODE else NORMAL_MODE
+        try:
+            self._mode_path().write_text(
+                json.dumps({"mode": self._mode}), encoding="utf-8"
+            )
+        except Exception:  # pragma: no cover
+            logger.debug("guard mode save failed", exc_info=True)
+        return self._mode
+
+    def last_event(self) -> Optional[GuardEvent]:
+        """最近一条拦截事件 —— 确认弹窗要拿它的 id 去登记放行。"""
+        self.load()
+        return self._events[-1] if self._events else None
 
     def _allow_path(self) -> Path:
         return app_context().data_dir / "guard_allowlist.json"
@@ -879,6 +929,10 @@ class Guard:
         self._persistent = {}
         self._loaded = False
         self._persistent_loaded = False
+        # 模式缓存也要清：漏了这一行，同一个进程里前一个测试开的危险模式会
+        # 让后面每一批「本该被拦」的断言全红（实测 14 条一起倒）。
+        self._mode = None
+        self._mode_for = ""
 
 
 guard = Guard()
@@ -909,6 +963,17 @@ def check_shell_command(
 ) -> Optional[str]:
     """shell 守卫入口：一条命令**一次分析**——删除 + 越界合并成一个事件、一道放行门。"""
     if not command.strip():
+        return None
+
+    # 危险模式：一条都不拦。**仍然进实时流水** —— 放行也要留痕，
+    # 不然用户开了危险模式之后就再也查不到 agent 到底跑过什么了。
+    if guard.mode() == DANGER_MODE:
+        guard.note_scan(
+            command=command,
+            cwd=cwd,
+            family="danger",
+            reasons=["危险模式：沙箱不拦截"],
+        )
         return None
 
     # 合并分析：删除规则与越界规则一起跑，理由和目标合到一条事件里。

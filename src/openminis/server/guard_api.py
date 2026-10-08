@@ -180,3 +180,19 @@ async def access_password(body: PasswordRequest, response: Response) -> dict[str
     if not body.password:
         response.delete_cookie(ACCESS_COOKIE)
     return {"ok": True, **access_auth.status()}
+
+
+class ModeRequest(BaseModel):
+    mode: str = "normal"
+
+
+@router.get("/mode")
+async def get_mode() -> dict[str, Any]:
+    """当前守卫模式：normal / danger。"""
+    return {"mode": guard.mode()}
+
+
+@router.post("/mode")
+async def set_mode(body: ModeRequest) -> dict[str, Any]:
+    """切换守卫模式。``danger`` = 危险模式，沙箱一条都不拦。"""
+    return {"mode": guard.set_mode(body.mode)}

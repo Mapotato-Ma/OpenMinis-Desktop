@@ -71,6 +71,9 @@
       <button class="chip" id="wsChip" title="工作目录 — 点击在文件管理器中打开">
         <span class="chip-dot"></span><span id="wsPath">workspace</span>
       </button>
+      <button class="chip chip-danger" id="dangerChip" title="危险模式已开启：沙箱不拦截任何命令" hidden>
+        <wa-icon library="om" name="triangle-alert"></wa-icon><span>危险模式</span>
+      </button>
     </div>
 
     <div class="tb-group tb-right">
@@ -482,6 +485,13 @@
           </div>
         </div>
         <div class="settings-block">
+          <div class="settings-block">
+            <div class="block-title"><wa-icon library="om" name="triangle-alert" class="blk-ic"></wa-icon>危险模式</div>
+            <div class="guard-mode-row">
+              <label class="pref-check"><input type="checkbox" id="guardModeDanger"> 沙箱不拦截任何命令</label>
+              <p class="pane-sub" id="guardModeHint">开启后守卫一条都不拦（放行仍会记进实时流水）。被拦下的命令现在会**当场弹确认**，不用再去白名单手动放行。</p>
+            </div>
+          </div>
           <div class="block-title"><wa-icon library="om" name="history" class="blk-ic"></wa-icon>拦截记录</div>
           <div class="list-box" id="guardEvents"></div>
         </div>
