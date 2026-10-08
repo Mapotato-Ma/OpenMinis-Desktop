@@ -163,6 +163,13 @@ def test_memory_write_blank_content_rejected(isolated_minis_home):
 # browser_use stub
 # ---------------------------------------------------------------------------
 def test_browser_use_returns_not_ported(isolated_minis_home):
+    """没移植就当**失败**报，不许谎报成功。
+
+    这条断言原来写的是 `assert r.success  # SUCCESSFUL so the agent loop doesn't retry`
+    —— 等于把「假成功」钉死在测试里。后果（2026-10-06 实测）：模型拿到成功信号
+    就不重试、不绕路，用户只看到一张绿色工具卡，**查了两轮**才发现这个工具
+    从来没执行过任何动作。真正防重试风暴的是 repeat_guard，不是谎报。
+    """
     import asyncio
 
     from openminis.tools.browser_use_tool import BrowserUseTool
@@ -172,7 +179,8 @@ def test_browser_use_returns_not_ported(isolated_minis_home):
             _args(action="navigate", url="https://example.com"), "s1"
         )
     )
-    assert r.success  # SUCCESSFUL so the agent loop doesn't retry
+    assert not r.success, "引擎没接上却报成功 —— 会骗过 agent"
+    assert "not yet ported" in r.output
     assert "not yet ported" in r.output
 
 

@@ -606,6 +606,10 @@ kbd {
 .guard-mode-row { display: flex; flex-direction: column; gap: 6px; }
 
 .send-btn.is-stop:hover { background: var(--danger-strong, var(--danger, #b93a3a)); }
+/* 上下文占用警示：接近窗口上限时变色（用户第 6 件）。 */
+.composer-usage.ctx-warn { color: var(--danger, #d64545); }
+.compact-confirm p { margin: 0 0 10px; line-height: 1.6; }
+
 .composer-queue {
   color: var(--fg-muted, #8a94a6);
   font-size: 12px;

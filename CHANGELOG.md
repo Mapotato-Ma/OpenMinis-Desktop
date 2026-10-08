@@ -1,5 +1,51 @@
 # 变更日志
 
+## v0.4.16 — 实时上下文状态 + 手动压缩会话（2026-10-06）
+
+用户第 5、6 件。按我排的顺序先做这两件：**纯载荷、2.4MB 界面内更新**；browser 要往运行时
+里加 Playwright，必然是整包发布，留作单独一次。
+
+### ① 实时上下文状态（第 6 件）
+
+用量帧原来只报 input/output/cache token —— 告诉你「花了多少」，但不告诉你
+**离窗口上限还有多远**。现在多报两个字段：`contextTokens`（这次请求的上下文多大）、
+`contextWindow`（该模型窗口上限，`context_window_for()` 按 id 查、查不到按 id 猜）。
+
+⚠️ **两种厂商的计费口径不同，必须分开算**（第一版想直接相加，会把 DeepSeek/OpenAI 用户
+算成两倍 —— 已写进代码注释并各配一条测试）：
+* **OpenAI 风格**（含 DeepSeek）：`input_tokens` 已是总量，缓存命中只是它的子集 → 直接用；
+* **Anthropic 风格**：`input_tokens` 只是没命中缓存的部分 → 总量 = input + cache_read + cache_creation；
+* 判别：缓存命中时 Anthropic 的 `cache_read` 远大于 `input`；数字分不清时按 OpenAI 口径（保守、不虚高）。
+
+界面显示成「上下文 12.3k / 128k · 10%」，**≥70% 变警示色**并提示该压缩了。
+
+### ② 手动压缩会话（第 5 件）
+
+内核一直有 `compaction.py`（每 20 轮自动压一次），但界面上**既看不到状态、也没有手动入口**：
+* `GET /api/chats/sessions/{id}/compact` → 预览「距上次压缩攒了多少轮 / 自动阈值」；
+* `POST .../compact` → 真压一次，返回压了几条、摘要、记忆条数；
+* 聊天标题栏新增「压缩」按钮 → 先看预览 → 确认框 → 压 → **摘要贴回对话里**
+  （不贴回去用户根本看不到发生了什么）。
+
+### ③ 顺手：browser 的「假成功」修掉了（选型清单第 1 步）
+
+`browser_use_tool.py` 的桩原来任何 action 都返回 `success=True` 的「还没移植」——
+模型拿到成功信号就不重试、不绕路，用户只看到一张绿色工具卡。
+**旧的 `test_browser_use_returns_not_ported` 把谎报钉死了**
+（`assert r.success  # SUCCESSFUL so the agent loop doesn't retry`）→ 改成 `assert not r.success`，
+并写明真正防重试风暴的是 repeat_guard。
+
+### 验证
+
+* 新增 `desktop/tests/test_context_compact.py`（10 条，**含行为断言**：两种计费口径各一条、
+  窗口助手对已知/未知模型各一条）
+* 服务器四步全绿、62 秒
+* 落盘前跑了 `ruff --select F821,F811`，当场抓到 `chat_api.py` 里 `compaction` 没导入
+  —— 这正是上一轮学到的规矩在起作用
+
+壳指纹不变 → 仍是 2.4 MB 载荷更新。
+
+
 ## v0.4.15 — 沙箱不再硬拦：当场问用户 + 危险模式（2026-10-06）
 
 用户第 2、3 件：

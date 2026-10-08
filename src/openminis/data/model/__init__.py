@@ -890,3 +890,21 @@ class ModelEntry:
         if self.overrides.max_thinking_level is not None:
             return self.overrides.max_thinking_level
         return self.model.catalog_max_thinking_level
+
+
+def context_window_for(model_id: str) -> int:
+    """按 id 返回上下文窗口（token 数），给界面显示「上下文用了多少」用。
+
+    先查目录里有没有这个 id 的条目（拿它精确的 ``context_window``），
+    查不到就借一个临时对象走 ``context_window_tokens`` 的 id 启发式 ——
+    用户自填模型名（中转/自建网关）时也能有个合理数字，而不是显示 0。
+    """
+    lid = (model_id or "").strip().lower()
+    if lid:
+        for attr in dir(LLMModel):
+            if attr.startswith("_"):
+                continue
+            item = getattr(LLMModel, attr, None)
+            if isinstance(item, LLMModel) and (item.id or "").strip().lower() == lid:
+                return item.context_window_tokens
+    return LLMModel(model_id or "?", "", "").context_window_tokens

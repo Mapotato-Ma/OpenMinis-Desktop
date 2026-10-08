@@ -222,15 +222,19 @@ class BrowserUseTool:
     ) -> ToolExecutionResult:
         """Stub executor — the browser subsystem is not yet ported to Python.
 
-        Returns a SUCCESSFUL tool result with a clear "not ported" message so
-        the agent loop does not enter a retry storm. Once a real driver lands
-        this method should be replaced with an async dispatch table.
+        ⚠️ 这里**必须返回失败**（``success=False``）。第一版刻意返回成功，
+        理由是"怕 agent 进重试风暴"—— 实测那是更糟的坏法：
+        模型拿到成功信号**不会重试、不会绕路**，用户只看到一张绿色的工具卡
+        （2026-10-06 用户原话「browser-use 好像有点问题」，查了两轮才发现
+        它从来就没执行过任何动作）。重试风暴有 repeat_guard 兜着，
+        而"假成功"会一直骗下去。
+        Once a real driver lands this method should be replaced by a dispatch table.
         """
         try:
             args = json.loads(args_json)
         except ValueError as e:
             return ToolExecutionResult(
-                f"Error: invalid JSON args: {e}", True, tool_title=BrowserUseTool.NAME
+                f"Error: invalid JSON args: {e}", False, tool_title=BrowserUseTool.NAME
             )
 
         action = str(args.get("action", ""))
@@ -241,4 +245,4 @@ class BrowserUseTool:
             f"Install a headless browser driver (e.g. Playwright) and wire it "
             f"to BrowserUseTool.execute to enable this tool."
         )
-        return ToolExecutionResult(hint, True, tool_title=tool_title)
+        return ToolExecutionResult(hint, False, tool_title=tool_title)

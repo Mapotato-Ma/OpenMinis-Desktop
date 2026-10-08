@@ -532,7 +532,7 @@ function handleFrame(f) {
       }
       break;
     case 'usage':
-      if (f.totalTokens != null) $('tokenUsage').textContent = `${f.totalTokens} tokens`;
+      renderContextUsage(f);
       break;
     case 'done':
       if (f.exitCode != null && state.termBusy) {
@@ -2714,6 +2714,7 @@ function wireInterfacePane() {
   on('uiCompact', 'change', (e) => UiPrefs.set('compact', e.target.checked));
   // 危险模式：开关在「沙箱」页，顶栏芯片常驻警示。
   on('guardModeDanger', 'change', (e) => toggleGuardMode(e.target.checked));
+  $('btnCompact').addEventListener('click', showCompactConfirm);
   loadGuardMode();
   on('uiReduceMotion', 'change', (e) => UiPrefs.set('reduceMotion', e.target.checked));
   on('uiStatusbar', 'change', (e) => UiPrefs.set('showStatusbar', e.target.checked));
@@ -4365,4 +4366,85 @@ async function toggleGuardMode(danger) {
     toast('切换失败：' + e.message, 'err');
     loadGuardMode();
   }
+}
+
+
+/* ── 上下文状态（用户第 6 件）─────────────────────────────────────────────
+   以前这颗只显示"累计花了多少 token"—— 那告诉你花了多少钱，但不告诉你
+   **离窗口上限还有多远**。关心的是后者：看得见占用才知道什么时候该压缩。 */
+function fmtK(n) {
+  const v = Number(n) || 0;
+  if (v < 1000) return String(v);
+  if (v < 100000) return (v / 1000).toFixed(1) + 'k';
+  return Math.round(v / 1000) + 'k';
+}
+
+function renderContextUsage(f) {
+  const el0 = $('tokenUsage');
+  if (!el0) return;
+  const used = f.contextTokens;
+  const win = f.contextWindow;
+  if (used != null && win) {
+    const pct = Math.min(100, Math.round((used / win) * 100));
+    el0.textContent = `上下文 ${fmtK(used)} / ${fmtK(win)} · ${pct}%`;
+    el0.classList.toggle('ctx-warn', pct >= 70);
+    el0.title =
+      `本轮请求的上下文约 ${Number(used).toLocaleString()} tokens；` +
+      `该模型窗口 ${Number(win).toLocaleString()} tokens。` +
+      (pct >= 70 ? '接近上限了，建议压缩一次会话。' : '');
+    return;
+  }
+  if (f.totalTokens != null) el0.textContent = `${f.totalTokens} tokens`;
+}
+
+/* ── 手动压缩会话（用户第 5 件）──────────────────────────────────────────
+   内核一直在自动压（每 20 轮），但界面上既看不到状态、也没有手动入口。 */
+async function showCompactConfirm() {
+  const sid = state.sessionId;
+  if (!sid) { toast('先选中一个会话', 'err'); return; }
+  let info = null;
+  try {
+    info = await api(`/chats/sessions/${encodeURIComponent(sid)}/compact`);
+  } catch (e) {
+    toast('读不到压缩状态：' + e.message, 'err');
+    return;
+  }
+  const box = el('div', 'compact-confirm');
+  box.appendChild(el('p', '', `这段会话距上次压缩已攒了 ${info.turnsSinceCompact} 轮（内核每 ${info.autoEveryTurns} 轮会自动压一次）。`));
+  box.appendChild(el('p', '', '压缩会把较早的对话折成一段摘要 + 记忆条目，最近两条原样保留。摘要之后仍会作为上下文参与对话，所以不会"丢历史"。'));
+  const row = el('div', 'gc-actions');
+  const cancel = el('button', 'btn ghost', '取消');
+  cancel.addEventListener('click', () => { $('modalOverlay').hidden = true; });
+  const ok = el('button', 'btn', '现在压缩');
+  ok.addEventListener('click', () => runCompact(sid));
+  row.appendChild(cancel);
+  row.appendChild(ok);
+  box.appendChild(row);
+  openModal('压缩这段会话', box);
+}
+
+async function runCompact(sid) {
+  $('modalOverlay').hidden = true;
+  toast('正在压缩…（要调一次模型写摘要）', 'ok');
+  try {
+    const r = await api(`/chats/sessions/${encodeURIComponent(sid)}/compact`, { method: 'POST' });
+    if (!r.applied) { toast(r.skipped || '这次没有可压缩的内容', 'err'); return; }
+    toast(`已压缩 ${r.compacted} 条消息，留下 ${r.memories ? r.memories.length : 0} 条记忆`, 'ok');
+    if (r.summary) appendCompactNote(r.summary);
+  } catch (e) {
+    toast('压缩失败：' + e.message, 'err');
+  }
+}
+
+function appendCompactNote(summary) {
+  const box = el('div', 'msg');
+  const role = el('div', 'msg-role');
+  role.appendChild(ic('archive'));
+  role.appendChild(document.createTextNode('已压缩 · 摘要'));
+  box.appendChild(role);
+  const body = el('div', 'msg-body');
+  body.innerHTML = renderMarkdown(summary);
+  box.appendChild(body);
+  $('messages').appendChild(box);
+  scrollChat(true);
 }

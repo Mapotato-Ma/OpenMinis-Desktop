@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from . import chat_store
+from . import chat_store, compaction
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
@@ -95,4 +95,40 @@ async def session_messages(session_id: str) -> dict[str, Any]:
             }
             for m in rows
         ]
+    }
+
+
+# ── 会话压缩（用户第 5 件）──────────────────────────────────────────────
+# 内核一直有 `compaction.py`（每 20 轮自动压一次），但**界面上没有任何入口** ——
+# 用户既不知道什么时候压过，也没法手动压一次。这两个接口把它露出来。
+
+
+@router.get("/sessions/{session_id}/compact")
+async def compact_preview(session_id: str) -> dict[str, Any]:
+    """压缩前先看看「离上次压缩攒了多少轮」，别让用户盲点。"""
+    try:
+        turns = await compaction.turns_since_last_compact(session_id)
+    except Exception as e:  # pragma: no cover - 会话不存在等
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {
+        "sessionId": session_id,
+        "turnsSinceCompact": turns,
+        "autoEveryTurns": compaction.COMPACT_EVERY_TURNS,
+    }
+
+
+@router.post("/sessions/{session_id}/compact")
+async def compact_now(session_id: str) -> dict[str, Any]:
+    """手动压一次：老对话折成摘要 + 记忆，最近两条原样保留。"""
+    try:
+        result = await compaction.compact_session(session_id)
+    except Exception as e:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {
+        "sessionId": session_id,
+        "applied": result.applied,
+        "compacted": result.compacted,
+        "summary": result.summary,
+        "memories": list(result.memories),
+        "skipped": result.skipped,
     }

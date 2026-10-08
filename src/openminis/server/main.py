@@ -59,6 +59,7 @@ from ..settings.store import SettingsError, SettingsStore
 from ..skills import SkillStore
 from ..agent.repeat_guard import looks_like_image_generation
 from . import chat_api, compaction, fs_api, scheduled_api, workspaces, chat_store
+from ..data.model import context_window_for
 from .media_scan import append_image_refs, collect_recent_images
 from .sub_turn_log import SubTurnRecorder
 from .knowledge_api import router as knowledge_router
@@ -906,6 +907,39 @@ async def _handle_guard_answer(client_id: str, msg: dict[str, Any]) -> None:
     logger.info("guard confirm answered: %s -> %s", rid, raw)
 
 
+# 上下文窗口按模型 id 缓存 —— 用量帧每轮会发很多条，别每次都去遍历目录。
+_WINDOW_CACHE: dict[str, int] = {}
+
+
+def _window_for(model_id: str | None) -> int:
+    key = (model_id or "").strip().lower()
+    hit = _WINDOW_CACHE.get(key)
+    if hit is None:
+        hit = context_window_for(key)
+        _WINDOW_CACHE[key] = hit
+    return hit
+
+
+def _context_tokens_from_usage(usage: Any) -> int:
+    """从一次调用的 usage 里还原「这次请求的上下文有多大」。
+
+    两种厂商的记账口径不一样，必须分开：
+    * **Anthropic 风格**：``input_tokens`` 只是**没命中缓存**的那部分，
+      总量 = input + cache_read + cache_creation（缓存前缀很大时 cache_read 会远大于 input）；
+    * **OpenAI 风格**（含 DeepSeek 等兼容端点）：``input_tokens`` 已经是**总量**，
+      缓存命中只是它的一个子集 —— 再加一遍就是双算。
+
+    判别：OpenAI 风格下 cache_read 恒 ≤ input；Anthropic 风格下缓存命中时 cache_read 远大于 input。
+    数字本身分辨不出时按 OpenAI 风格（保守、不虚高）。
+    """
+    inp = int(getattr(usage, "input_tokens", 0) or 0)
+    read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    if read > inp:
+        return inp + read + write
+    return inp
+
+
 async def _handle_chat(client_id: str, msg: dict[str, Any]) -> None:
     """把一轮对话丢到后台 task 里跑，让收帧循环继续响应。
 
@@ -1180,6 +1214,10 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
             await _safe_send(client_id, {
                 "type": "usage",
                 "inputTokens": u.input_tokens,
+                # 上下文状态（用户第 6 件）：光报"这轮花了多少 token"没用 ——
+                # 要能看见"当前上下文占了窗口的多少"，才知道什么时候该压缩。
+                "contextTokens": _context_tokens_from_usage(u),
+                "contextWindow": _window_for(model_label),
                 "outputTokens": u.output_tokens,
                 "cacheCreation": getattr(u, "cache_creation_input_tokens", None),
                 "cacheRead": getattr(u, "cache_read_input_tokens", None),
