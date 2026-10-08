@@ -170,7 +170,7 @@ async def compact_session(session_id: str, provider: Any = None) -> CompactResul
     if owned_provider:
         provider = await _build_provider()
     try:
-        raw = await _summarize(provider, region)
+        raw = await _summarize(provider, region, session_id)
     finally:
         if owned_provider:
             await _aclose(provider)
@@ -231,13 +231,46 @@ async def _aclose(provider: Any) -> None:
             logger.debug("provider close failed", exc_info=True)
 
 
-async def _summarize(provider: Any, region: list[MessageEntity]) -> str:
+def _redact_outbound(messages: list[LLMMessage], session_id: str) -> int:
+    """出站脱敏：压缩 transcript 和聊天正文一样要发给模型厂商。
+
+    PORT-FIX(compaction-redaction): 压缩的输入来自 ``load_raw_messages`` ——
+    库里的**原始**文本（用户粘贴过的密钥、工具输出里的令牌都在里面），而
+    摘要请求同样是外发给厂商。以前这里直接把 transcript 塞进 ``LLMMessage``
+    就调 ``provider.stream_message``，等于绕过守护、把明文凭据自动外发（20 回合
+    或上下文 80% 触发，用户没有任何动作）。
+
+    这里复用聊天路径**同一套**规则（``sanitize_message_parts``，就地修改，
+    顺带 ``scrub_paths``），不另写一份正则 —— 两套规则一定会漂移。
+
+    脱敏本身出问题不能中断压缩（照 ``agent_runtime._guard_outbound`` 的写法兜底），
+    但要从日志里看得出来。
+    """
+    try:
+        from ..sandbox.guard import sanitize_message_parts
+
+        changed = sanitize_message_parts(messages, session_id=session_id)
+        if changed:
+            logger.info(
+                "compaction outbound redacted for %s: %d 处（沙箱页可见 guard[secret] 事件）",
+                session_id, changed,
+            )
+        return changed
+    except Exception:  # pragma: no cover - 脱敏失败不该中断压缩
+        logger.debug("compaction outbound secret scan failed", exc_info=True)
+        return 0
+
+
+async def _summarize(
+    provider: Any, region: list[MessageEntity], session_id: str = ""
+) -> str:
     transcript = "\n\n".join(
         f"{'用户' if r.role == 'user' else '助手'}: {chat_store.parts_to_text(r.parts_json).strip()}"
         for r in region
         if chat_store.parts_to_text(r.parts_json).strip()
     )
     messages = [LLMMessage(LLMMessage.Role.USER, f"{_INSTRUCTIONS}\n{transcript}")]
+    _redact_outbound(messages, session_id)
 
     out: list[str] = []
     stream = provider.stream_message(

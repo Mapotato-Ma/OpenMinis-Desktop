@@ -129,6 +129,79 @@ async def test_compact_skips_when_region_is_tiny(env):
     assert result.skipped
 
 
+# ---------------------------------------------------------------------------
+# 出站脱敏：压缩 transcript 同样是外发给厂商的 prompt（PORT-FIX:
+# compaction-redaction）。压缩的输入是 chat_store.load_raw_messages —— 库里的
+# 原文，用户粘过的密钥就在里面；不脱敏就是全自动明文外发。
+# ---------------------------------------------------------------------------
+#: 形态与真实 OpenAI 风格密钥一致（``sk-`` + 28 位），不命中任何"路径/文件名"豁免。
+PLAINTEXT_KEY = "sk-live7Q2mN8vX4zR6tY1pK9wB3dF5"
+
+
+@pytest.mark.asyncio
+async def test_compaction_redacts_plaintext_credentials(env):
+    """压缩 prompt 里不能有库里的明文密钥；库里原文不被动；留一条拦截事件。"""
+    from openminis.sandbox.guard import guard
+
+    guard.reset()
+    await chat_store.ensure_db()
+    sid = (await chat_store.create_session()).id
+    await chat_store.append_turn(
+        sid, "user", f"这是我的 key，帮我配一下：{PLAINTEXT_KEY}"
+    )
+    await chat_store.append_turn(sid, "assistant", "收到")
+    await _seed(sid, compaction.COMPACT_EVERY_TURNS - 1)
+
+    provider = StubProvider(REPLY)
+    result = await compaction.maybe_compact(sid, provider)
+
+    assert result is not None and result.applied, "压缩没跑，下面的断言没有意义"
+    prompt = provider.transcripts[0]
+
+    # ① 明文本身一个字符都没有出去（不是"某个词没出现"这种弱断言）
+    assert PLAINTEXT_KEY not in prompt
+    assert "sk-live" not in prompt
+    # ② 替成了部分显示，说明是"遮"而不是"整段删掉"
+    assert "「已拦截」" in prompt
+    # ③ 其余正文照常发给模型（没有把整个 transcript 干掉）
+    assert "用户第 0 轮" in prompt
+    assert "用户第 1 轮" in prompt
+
+    # ④ 库里原文保留：压缩只折 context，不动数据
+    rows = await chat_store.load_raw_messages(sid)
+    assert any(
+        PLAINTEXT_KEY in chat_store.parts_to_text(r.parts_json) for r in rows
+    )
+
+    # ⑤ 记录了一条 outbound 出站拦截事件（沙箱页可追溯）
+    events = [e for e in guard.events(family="secret") if e.tool == "outbound:llm"]
+    assert events, "压缩外发明文凭据却没有记录 guard 拦截事件"
+    assert events[0].session_id == sid
+    assert "[llm]" in events[0].output
+    assert PLAINTEXT_KEY not in events[0].output  # 事件里也只留部分显示
+    guard.reset()
+
+
+@pytest.mark.asyncio
+async def test_compaction_survives_a_broken_redactor(env, monkeypatch):
+    """脱敏自己炸了也不能中断压缩 —— 漏一次拦截可以，挡住用户的回合不行。"""
+    import openminis.sandbox.guard as guard_mod
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("redactor exploded")
+
+    monkeypatch.setattr(guard_mod, "sanitize_message_parts", _boom)
+    await chat_store.ensure_db()
+    sid = (await chat_store.create_session()).id
+    await _seed(sid, compaction.COMPACT_EVERY_TURNS)
+
+    provider = StubProvider(REPLY)
+    result = await compaction.compact_session(sid, provider=provider)
+
+    assert result.applied
+    assert "用户第 0 轮" in provider.transcripts[0]
+
+
 @pytest.mark.asyncio
 async def test_compact_survives_a_silent_model(env):
     await chat_store.ensure_db()
