@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .paths import payload_root
+
 logger = logging.getLogger(__name__)
 
 #: 固定地址：`releases/latest` 永远指向最新的 release，应用里不用写版本号，
@@ -270,6 +272,42 @@ class Plan:
         return self.info.payload if self.kind == "payload" else self.info.full
 
 
+def shell_version() -> str:
+    """本机 exe 里那份**壳**的版本号（冻在 ``desktop/__init__.py``）。"""
+    from . import __version__  # noqa: PLC0415
+
+    return str(__version__)
+
+
+def installed_payload_version() -> str | None:
+    """已装载荷的版本号（``payload/payload.json`` 里的 ``appVersion``）。
+
+    **为什么不拿 ``__version__`` 当"当前版本"**（2026-10-08 用户实测的问题）：
+    载荷只装内核与界面（``scripts/make_payload.py`` 的 ``PAYLOAD_TREES`` **刻意
+    不含** ``desktop/``，因为决定"去哪找载荷"的引导代码不能由载荷自己给），
+    所以 ``desktop/__init__.py`` 里那个版本号是**烧进 exe** 的 —— 载荷更新永远
+    改不了它。后果：装了 0.4.19 的载荷，界面照旧显示 0.4.17，检查更新永远说
+    "有新版本"，于是用户在"更新 → 重启 → 还是 17"里打转，而且**每次都会重新下
+    一遍 2.4MB**。真正的当前版本必须读载荷清单。
+    """
+    root = payload_root()
+    if root is None:
+        return None
+    try:
+        meta = json.loads((root / "payload.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    version = str(meta.get("appVersion") or meta.get("kernelVersion") or "").strip()
+    return version or None
+
+
+def own_version() -> str:
+    """用于比较的"当前版本"：优先已装载荷，退回壳版本。"""
+    return installed_payload_version() or shell_version()
+
+
 def own_shell_id() -> str:
     """本机 exe 里那份壳指纹（冻在 desktop/build_id.py）。"""
     from .build_id import SHELL_ID  # noqa: PLC0415
@@ -432,18 +470,48 @@ def install_payload(archive: Path, payload_dir: Path, *, expect_shell: str | Non
 # ---------------------------------------------------------------------------
 #: 重启助手：等旧进程退出，再把新版本拉起来。用**独立进程**是因为正在跑的这个
 #: 进程没法换掉自己的 exe（Windows 上那是锁定文件），只能"我先退出，你来"。
+#:
+#: 2026-10-08 用户实测"点了重启，窗口没了也拉不起来"之后加了三道保险：
+#:   * **等 pid 有上限**（``WAITED``）—— 旧进程哪怕因为句柄没退干净，
+#:     也不会把助手永久卡死（原版在这里死等）；
+#:   * **先 ``cd /d`` 回安装目录**再启动，避免继承一个奇怪的当前目录；
+#:   * **每一步写日志**（``openminis-relaunch.log``）—— 助手脚本自己会自删，
+#:     不留日志的话失败之后**无据可查**（现在就查不到）。
 _RELAUNCH_CMD = """@echo off
-rem 由 OpenMinis Desktop 的更新器写出来：等旧进程退出，再启动新版本。
+rem 由 OpenMinis Desktop 的更新器写出来：等旧进程退出 → 回安装目录 → 启动新版本。
 setlocal
+set "LOG=%~dp0openminis-relaunch.log"
+echo [%DATE% %TIME%] 等待 PID {pid} 退出 >> "%LOG%"
+set /a WAITED=0
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
-if not errorlevel 1 (
-  timeout /t 1 /nobreak >nul
-  goto wait
+if errorlevel 1 goto start
+set /a WAITED+=1
+if %WAITED% GEQ {waited_max} (
+  echo [%DATE% %TIME%] 等满 {waited_max} 秒进程仍在，不再等，直接启动 >> "%LOG%"
+  goto start
 )
+timeout /t 1 /nobreak >nul
+goto wait
+:start
+cd /d "{app_root}"
+echo [%DATE% %TIME%] 启动 "{exe}"（工作目录 %CD%） >> "%LOG%"
 start "" "{exe}"
+echo [%DATE% %TIME%] start 返回 %errorlevel% >> "%LOG%"
 del "%~f0"
 """
+
+#: 等旧进程退出的上限（秒）。超过就照启动 —— 让用户拿到窗口比等到天荒地老有用。
+_RELAUNCH_WAIT_MAX_S = 60
+
+
+def relaunch_script_text(*, pid: int, exe: Path, app_root: Path) -> str:
+    """渲染重启助手脚本。单独抽出来是为了能在**任何平台**上测它写了什么 ——
+    真正要 spawn ``cmd`` 的那步只在 Windows 上跑得起来。"""
+    return _RELAUNCH_CMD.format(
+        pid=pid, exe=str(exe), app_root=str(app_root),
+        waited_max=_RELAUNCH_WAIT_MAX_S,
+    )
 
 
 def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Path | None:
@@ -456,17 +524,65 @@ def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Pat
         return None
     exe = exe or Path(sys.executable)
     pid = pid if pid is not None else os.getpid()
+    app_dir = exe.resolve().parent
     script = Path(tempfile.gettempdir()) / f"openminis-relaunch-{pid}.cmd"
     script.write_text(
-        _RELAUNCH_CMD.format(pid=pid, exe=str(exe)), encoding="utf-8"
+        relaunch_script_text(pid=pid, exe=exe, app_root=app_dir), encoding="utf-8"
     )
-    subprocess.Popen(  # noqa: S603
-        ["cmd", "/c", str(script)],
-        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-        close_fds=True,
+    flags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
+    base: dict[str, Any] = {
+        # **三个流都要接 DEVNULL**：原版让子进程继承父进程的句柄，父进程一退，
+        # cmd 的句柄就悬了 —— 助手死在半路，用户看到"窗口没了也不回来"。
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    try:
+        # 带上 BREAKAWAY：万一这个进程活在某个 Job 对象里（安装器/启动器常见），
+        # 不带它的话子进程会跟着父进程一起被杀 —— 助手根本没跑过。
+        # 不在 Job 里时这个标志会报 Access denied，所以失败了要不带它重试一次。
+        subprocess.Popen(  # noqa: S603
+            ["cmd", "/c", str(script)],
+            creationflags=flags | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0),
+            **base,
+        )
+    except OSError as exc:
+        logger.warning("relaunch helper (breakaway) failed: %s — 去掉该标志重试", exc)
+        subprocess.Popen(  # noqa: S603
+            ["cmd", "/c", str(script)], creationflags=flags, **base
+        )
     return script
+
+
+#: 上一次更新的结果（落盘）。进程内的 ``_update_state`` 一重启就空 ——
+#: 用户点完重启再打开，看到的是"还没检查"，没人知道刚才到底成没成。
+STATE_FILE = "state.json"
+
+
+def state_path() -> Path:
+    return updates_dir() / STATE_FILE
+
+
+def load_state() -> dict[str, Any]:
+    try:
+        data = json.loads(state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(state: dict[str, Any]) -> None:
+    """只落一份"人话摘要"，不落 phase —— 免得重启后界面以为还有活儿在跑。"""
+    try:
+        state_path().write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:  # pragma: no cover - 写不进去不该影响更新本身
+        logger.debug("update state save failed", exc_info=True)
 
 
 def updates_dir() -> Path:

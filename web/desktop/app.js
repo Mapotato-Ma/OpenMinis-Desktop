@@ -4019,13 +4019,22 @@ function updateHint(t) {
   }
   if (t.error) text += '：' + t.error;
   if (t.note) text += '：' + t.note;
+  if (t.lastResult) text = t.lastResult + (t.error ? '' : '');
   el2.textContent = text;
 }
 
 async function loadUpdate() {
   try { if (!state.info) state.info = await api('/desktop/info'); } catch { /* 拿不到就显示 — */ }
+  // 「当前版本」显示**载荷**版本（内核 + 界面，能单独更新）；壳版本单独一行。
+  // 载荷更新改不了壳版本号，把两个混在一起会让人以为"更新没成功"。
   const cur = $('updateCurrent');
   if (cur) cur.textContent = state.info && state.info.uiVersion ? 'v' + state.info.uiVersion : '—';
+  const shell = $('updateShell');
+  if (shell) {
+    const sv = state.info && state.info.shellVersion;
+    const pv = state.info && state.info.payloadVersion;
+    shell.textContent = sv ? ('v' + sv + (pv ? '' : '（无载荷，整装/开发模式）')) : '—';
+  }
   try { updateHint(await api('/desktop/update/status')); } catch { /* 忽略 */ }
 }
 
@@ -4050,10 +4059,21 @@ async function checkUpdate() {
     updateHint({ phase: r.available ? 'idle' : 'done', note: r.available ? r.reason : '' });
     const apply = $('btnApplyUpdate');
     if (apply) {
-      apply.hidden = !r.available;
-      apply.textContent = r.kind === 'full'
-        ? `下载整包（${(r.bytes / 1048576).toFixed(1)} MB）`
-        : `下载并安装（${(r.bytes / 1048576).toFixed(1)} MB）`;
+      // 整包（换壳）**不能**应用内自动装：正在跑的 exe 换不掉自己，而"退出后由
+      // 助手替换安装目录"这一步还没做。与其显示一个点了会失败的按钮，不如把
+      // 该做什么写清楚 + 给直链。
+      apply.hidden = !r.available || r.kind === 'full';
+      apply.textContent = `下载并安装（${(r.bytes / 1048576).toFixed(1)} MB）`;
+      if (r.kind === 'full') {
+        const mb = (r.bytes / 1048576).toFixed(1);
+        updateHint({
+          phase: 'manual',
+          note: `这次换了壳，需要装整包（${mb}MB）：到发布页下载 `
+            + 'OpenMinisDesktop-portable.zip 解压覆盖安装目录即可。'
+            + '数据与设置都在用户目录（openminis），不会丢。'
+            + '发布页：github.com/Mapotato-Ma/OpenMinis-Desktop/releases/latest',
+        });
+      }
     }
     const restart = $('btnRestartUpdate');
     if (restart) restart.hidden = true;
@@ -4095,7 +4115,13 @@ async function restartForUpdate() {
   if (btn) btn.setAttribute('loading', '');
   try {
     await api('/desktop/update/restart', { method: 'POST' });
-    updateHint({ phase: 'installing', note: '正在重启，窗口会自动回来' });
+    // 诚实一点：窗口会不会自己回来取决于系统（原版这里只说"会自动回来"，
+    // 助手失败时用户就懵在那儿了 —— 2026-10-08 实测）。所以顺手把退路写清楚。
+    updateHint({
+      phase: 'installing',
+      note: '正在重启：窗口会关闭，通常几秒后自己回来。'
+        + '若 10 秒内没回来，直接手动打开一次 —— 新版本已经装好了，手动打开完全等价。',
+    });
   } catch (e) {
     updateHint({ phase: 'failed', error: e.message });
     if (btn) btn.removeAttribute('loading');

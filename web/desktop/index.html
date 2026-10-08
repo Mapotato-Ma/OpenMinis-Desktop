@@ -617,9 +617,14 @@
         <div class="settings-block">
           <h3>更新</h3>
           <p class="pane-sub">
-            从发布页取最新版本。内核与界面的更新只有几 MB，装完重启生效。
+            从发布页取最新版本。<strong>内核与界面</strong>的更新只有几 MB（换的是
+            exe 旁边的 <code>payload/</code> 目录，装完重启生效）；<strong>壳</strong>
+            （窗口本身）变了才需要整包。
+            「当前版本」是载荷版本，「壳版本」是烧在 exe 里的那个 —— 载荷更新
+            不会改变壳版本号，这是正常的。
           </p>
           <div class="kv"><span class="kv-k">当前版本</span><span class="kv-v" id="updateCurrent">—</span></div>
+          <div class="kv"><span class="kv-k">壳版本</span><span class="kv-v" id="updateShell">—</span></div>
           <div class="kv"><span class="kv-k">可用版本</span><span class="kv-v" id="updateLatest">—</span></div>
           <div class="kv"><span class="kv-k">状态</span><span class="kv-v" id="updateStatus">还没检查</span></div>
           <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">

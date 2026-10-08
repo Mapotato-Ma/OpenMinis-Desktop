@@ -579,3 +579,92 @@ def test_cleanup_removes_old_downloads(tmp_path, monkeypatch):
     updater.cleanup_old_downloads()
     assert not old.exists()
     assert fresh.exists()
+
+
+# ---------------------------------------------------------------------------
+# 版本身份：当前版本 = 已装载荷的版本，不是烧在 exe 里的壳版本
+#   2026-10-08 用户实测：装了 0.4.19 载荷，界面仍显示 0.4.17，检查更新永远说
+#   "有新版本" → 在"更新→重启→还是 17"里打转，每次还重下 2.4MB。
+# ---------------------------------------------------------------------------
+def _fake_payload(tmp_path, monkeypatch, version: str):
+    payload = tmp_path / "payload"
+    payload.mkdir(parents=True, exist_ok=True)
+    (payload / "payload.json").write_text(
+        json.dumps({"format": 1, "appVersion": version, "shellId": "deadbeef"},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater, "payload_root", lambda: payload)
+    return payload
+
+
+def test_installed_payload_version_reads_the_manifest(tmp_path, monkeypatch):
+    _fake_payload(tmp_path, monkeypatch, "0.4.19")
+    assert updater.installed_payload_version() == "0.4.19"
+
+
+def test_installed_payload_version_is_none_without_a_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "payload_root", lambda: None)
+    assert updater.installed_payload_version() is None
+    empty = tmp_path / "payload"
+    empty.mkdir()
+    monkeypatch.setattr(updater, "payload_root", lambda: empty)
+    assert updater.installed_payload_version() is None
+
+
+def test_own_version_prefers_the_payload_over_the_frozen_shell(tmp_path, monkeypatch):
+    """这就是那个 bug 的判据：壳版本 0.4.17 + 载荷 0.4.19 → 当前版本是 0.4.19。"""
+    _fake_payload(tmp_path, monkeypatch, "0.4.19")
+    monkeypatch.setattr(updater, "shell_version", lambda: "0.4.17")
+    assert updater.own_version() == "0.4.19"
+    # 没有载荷（整装/开发）时退回壳版本
+    monkeypatch.setattr(updater, "payload_root", lambda: None)
+    assert updater.own_version() == "0.4.17"
+
+
+def test_update_check_compares_against_the_payload_version(monkeypatch, tmp_path):
+    """检查更新传给 plan 的 current_version 必须是**载荷**版本。
+
+    原版传的是 ``desktop.__version__``（烧在 exe 里、载荷更新改不了）——
+    于是装完载荷检查更新永远说"有新版本"。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from desktop import ui_mount
+
+    seen: dict = {}
+    monkeypatch.setattr(updater, "installed_payload_version", lambda: "0.4.19")
+    monkeypatch.setattr(updater, "shell_version", lambda: "0.4.17")
+
+    def _fake_plan(*, current_version, current_shell=None, url=None):  # noqa: ANN001
+        seen["current"] = current_version
+        raise updater.UpdateError("到此为止（测试只关心拿哪个版本去比）")
+
+    monkeypatch.setattr(updater, "plan", _fake_plan)
+    assets = Path(__file__).resolve().parent.parent / "assets"
+    desktop_dir = Path(__file__).resolve().parent.parent / ".." / "web" / "desktop"
+    app = FastAPI()
+    ui_mount.attach(app, desktop_dir=(desktop_dir if desktop_dir.is_dir() else None))
+    with TestClient(app) as c:
+        body = c.get("/api/desktop/update").json()
+    assert seen.get("current") == "0.4.19", seen
+    assert body.get("payloadVersion") == "0.4.19", body
+    assert body.get("shellVersion") == "0.4.17", body
+    del assets
+
+
+def test_relaunch_script_can_be_rendered_anywhere(tmp_path):
+    """重启助手脚本：等进程有上限、先 cd 回安装目录、每步写日志。
+
+    这三条都是 2026-10-08 那次"窗口没了也拉不起来"的教训（原版死等 + 不记日志，
+    失败之后无据可查）。
+    """
+    text = updater.relaunch_script_text(
+        pid=4242, exe=tmp_path / "app" / "OpenMinisDesktop.exe", app_root=tmp_path / "app"
+    )
+    assert "PID eq 4242" in text
+    assert "GEQ" in text, "没有等待上限 —— 旧进程不退会永久卡住助手"
+    assert f'cd /d "{tmp_path / "app"}"' in text, "启动前没回安装目录"
+    assert "openminis-relaunch.log" in text, "没有日志 —— 失败后无据可查"
+    assert "start \"\"" in text

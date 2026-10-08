@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -55,7 +56,7 @@ _restart_hook: dict[str, Callable[[], None] | None] = {"fn": None}
 def set_restart_hook(fn: Callable[[], None] | None) -> None:
     """壳在窗口建好之后把"怎么正常退出"告诉这里（见 desktop/launcher.py）。"""
     _restart_hook["fn"] = fn
-DESKTOP_UI_VERSION = "0.4.19"
+DESKTOP_UI_VERSION = "0.4.20"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"
@@ -105,10 +106,20 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         from .paths import app_root, data_root, is_frozen, module_origin, payload_root  # noqa: PLC0415
 
         payload = payload_root()
+        # 版本号有**两份**，别混：载荷（内核 + 界面，可单独更新）与壳（烧在 exe 里，
+        # 只有整包能换）。uiVersion 报**载荷**那一份 —— 界面上"当前版本"要跟用户
+        # 实际在用的东西一致；壳版本单独给一个字段。（2026-10-08：只报壳版本导致
+        # 装了新载荷仍显示旧版本，用户以为更新没成。）
+        from . import updater  # noqa: PLC0415
+
+        payload_version = updater.installed_payload_version()
         info: dict[str, Any] = {
             "desktop": True,
             "uiActive": ui_active,
-            "uiVersion": DESKTOP_UI_VERSION,
+            "uiVersion": payload_version or DESKTOP_UI_VERSION,
+            "payloadVersion": payload_version,
+            # 壳版本走 updater 的同一个入口，别在别处再抄一遍 __version__。
+            "shellVersion": updater.shell_version(),
             "uiMount": DESKTOP_MOUNT_PATH if ui_active else None,
             "frozen": is_frozen(),
             "appRoot": str(app_root()),
@@ -329,16 +340,22 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
 
         from . import updater  # noqa: PLC0415
 
+        # **当前版本 = 已装载荷的版本**（不是烧在 exe 里的壳版本）：载荷更新改不了
+        # 壳版本号，拿它当判据会让"检查更新"永远说有新版本、每次都重下一遍。
+        current = updater.own_version()
         try:
             result = await asyncio.to_thread(
                 updater.plan,
-                current_version=__version__,
+                current_version=current,
                 current_shell=updater.own_shell_id(),
                 url=updater.MANIFEST_URL,
             )
         except updater.UpdateError as exc:
             return JSONResponse(
-                {"ok": False, "current": __version__, "error": str(exc)},
+                # 版本号在**失败时也要给**：界面那两行不该因为"检查失败"就变空。
+                {"ok": False, "current": current, "error": str(exc),
+                 "shellVersion": updater.shell_version(),
+                 "payloadVersion": updater.installed_payload_version()},
                 status_code=200,   # "检查不了"不是服务器错误，界面照样要能画
                 headers=_NO_STORE,
             )
@@ -346,7 +363,9 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         return JSONResponse(
             {
                 "ok": True,
-                "current": __version__,
+                "current": current,
+                "shellVersion": updater.shell_version(),
+                "payloadVersion": updater.installed_payload_version(),
                 "available": result.kind != "none",
                 "kind": result.kind,
                 "reason": result.reason,
@@ -369,7 +388,17 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         return JSONResponse({"ok": True, "phase": "checking"}, headers=_NO_STORE)
 
     async def _update_status(request: Any) -> JSONResponse:  # noqa: ARG001
-        return JSONResponse(dict(_update_state), headers=_NO_STORE)
+        from . import updater  # noqa: PLC0415
+
+        state = dict(_update_state)
+        if not state:
+            # 进程内的状态一重启就空 —— 用户点完重启再打开只看到"还没检查"，
+            # 没人知道刚才到底成没成。这里把上次落盘的结果当**说明**带出来。
+            last = updater.load_state()
+            note = str(last.get("summary") or "")
+            if note:
+                state = {"phase": "idle", "lastResult": note}
+        return JSONResponse(state, headers=_NO_STORE)
 
     async def _update_restart(request: Any) -> JSONResponse:  # noqa: ARG001
         """重启以让新载荷生效。
@@ -433,11 +462,20 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             )
             updater.cleanup_old_downloads(keep=archive)
             state.update({"phase": "ready", "version": result.info.version})
+            updater.save_state({
+                "summary": f"已安装 {result.info.version} 载荷，等待重启生效",
+                "version": result.info.version,
+                "at": int(time.time() * 1000),
+            })
         except updater.UpdateError as exc:
             state.update({"phase": "failed", "error": str(exc)})
+            updater.save_state({"summary": f"上次更新失败：{exc}",
+                                "at": int(time.time() * 1000)})
         except Exception as exc:  # noqa: BLE001 - 任何意外都要让界面看得见
             logger.exception("update failed")
             state.update({"phase": "failed", "error": f"{type(exc).__name__}: {exc}"})
+            updater.save_state({"summary": f"上次更新失败：{exc}",
+                                "at": int(time.time() * 1000)})
 
     routes.extend(
         [
