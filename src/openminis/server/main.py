@@ -165,6 +165,16 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         organiser_task = asyncio.create_task(auto_organize_loop())
     except Exception:  # pragma: no cover - never fail startup over memory
         logger.exception("memory organiser failed to start")
+    # PORT-FIX(guard-confirm-wiring): 沙箱拦下命令时「当场问用户」的**生产端接线**。
+    # 前端有整套 ``guard_confirm`` 问询 UI、内核 ``_ask_guard_confirm`` 也会建帧发帧
+    # 等答案 —— 但没人把 asker 注册进来，于是 ``sandbox/confirm.ask()`` 恒返回
+    # ``unavailable``，工具侧永远硬拦，界面写着"会当场弹确认"却从不弹（两边都是死代码）。
+    # 注册放在 lifespan 里：模块导入期 ``manager`` 还没有连接，这里起服务时接一次即可。
+    # 注：``_ask_guard_confirm`` 定义在本模块**下方**（lifespan 之后），运行时按模块
+    # 全局名解析，不受定义顺序影响。
+    from ..sandbox import confirm as sandbox_confirm
+
+    sandbox_confirm.set_asker(_ask_guard_confirm)
     logger.info("OpenMinis server starting")
     # [T-plugins-manager] 上次启用的插件（QQ 机器人这类通道）自动拉起来 ——
     # 否则重启服务之后机器人就悄悄掉线了。
@@ -764,6 +774,37 @@ def _register_running(
         _RUNNING_BY_CLIENT[client_id] = (sid, task)
 
 
+#: 终端抽屉里正在跑的命令，key = client_id。
+#:
+#: PORT-FIX(ws-shell-block): 命令跑在**独立 task** 里 —— 与上面 ``_RUNNING_CHATS``
+#: / ``_RUNNING_BY_CLIENT`` 同一套登记路子（完成回调按身份核对再清理）。
+#: 原来收帧循环里是一句 ``await _handle_shell(...)``，而它内部逐行 await 命令输出：
+#: 命令没跑完，收帧循环读不到**下一帧** —— ping / stop / chat 全堵在门外。
+#: 2026-10-08 实测（omd-audit/ws_probe.py）：终端里跑 ``sleep 6``，0.3 秒后发 ping，
+#: **pong 5.84 秒才回来**，v0.4.18 刚修好的「停止真的能停」在这条路径上原样失效。
+_RUNNING_SHELL: dict[str, asyncio.Task[None]] = {}
+
+
+def _register_shell(client_id: str, task: asyncio.Task[None]) -> None:
+    """登记一条正在跑的终端命令（同 ``_register_running``：先核对是不是当前那个）。"""
+
+    def _cleanup(t: asyncio.Task[None], cid: str = client_id) -> None:
+        if _RUNNING_SHELL.get(cid) is t:
+            _RUNNING_SHELL.pop(cid, None)
+
+    task.add_done_callback(_cleanup)
+    _RUNNING_SHELL[client_id] = task
+
+
+def _cancel_client_shell(client_id: str) -> bool:
+    """取消这条连接上正在跑的终端命令（停止帧 / 连接断开）。真取消了才回 True。"""
+    task = _RUNNING_SHELL.pop(client_id, None)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
+
+
 def _dismiss_pending_confirms(session_id: str = "") -> int:
     """把还没被回答的沙箱确认弹窗按「拒绝」结掉（停止时用）。
 
@@ -929,6 +970,11 @@ async def _handle_stop(client_id: str, msg: dict[str, Any]) -> None:
     else:
         logger.info("stop requested but nothing is running (%s)",
                     sid or f"client={client_id}")
+    # 终端抽屉里跑着的命令也归「停止」管（用户按的是自己的停止键）。不收的话：
+    # 命令接着烧 CPU，界面回「没在跑」，和对话那条路径是同一个毛病。
+    if _cancel_client_shell(client_id):
+        stopped = True
+        logger.info("terminal command stopped by client (%s)", client_id)
     # 回帧里的 id 用**登记里的那个**：兜底命中时帧里带的 id 跟真正在跑的那一轮
     # 不是同一个（界面按它 endTurn 就会把另一条会话标成结束）。
     await _safe_send(
@@ -981,14 +1027,17 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             elif msg_type == "guard_confirm_answer":
                 await _handle_guard_answer(client_id, msg)
             elif msg_type == "shell":
-                await _handle_shell(client_id, msg)
+                # 派成后台任务，收帧循环只负责分发 —— 见 _dispatch_shell 的说明。
+                await _dispatch_shell(client_id, msg)
             else:
                 await _safe_send(client_id, {"type": "error", "error": f"unknown type: {msg_type}"}
                 )
     except WebSocketDisconnect:
+        _cancel_client_shell(client_id)
         manager.disconnect(client_id)
     except Exception as e:  # pragma: no cover - defensive
         logger.exception("ws handler crashed")
+        _cancel_client_shell(client_id)
         manager.disconnect(client_id)
         raise
 
@@ -1554,31 +1603,94 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
     except Exception:  # pragma: no cover - 闸门故障时按放行处理（与旧行为一致）
         logger.debug("console auth check failed", exc_info=True)
 
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-    except Exception as e:
-        await _safe_send(client_id, {"type": "error", "error": str(e)})
-        return
+    # 独立进程组（Windows: CREATE_NEW_PROCESS_GROUP / POSIX: 新会话）：停止时才能
+    # 连子孙一起杀。``proc.kill()`` 只杀 shell 本身，底下真干活的 curl / node 会
+    # 变成孤儿继续跑 —— 与 persistent_shell 里同一条理由。
+    from ..sandbox.persistent_shell import new_group_kwargs
 
-    assert proc.stdout is not None
+    # 取消要能**连进程一起收掉**，所以 spawn 也在这一层 try 里：停止帧完全可能赶在
+    # 「命令刚派下去、进程还没起来」的窗口里到（那时 CancelledError 从
+    # ``create_subprocess_shell`` 里抛出来，proc 还是 None —— 没有可杀的东西）。
+    proc: Any = None
     try:
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                **new_group_kwargs(),
+            )
+        except Exception as e:
+            await _safe_send(client_id, {"type": "error", "error": str(e)})
+            return
+
+        assert proc.stdout is not None
         while True:
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
             if not line:
                 break
             await _safe_send(client_id, {"type": "delta", "text": line.decode(errors="replace")}
             )
+        code = await proc.wait()
     except TimeoutError:
-        proc.kill()
+        if proc is not None:
+            _kill_shell(client_id, proc)
         await _safe_send(client_id, {"type": "error", "error": "timeout"})
         return
+    except asyncio.CancelledError:
+        # 停止帧 / 连接断开：光取消 await 只是不再读输出，命令还得真收掉。
+        if proc is not None:
+            _kill_shell(client_id, proc, notify=True)
+        raise
 
-    code = await proc.wait()
     await _safe_send(client_id, {"type": "done", "exitCode": code})
+
+
+def _kill_shell(client_id: str, proc: Any, *, notify: bool = False) -> None:
+    """收掉一条终端命令的**整棵进程树**（可选地告诉界面「命令已停止」）。
+
+    为什么是「派成后台任务」而不是在这里 await：
+
+    * 取消路径上本任务正在被取消，在这里再 await 可能被二次取消打断 —— 杀进程
+      这件事不能半途而废；
+    * 杀进程可能是同步阻塞的（Windows 的 ``taskkill /T`` 要几百毫秒），跑在事件
+      循环里会把**所有**连接的收帧、ping/pong 一起冻住（见 ``_interrupt_session_shell``
+      的同类处理）→ 丢线程。
+    """
+
+    async def _run() -> None:
+        try:
+            from ..sandbox.persistent_shell import kill_process_tree
+
+            note = await asyncio.to_thread(kill_process_tree, proc.pid, proc)
+            logger.info("terminal command killed: %s", note)
+        except Exception:  # pragma: no cover - 杀不掉也要让界面知道停了
+            logger.debug("terminal command kill failed", exc_info=True)
+        if notify:
+            try:
+                # 前端抽屉按 ``error`` 帧熄灭「正在跑」——用 done 帧会被当成一轮对话结束。
+                await _safe_send(client_id, {"type": "error", "error": "命令已停止"})
+            except Exception:  # pragma: no cover
+                logger.debug("terminal stop notice failed", exc_info=True)
+
+    _spawn_bg(_run())
+
+
+async def _dispatch_shell(client_id: str, msg: dict[str, Any]) -> None:
+    """把终端命令**派成后台任务**，收帧循环只负责分发。
+
+    PORT-FIX(ws-shell-block): 原来是 ``await _handle_shell(...)``（同步等命令跑完），
+    收帧循环于是被整条命令堵住。登记走 ``_RUNNING_SHELL``（同 ``_RUNNING_CHATS``
+    那一套）：完成回调按身份清理，停止/断开按 client 取消。
+    """
+    prev = _RUNNING_SHELL.get(client_id)
+    if prev is not None and not prev.done():
+        # 同一条连接上已有命令在跑 → 拒绝新的一条（前端 termBusy 也是这么说的：
+        # 「上一条命令还在执行」）。放两条并行跑的话，输出 delta 和 done 帧会互相
+        # 踩（前一条的 done 会把抽屉的 busy 灯熄掉，后一条还在跑）。
+        await _safe_send(client_id, {"type": "error", "error": "上一条命令还在执行"})
+        return
+    _register_shell(client_id, asyncio.create_task(_handle_shell(client_id, msg)))
 
 
 # ---------------------------------------------------------------------------
