@@ -446,3 +446,75 @@ test('记忆页：读 mtime（后端字段）、能改能删、有整理入口',
   assert.ok(app.includes('/system/memory/organize'), '没有「整理记忆」入口');
   assert.ok(app.includes('memoryRow('), '列表没有用 memoryRow 渲染');
 });
+
+/* ── 界面缩放「落在谁的窗口上」（2026-10-08 用户实测到的 bug）───────────────
+ * PC 上双开时，第二个实例复用后端、自己开窗口。`POST /api/desktop/zoom` 由
+ * **后端那个进程**处理，而它只能操作自己窗口的 WebView2 —— 它回 `ok:true`，
+ * 缩的却是另一个窗口。老代码收到 ok:true 就把 CSS zoom 撤掉，于是：
+ * **百分数照变、窗口纹丝不动**（用户原话「缩放失效了，数值变了但窗口没动」）。
+ * 这里真跑这几个函数，钉住「量过本窗口视口才算接管」。
+ */
+function zoomFns() {
+  const src = read('app.js');
+  const start = src.indexOf('function requestNativeZoom(');
+  const end = src.indexOf('function fallbackToCssZoom(');
+  assert.ok(start >= 0 && end > start, '抠不出缩放这段（函数被改名或挪走了？）');
+  const body = src.slice(start, end);
+  return function make(env) {
+    return new Function(
+      'api', 'setZoomMode', 'fallbackToCssZoom', 'UiPrefs', 'window', 'setTimeout',
+      `${body}; return { requestNativeZoom, pushNativeZoom, nativeZoomTookThisWindow };`,
+    )(env.api, env.setZoomMode, env.fallbackToCssZoom, env.UiPrefs, env.window, setTimeout);
+  };
+}
+
+function zoomEnv(opts) {
+  const moves = !!(opts && opts.moves);
+  const env = { posts: [], trust: [], fallbacks: [], modes: [], window: { innerWidth: 1200 } };
+  env.api = async (path, o) => {
+    const z = JSON.parse(o.body).factor;
+    env.posts.push({ path, factor: z });
+    // moves=true 模拟「后端就是本窗口的进程」：引擎级缩放会让 CSS px 视口变小。
+    // moves=false 模拟双开：后端缩的是另一个进程的窗口，本窗口宽度不变。
+    if (moves) env.window.innerWidth = Math.round(1200 / z);
+    return { ok: true, applied: z };
+  };
+  env.setZoomMode = (m, why) => env.modes.push([m, why]);
+  env.fallbackToCssZoom = (why) => env.fallbacks.push(why);
+  env.UiPrefs = {
+    trusted: !!(opts && opts.trusted),
+    isNativeTrusted() { return this.trusted; },
+    trustNativeZoom(ok) { env.trust.push(ok); this.trusted = !!ok; return !!ok; },
+  };
+  return env;
+}
+
+test('缩放：宿主回 ok 也要自己量 —— 缩的是「别人的窗口」时必须回落 CSS', async () => {
+  const env = zoomEnv({ moves: false });
+  const fns = zoomFns()(env);
+  assert.equal(fns.requestNativeZoom(1.2), false, '还没证实就不许声称接管（CSS 会被撤掉、画面不动）');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(env.posts, [{ path: '/desktop/zoom', factor: 1.2 }], '请求该发出去');
+  assert.deepEqual(env.trust, [], '本窗口视口没变，就不许标成已接管');
+  assert.equal(env.fallbacks.length, 1, '必须回落 CSS，否则用户看到的就是「缩放失效」');
+  assert.match(env.fallbacks[0], /applied/, '回落理由要带上宿主报的值，便于定位');
+});
+
+test('缩放：本窗口确实被原生接管 → 标信任，之后走快路径不再等', async () => {
+  const env = zoomEnv({ moves: true });
+  const fns = zoomFns()(env);
+  assert.equal(fns.requestNativeZoom(1.2), false, '第一次仍要等量完');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(env.trust, [true]);
+  assert.equal(env.fallbacks.length, 0, '本窗口生效了就不该回落');
+  assert.equal(fns.requestNativeZoom(1.44), true, '已信任 → 同步放行，不再垫 CSS（不闪）');
+});
+
+test('缩放：回到 100% 时视口本来就不变，不能误判成「没落到本窗口」', async () => {
+  const env = zoomEnv({ moves: false });
+  const fns = zoomFns()(env);
+  fns.requestNativeZoom(1);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(env.trust, [true], '100% 没有可观测差异，判成功即可');
+  assert.equal(env.fallbacks.length, 0);
+});

@@ -56,7 +56,7 @@ _restart_hook: dict[str, Callable[[], None] | None] = {"fn": None}
 def set_restart_hook(fn: Callable[[], None] | None) -> None:
     """壳在窗口建好之后把"怎么正常退出"告诉这里（见 desktop/launcher.py）。"""
     _restart_hook["fn"] = fn
-DESKTOP_UI_VERSION = "0.4.22"
+DESKTOP_UI_VERSION = "0.4.23"
 
 #: 内核末尾注册的兜底路由。桌面路由必须**全部**排在它之前。
 KERNEL_CATCH_ALL_PATH = "/{full_path:path}"

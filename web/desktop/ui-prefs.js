@@ -80,16 +80,38 @@
      would multiply (review finding A1). Loaded before first paint on purpose:
      applying zoom in app.js init made a 1.5 zoom flash at 100% first (A5). */
   let nativeZoom = null;
+  /* 原生缩放**是否已经证实落在本窗口**上。光有钩子不够：两个实例共用后端时
+     钩子会回 true（后端确实把 ZoomFactor 设进去了），可它设的是**后端自己那个
+     进程的窗口** —— 本窗口一点没动，而 CSS zoom 已经被清掉，画面就成了死的。
+     实测（2026-10-08，PC 上双开）：界面百分数变了、窗口纹丝不动。 */
+  let nativeTrusted = false;
 
   function setNativeZoomHook(fn) {
     nativeZoom = typeof fn === 'function' ? fn : null;
+    nativeTrusted = false;   // 新钩子一律从头证：宁可先用 CSS，也不要画面没反应
   }
+
+  /** app.js 量完「本窗口的 CSS px 视口有没有跟着变」后回填结论。 */
+  function trustNativeZoom(ok) {
+    nativeTrusted = !!ok && !!nativeZoom;
+    if (nativeTrusted) { root.style.zoom = ''; applyViewportHeight(1); return true; }
+    applyZoom(state.uiZoomLevel);     // 回到 CSS：画面必须有反应
+    return false;
+  }
+
+  function isNativeTrusted() { return nativeTrusted; }
 
   function applyZoom(level) {
     const z = zoomFromLevel(level);
     let handled = false;
     if (nativeZoom) {
-      try { handled = nativeZoom(z) !== false; } catch (e) { handled = false; }
+      if (nativeTrusted) {
+        try { handled = nativeZoom(z) !== false; } catch (e) { handled = false; }
+      } else {
+        /* 还没证实：先把缩放落在 CSS 上（**画面必须立刻有反应**），同时把请求
+           发出去 —— app.js 量完视口再决定要不要撤掉 CSS（trustNativeZoom）。 */
+        try { nativeZoom(z); } catch (e) { /* 宿主不在，就当没有原生缩放 */ }
+      }
     }
     root.style.zoom = handled ? '' : String(z);
     applyViewportHeight(handled ? 1 : z);
@@ -233,6 +255,8 @@
     subscribe: subscribe,
     applyAll: applyAll,
     setNativeZoomHook: setNativeZoomHook,
+    trustNativeZoom: trustNativeZoom,
+    isNativeTrusted: isNativeTrusted,
     zoomFromLevel: zoomFromLevel,
     levelFromZoom: levelFromZoom,
     zoomLevel: zoomLevel,

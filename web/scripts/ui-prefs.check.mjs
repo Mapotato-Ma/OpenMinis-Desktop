@@ -82,13 +82,18 @@ test('缩放落到 documentElement.style.zoom，并持久化', () => {
   assert.equal(P.zoomLabel(), '100%');
 });
 
-test('宿主原生缩放接管时不留 CSS zoom（否则两者相乘）', () => {
+test('原生缩放只有**证实落到本窗口**后才接管（否则会相乘，或者画面一动不动）', () => {
   const { P, style } = harness();
   const seen = [];
   P.setNativeZoomHook((z) => { seen.push(z); return true; });
   P.set('uiZoomLevel', 1);
-  assert.deepEqual(seen, [1.2]);
-  assert.equal(style.zoom, '');
+  assert.deepEqual(seen, [1.2], '钩子该被调用（后台去试原生）');
+  assert.equal(style.zoom, '1.2', '还没证实之前必须留着 CSS —— 不然双开时画面根本没有反应');
+  assert.equal(P.trustNativeZoom(true), true);
+  assert.equal(style.zoom, '', '证实接管后不能留 CSS zoom（会乘起来）');
+  P.zoomIn();
+  assert.equal(style.zoom, '', '快路径：已信任的窗口每次缩放都不该再垫一层 CSS');
+  assert.equal(seen.length, 2);
   // 钩子抛错 / 明确说不支持 → 必须退回 CSS 路径，而不是没有缩放
   P.setNativeZoomHook(() => { throw new Error('no native handle'); });
   P.set('uiZoomLevel', 2);
@@ -97,6 +102,20 @@ test('宿主原生缩放接管时不留 CSS zoom（否则两者相乘）', () =>
   P.zoomReset();
   assert.equal(style.zoom, '1');
   P.setNativeZoomHook(null);
+  assert.equal(P.isNativeTrusted(), false, '换钩子（含清空）都要重新证');
+});
+
+test('证实失败 = 宿主的 ok 只证明了「它自己那个窗口被缩了」→ 回落 CSS 且仍能缩放', () => {
+  // 2026-10-08 PC 双开实测：后端进程只能操作它自己窗口的 WebView2，
+  // 第二个窗口的 POST 拿到 ok:true，可本窗口的视口宽度一点没变。
+  const { P, style } = harness();
+  P.setNativeZoomHook(() => true);
+  P.zoomIn();
+  assert.equal(P.trustNativeZoom(false), false);
+  assert.equal(style.zoom, '1.2', '回落时必须真有 CSS zoom，否则用户看到的就是「缩放失效」');
+  assert.equal(P.isNativeTrusted(), false);
+  P.zoomIn();
+  assert.equal(style.zoom, '1.44', '回落之后继续缩放还得能用（走 CSS）');
 });
 
 test('档位边界处不许越界（菜单置灰用）', () => {  const { P } = harness();
@@ -178,6 +197,7 @@ test('缩放时补偿根高度 --ui-h（否则页面比视口高、焦点滚动�
 test('宿主原生缩放接管时不写 --ui-h（原生缩放自己就管视口）', () => {
   const h = harness();
   h.P.setNativeZoomHook(() => true);
+  h.P.trustNativeZoom(true);
   h.P.zoomIn();
   assert.equal(h.style.zoom, '', '原生缩放接管了还留着 CSS zoom 会乘起来');
   assert.equal(h.props['--ui-h'], undefined, '原生缩放下不该再补偿 CSS 的 vh 语义');

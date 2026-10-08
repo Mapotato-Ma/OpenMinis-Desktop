@@ -2950,18 +2950,44 @@ async function probeNativeZoom() {
   UiPrefs.applyAll();   // 立刻切过去：ui-prefs 会清掉 CSS zoom 与 --ui-h
 }
 
-/* ui-prefs 的钩子是同步的（得立刻决定「这次缩放归谁」），所以这里同步返回
-   true，请求异步发出去；宿主说不行就回落，界面不会两头空。 */
+/* ui-prefs 的钩子是同步的（得立刻决定「这次缩放归谁」），所以这里同步回答：
+   **已经证实接管过**的窗口直接放行（快路径，不闪）；第一次要先量本窗口的视口，
+   在那之前返回 false —— 界面继续用 CSS zoom 顶着，画面不会没反应。 */
 function requestNativeZoom(z) {
-  pushNativeZoom(z);
-  return true;
+  if (UiPrefs.isNativeTrusted()) { pushNativeZoom(z, false); return true; }
+  pushNativeZoom(z, true);
+  return false;
 }
 
-async function pushNativeZoom(z) {
+/* 原生缩放是**引擎级**的：它会让本窗口的 CSS px 视口变小（宽 ≈ 原宽 / z）。
+   CSS zoom 不会动 window.innerWidth —— 所以这个差值是「缩放到底落在谁的窗口上」
+   的判据。2026-10-08 实测：PC 上双开两个实例，第二个窗口的请求由**后端进程**
+   处理，后端只能操作它自己那个窗口 → 它回 ok=true，而本窗口纹丝不动，
+   CSS zoom 却已被清掉 = 界面缩放看起来完全失效（百分数照变、画面不动）。 */
+function nativeZoomTookThisWindow(beforeW, z) {
+  if (!z || Math.abs(z - 1) < 1e-6) return Promise.resolve(true);   // 100% 没有可观测差异
+  /* 每 25ms 探一次、最多 250ms：一旦视口真的变小就**立刻**撤销 CSS zoom。
+     这样做是为了把「CSS 与原生同时生效」的窗口压到一两帧 —— 只在首次缩放
+     时可能出现，真机上肉眼看不出来。 */
+  const deadline = Date.now() + 250;
+  return new Promise((resolve) => {
+    (function tick() {
+      if (beforeW > 0 && Math.abs(window.innerWidth - beforeW) > 1) { resolve(true); return; }
+      if (Date.now() >= deadline) { resolve(false); return; }
+      setTimeout(tick, 25);
+    })();
+  });
+}
+
+async function pushNativeZoom(z, verify) {
+  const before = window.innerWidth;
   try {
     const res = await api('/desktop/zoom', { method: 'POST', body: JSON.stringify({ factor: z }) });
-    if (res && res.ok) { setZoomMode('native', ''); return; }
-    fallbackToCssZoom((res && res.reason) || '宿主拒绝了这次缩放');
+    if (!res || !res.ok) { fallbackToCssZoom((res && res.reason) || '宿主拒绝了这次缩放'); return; }
+    if (!verify) { setZoomMode('native', ''); return; }
+    if (await nativeZoomTookThisWindow(before, z)) { UiPrefs.trustNativeZoom(true); setZoomMode('native', ''); return; }
+    fallbackToCssZoom('宿主缩的是另一个实例的窗口（它报 applied=' + res.applied
+      + '，而本窗口的视口宽度没变）');
   } catch (e) {
     fallbackToCssZoom('请求失败：' + e.message);
   }
