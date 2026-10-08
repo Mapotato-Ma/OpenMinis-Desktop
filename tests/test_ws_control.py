@@ -257,11 +257,15 @@ def test_first_turn_of_a_new_session_is_registered_under_its_id(env, monkeypatch
         server_main._RUNNING_BY_CLIENT.clear()
 
         await server_main._handle_chat("c1", {"text": "你好"})  # 不带 session_id
-        # 让后台那一轮真的跑起来（它会在 build_chat_setup 处抓快照然后结束）
-        for _ in range(50):
-            if seen:
-                break
-            await asyncio.sleep(0.01)
+        # 等这一轮真的跑起来：它会在 build_chat_setup 处抓快照然后结束。
+        # 不用固定时长轮询 —— Windows CI 上建会话（sqlite）比 Linux 慢，
+        # 0.5 秒的窗口会偶发抢不到（第一次跑 CI 就是这么红的）。
+        entry = server_main._RUNNING_BY_CLIENT.get("c1")
+        assert entry is not None, "发起时连按连接的登记都没有"
+        try:
+            await asyncio.wait_for(asyncio.shield(entry[1]), timeout=60)
+        except asyncio.TimeoutError:  # pragma: no cover - 真超时就是坏了
+            entry[1].cancel()
         assert seen, "首轮根本没跑起来"
 
         running = seen.get("running") or {}
