@@ -152,6 +152,12 @@ function renderMarkdown(src) {
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?]|$)/g, '$1<em>$2</em>')
+    // 图片要在链接之前处理：`![alt](路径)` 里含 `[alt](路径)`，顺序反了会被当链接。
+    .replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, (_m, alt, src) => {
+      const url = rawImageUrl(src);
+      if (!url) return '';
+      return `<img class="md-image" src="${url}" alt="${alt}" title="${alt}">`;
+    })
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
     .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>');
 
@@ -516,10 +522,28 @@ function handleFrame(f) {
       const card = t && f.id ? t.toolCards.get(f.id) : null;
       settleToolCard(card, f.ok, f.output, f.ms);
       if (f.images && f.images.length && t) {
-        const wrap = el('div', 'tool-section-label', '生成图片');
-        t.body.appendChild(wrap);
+        // 内核把生成图/截图的路径发在 toolEnd.images 里（main.py 的 collect_recent_images），
+        // 以前这里只加了一行「生成图片」标签、图根本不显示 —— 用户只看到一句
+        // `![生成图](C:\...)` 的字面文本。
+        appendImages(t.body, f.images);
       }
       scrollChat();
+      break;
+    }
+    case 'subagentStart':
+    case 'subagentDelta':
+    case 'subagentToolStart':
+    case 'subagentToolEnd':
+    case 'subagentEnd':
+      subagentFrame(f);
+      break;
+    case 'fallback': {
+      // 主模型限流/超时切兜底模型：以前完全静默，用户只会觉得"模型变笨了"
+      const note = el('div', 'fallback-note',
+        '⚠ 主模型这轮不可用（' + (f.reason || '限流或超时') + '），已改用 '
+        + (f.toModel || '兜底模型'));
+      const t = state.turn;
+      if (t && t.body) { t.body.appendChild(note); scrollChat(); } else { toast(note.textContent); }
       break;
     }
     case 'chatSession':
@@ -762,6 +786,68 @@ async function deleteSession(id) {
   } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
+/* ── 子代理（群聊气泡）─────────────────────────────────────────────────
+   内核在子代理干活时推 5 种帧（`src/openminis/agent/subagents.py` 的 emit_event，
+   由 `server/main.py` 的 `_on_agent_event` 转发），字段：
+     subagentId / name / emoji / model / project；Delta 带 text，
+     ToolStart 带 callId+name+input，ToolEnd 带 callId+ok+output+images，
+     Start 带 task，End 带 ok/text/stopReason。
+   以前前端**一个分支都没有**（全落 default:break）：开着子代理时绝大部分工具
+   调用其实发生在子代理里，界面却只有一张不动的卡，刷新后才看到过程。
+   ─────────────────────────────────────────────────────────────────── */
+function subBubble(f) {
+  const t = state.turn;
+  if (!t || !t.body) return null;
+  const key = String(f.subagentId || f.id || 'sub');
+  if (!t.subBubbles) t.subBubbles = new Map();
+  let b = t.subBubbles.get(key);
+  if (b) return b;
+  const wrap = el('div', 'sub-bubble');
+  const head = el('div', 'sub-head');
+  head.appendChild(el('span', 'sub-avatar', f.emoji || '🤖'));
+  head.appendChild(el('span', 'sub-name', f.name || key));
+  if (f.model) head.appendChild(el('span', 'tag', f.model));
+  const status = el('span', 'sub-status', '运行中…');
+  head.appendChild(status);
+  wrap.appendChild(head);
+  if (f.task) wrap.appendChild(el('div', 'sub-task', f.task));
+  const body = el('div', 'sub-body');
+  wrap.appendChild(body);
+  const text = el('div', 'sub-text');
+  body.appendChild(text);
+  t.body.appendChild(wrap);
+  b = { wrap, status, body, text, tools: new Map() };
+  t.subBubbles.set(key, b);
+  return b;
+}
+
+function subagentFrame(f) {
+  const b = subBubble(f);
+  if (!b) return;
+  if (f.type === 'subagentDelta') {
+    b.text.textContent += f.text || '';
+  } else if (f.type === 'subagentToolStart') {
+    const line = el('div', 'sub-tool running');
+    line.appendChild(ic(TOOL_ICON[f.name] || 'wrench', 'ic-sm'));
+    line.appendChild(el('span', 'sub-tool-name', f.name || 'tool'));
+    b.body.appendChild(line);
+    b.tools.set(f.callId, line);
+  } else if (f.type === 'subagentToolEnd') {
+    const line = b.tools.get(f.callId);
+    if (line) {
+      line.classList.remove('running');
+      line.classList.add(f.ok ? 'ok' : 'err');
+      line.appendChild(el('span', 'sub-tool-note', f.ok ? '✓' : '✗'));
+    }
+    if (f.images && f.images.length) appendImages(b.body, f.images);
+  } else if (f.type === 'subagentEnd') {
+    b.status.textContent = f.ok ? '已完成' : '未产出';
+    b.status.classList.add(f.ok ? 'ok' : 'err');
+    if (f.text) b.text.textContent = f.text;   // End 带完整正文，覆盖流式累加的那份
+  }
+  scrollChat();
+}
+
 /* ── history rendering ───────────────────────────────────────────────── */
 function renderMessages(messages) {
   const box = $('messages');
@@ -871,6 +957,48 @@ function fsUrl(kind, params) {
   const q = new URLSearchParams(params);
   if (currentWorkspace) q.set('workspace', currentWorkspace);
   return `/fs/${kind}?${q.toString()}`;
+}
+
+/** 图片路径 → 能被 <img> 直接读的地址。
+ *  工作区里的图走 /api/fs/raw（内核只允许回读工作区内的图片，别的后缀会被挡）；
+ *  http(s)/data 原样用。以前 agent 生成的图和浏览器截图在聊天里只是一行字
+ *  （`toolEnd` 收到 images 只加了个标题 div、markdown 也没有图片规则）。 */
+function rawImageUrl(path) {
+  const p = String(path || '').trim();
+  if (!p) return '';
+  if (/^(https?:|data:|blob:)/i.test(p)) return p;
+  return fsUrl('raw', { path: p });
+}
+
+/** 把图片挂到聊天里（主代理的 toolEnd 与子代理的 subagentToolEnd 共用）。
+ *  给路径列表，返回真的建了几个 <img>。 */
+function appendImages(parent, paths) {
+  const box = el('div', 'tool-images');
+  for (const path of paths || []) {
+    const src = rawImageUrl(path);
+    if (!src) continue;
+    const img = document.createElement('img');
+    img.className = 'tool-image';
+    img.src = src;
+    img.alt = String(path).split(/[\\/]/).pop() || '图片';
+    img.title = path;
+    img.loading = 'lazy';
+    img.addEventListener('click', () => showImage(src, path));
+    box.appendChild(img);
+  }
+  if (box.childElementCount) { parent.appendChild(box); return box.childElementCount; }
+  return 0;
+}
+
+/** 点开看大图（聊天流里图片按列宽缩放，细节看不清）。 */
+function showImage(src, title) {
+  const wrap = el('div', 'img-modal');
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = title || '';
+  wrap.appendChild(img);
+  if (title) wrap.appendChild(el('div', 'img-modal-cap mono', title));
+  openModal('图片', wrap);
 }
 
 async function loadWorkspaces() {
@@ -1778,25 +1906,125 @@ async function showSkills() {
   }
 }
 
+/** 毫秒时间戳 → 人能读的短格式（记忆列表用）。 */
+const fmtTime = (ms) => {
+  const t = Number(ms);
+  if (!t) return '';
+  const d = new Date(t);
+  const p2 = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+};
+
+/* 记忆：以前只列文件名 + 大小，而且读的是 `f.modified`，后端给的却是 `mtime`
+   —— 时间列永远是空的。内核其实有整套接口（system_api.py）：
+     GET    /memory           列表（含 preview）
+     GET    /memory/{name}    读正文
+     PUT    /memory/{name}    覆盖写（body {content}）
+     DELETE /memory/{name}    删除
+     POST   /memory/organize  把每日记忆蒸馏进四类长期记忆
+   这个模块自己的注释就写着「前端可编辑 GLOBAL.md / 每日日志」。 */
 async function showMemory() {
   openModal('记忆', el('div', 'placeholder', '加载中…'));
   try {
     const data = await api('/system/memory');
     const files = (data && (data.files || data.entries)) || [];
     const wrap = el('div', null);
+
+    const bar = el('div', 'mem-bar');
+    const organize = el('button', 'btn small', '整理记忆');
+    organize.addEventListener('click', async () => {
+      organize.disabled = true;
+      organize.textContent = '整理中…';
+      try {
+        const r = await api('/system/memory/organize', { method: 'POST', body: JSON.stringify({}) });
+        toast((r && r.applied) ? ('已整理：' + (r.message || '')) : ((r && r.message) || '没有需要整理的内容'));
+        await showMemory();
+      } catch (e) {
+        toast('整理失败：' + e.message, 'err');
+        organize.disabled = false;
+        organize.textContent = '整理记忆';
+      }
+    });
+    bar.appendChild(organize);
+    if (data && data.dir) bar.appendChild(el('span', 'mem-hint mono', data.dir));
+    wrap.appendChild(bar);
+
     if (!files.length) wrap.appendChild(el('div', 'placeholder', '记忆为空'));
-    for (const f of files) {
-      const row = el('div', 'info-row');
-      row.appendChild(el('span', 'info-k', f.name || f.path || '?'));
-      row.appendChild(el('span', 'info-v', fmtBytes(f.size) + '  ' + (f.modified || f.updatedAt || '')));
-      wrap.appendChild(row);
-    }
+    for (const f of files) wrap.appendChild(memoryRow(f));
     openModal(`记忆（${files.length}）`, wrap);
   } catch (e) {
     openModal('记忆', el('div', 'placeholder', '加载失败: ' + e.message));
   }
 }
 
+function memoryRow(f) {
+  const name = f.name || f.path || '?';
+  const row = el('div', 'mem-row');
+  const head = el('div', 'mem-head');
+  head.appendChild(el('span', 'mem-name mono', name));
+  if (f.kindLabel) head.appendChild(el('span', 'tag', f.kindLabel));
+  head.appendChild(el('span', 'mem-meta', fmtBytes(f.size) + '  ' + fmtTime(f.mtime)));
+  const acts = el('div', 'mem-acts');
+  const edit = el('button', 'btn ghost small', '编辑');
+  const del = el('button', 'btn ghost small', '删除');
+  acts.appendChild(edit);
+  acts.appendChild(del);
+  head.appendChild(acts);
+  row.appendChild(head);
+
+  const body = el('div', 'mem-body');
+  row.appendChild(body);
+  if (f.preview && !f.preview.text) body.appendChild(el('div', 'mem-preview', String(f.preview)));
+
+  let editor = null;
+  edit.addEventListener('click', async () => {
+    if (editor) { editor.remove(); editor = null; return; }
+    editor = el('div', 'mem-edit');
+    editor.appendChild(el('div', 'placeholder', '读取中…'));
+    body.appendChild(editor);
+    let content = '';
+    try {
+      const d = await api('/system/memory/' + encodeURI(name));
+      content = (d && d.content) || '';
+    } catch (e) {
+      editor.innerHTML = '';
+      editor.appendChild(el('div', 'placeholder', '读取失败: ' + e.message));
+      return;
+    }
+    editor.innerHTML = '';
+    const ta = document.createElement('textarea');
+    ta.className = 'mem-textarea';
+    ta.value = content;
+    editor.appendChild(ta);
+    const save = el('button', 'btn small', '保存');
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        await api('/system/memory/' + encodeURI(name), {
+          method: 'PUT', body: JSON.stringify({ content: ta.value }),
+        });
+        toast('已保存 ' + name);
+        await showMemory();
+      } catch (e) {
+        toast('保存失败：' + e.message, 'err');
+        save.disabled = false;
+      }
+    });
+    editor.appendChild(save);
+  });
+
+  del.addEventListener('click', async () => {
+    if (!(await confirmDialog('删除 ' + name + '？删了就没了。', { danger: true, okText: '删除' }))) return;
+    try {
+      await api('/system/memory/' + encodeURI(name), { method: 'DELETE' });
+      toast('已删除 ' + name);
+      await showMemory();
+    } catch (e) {
+      toast('删除失败：' + e.message, 'err');
+    }
+  });
+  return row;
+}
 async function loadInfo() {
   const rows = [];
   try {

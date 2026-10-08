@@ -372,3 +372,77 @@ test('新面板的控件用组件库、图标用图标库，不手写', () => {
     assert.ok(/library="om"/.test(seg), `${name} 面板的图标应来自图标库（library="om"）`);
   }
 });
+
+/* ── 聊天里的图片 ──────────────────────────────────────────────────────
+ * 内核会把 agent 生成的图/浏览器截图的路径发进 `toolEnd.images`，前端以前只加
+ * 了一行「生成图片」标题、**不建 <img>**，markdown 也没有图片规则 —— 用户看到的
+ * 是 `![生成图](C:\...)` 这种字面文本。这里真的执行 renderMarkdown 来钉规则。
+ */
+function renderMarkdownFn() {
+  const src = read('app.js');
+  const start = src.indexOf('function renderMarkdown(src) {');
+  const end = src.indexOf('/* ── syntax highlighting');
+  assert.ok(start >= 0 && end > start, '抠不出 renderMarkdown（函数被改名或挪走了？）');
+  // 只跑这一个函数：等价物（转义 / 高亮 / 图片地址）用桩传进去。
+  return new Function(
+    'esc', 'highlight', 'rawImageUrl',
+    `${src.slice(start, end)}; return renderMarkdown;`,
+  )(
+    (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    () => '',
+    (p) => `RAW(${p})`,
+  );
+}
+
+test('renderMarkdown：![]() 渲染成 <img>，且排在链接规则之前', () => {
+  const md = renderMarkdownFn();
+  const img = md('![生成图](shots/a.png)');
+  assert.ok(img.includes('<img class="md-image"'), `图片没渲染成 <img>：${img}`);
+  assert.ok(img.includes('RAW(shots/a.png)'), `图片地址没走 rawImageUrl：${img}`);
+  assert.ok(!img.includes('<a href'), '`![alt](路径)` 必须优先当图片，不能掉进链接规则');
+  // 普通链接不受影响
+  const link = md('[文档](https://example.com/x)');
+  assert.ok(link.includes('<a href="https://example.com/x"'), `普通链接被图片规则吃掉了：${link}`);
+});
+
+test('toolEnd 带 images 时真的建 <img>（不是只加个标题）', () => {
+  const app = read('app.js');
+  // 只钉行为：toolEnd 必须把 f.images 交给 appendImages，而 appendImages 必须真的建 <img>。
+  // （别钉"代码写在 toolEnd 里"——那只是实现位置，换个抽法就假红。）
+  const i = app.indexOf("case 'toolEnd'");
+  assert.ok(i > 0, "找不到 case 'toolEnd'");
+  const block = app.slice(i, app.indexOf("case 'subagentStart'", i));
+  assert.ok(/appendImages\([^)]*f\.images/.test(block), 'toolEnd 没有把 f.images 交给 appendImages');
+  const fn = app.slice(app.indexOf('function appendImages('));
+  assert.ok(fn.slice(0, 900).includes("createElement('img')"), 'appendImages 没有真的建 <img>');
+  assert.ok(fn.slice(0, 900).includes('rawImageUrl('), 'appendImages 没有把路径转成可读地址');
+  // 子代理的 ToolEnd 也走同一条路
+  assert.ok(/appendImages\(b\.body, f\.images\)/.test(app), '子代理的图片没有渲染');
+});
+
+test('子代理的 5 种帧 + fallback 都有分支（以前全落 default，界面完全静默）', () => {
+  const app = read('app.js');
+  for (const t of ['subagentStart', 'subagentDelta', 'subagentToolStart',
+                   'subagentToolEnd', 'subagentEnd', 'fallback']) {
+    assert.ok(new RegExp(`case '${t}':`).test(app), `没有处理 ${t} 帧 —— 它会静默落进 default`);
+  }
+  const fn = app.slice(app.indexOf('function subagentFrame('));
+  for (const t of ['subagentDelta', 'subagentToolStart', 'subagentToolEnd', 'subagentEnd']) {
+    assert.ok(fn.slice(0, 2200).includes(t), `subagentFrame 没有处理 ${t}`);
+  }
+});
+
+test('记忆页：读 mtime（后端字段）、能改能删、有整理入口', () => {
+  const app = read('app.js');
+  const i = app.indexOf('function memoryRow(');
+  assert.ok(i > 0, '找不到 memoryRow');
+  const fn = app.slice(i, i + 4000);
+  // 后端 system_api.py 给的是 {"name","kind","kindLabel","size","mtime","preview"}。
+  // 以前前端读 f.modified → 时间列永远是空的。
+  assert.ok(fn.includes('fmtTime(f.mtime)'), '记忆页没有用后端给的 mtime（时间列会一直空）');
+  assert.ok(!/f\.modified/.test(fn), '还有残留的 f.modified');
+  assert.ok(/encodeURI\(name\),\s*\{\s*\n?\s*method: 'PUT'/.test(fn), '没有保存正文（PUT）');
+  assert.ok(fn.includes("method: 'DELETE'"), '没有删除');
+  assert.ok(app.includes('/system/memory/organize'), '没有「整理记忆」入口');
+  assert.ok(app.includes('memoryRow('), '列表没有用 memoryRow 渲染');
+});
