@@ -288,6 +288,7 @@
       <button class="settings-nav-item" data-pane="soul"><wa-icon library="om" name="user" class="ic"></wa-icon>人格</button>
       <button class="settings-nav-item" data-pane="identity"><wa-icon library="om" name="puzzle" class="ic"></wa-icon>身份与工具</button>
       <button class="settings-nav-item" data-pane="skills"><wa-icon library="om" name="zap" class="ic"></wa-icon>技能</button>
+      <button class="settings-nav-item" data-pane="env"><wa-icon library="om" name="key-round" class="ic"></wa-icon>环境变量</button>
       <button class="settings-nav-item" data-pane="assistants"><wa-icon library="om" name="user-round"></wa-icon>助理</button>
       <button class="settings-nav-item" data-pane="guard"><wa-icon library="om" name="shield" class="ic"></wa-icon>沙箱</button>
       <button class="settings-nav-item" data-pane="plugins"><wa-icon library="om" name="plug" class="ic"></wa-icon>插件</button>
@@ -425,6 +426,27 @@
         </div>
       </section>
 
+      <section class="settings-pane" data-pane="env">
+        <div class="settings-block">
+          <h3>环境变量</h3>
+          <p class="pane-sub">
+            这里配的变量会注入<strong>沙箱命令</strong>与<strong>技能脚本</strong> ——
+            命令里 <code>$KEY</code>、脚本里 <code>os.getenv("KEY")</code> 直接可用，
+            改完<strong>下一条命令就生效</strong>，不用重启。
+            值以明文存在本机设置里（<code>settings.json</code>），只在沙箱内使用。
+          </p>
+          <div id="envRequired"></div>
+          <div id="envList"></div>
+          <div class="env-add">
+            <wa-input id="envNewKey" label="名称" placeholder="MY_API_KEY"></wa-input>
+            <wa-input id="envNewValue" label="值" type="password" placeholder="粘进来即可"></wa-input>
+            <button class="btn" id="btnEnvAdd">
+              <wa-icon library="om" name="plus" class="ic"></wa-icon>添加
+            </button>
+          </div>
+          <div id="envHint" class="pane-sub"></div>
+        </div>
+      </section>
       <section class="settings-pane" data-pane="assistants">
         <h2>助理</h2>
         <p class="pane-sub">

@@ -2529,6 +2529,7 @@ function wire() {
   { const b = $('btnClearData'); if (b) b.addEventListener('click', clearAllData); }
   { const b = $('btnFactoryReset'); if (b) b.addEventListener('click', factoryReset); }
   { const b = $('btnCheckUpdate'); if (b) b.addEventListener('click', checkUpdate); }
+  { const b = $('btnEnvAdd'); if (b) b.addEventListener('click', envAdd); }
   { const b = $('btnApplyUpdate'); if (b) b.addEventListener('click', applyUpdate); }
   { const b = $('btnRestartUpdate'); if (b) b.addEventListener('click', restartForUpdate); }
   $('btnSaveAgent').addEventListener('click', async () => {
@@ -2869,6 +2870,153 @@ function closeSettings() {
 }
 
 
+/* ── 环境变量 ───────────────────────────────────────────────────────────
+   内核侧早就齐了：值存在设置字段 ``sandbox.envExtra``，沙箱 shell **每次执行前
+   整份注入**（``shell_execute_tool._load_env_extra`` → ``coordinator.execute``），
+   技能脚本里 ``$KEY`` / ``os.getenv`` 立刻可用；``skills_api`` 还会把「哪些技能
+   声明了哪个变量」一并给出来。缺的只是这个入口 —— 在此之前用户只能手改
+   settings.json。（2026-10-08 用户指着 iOS 端「环境变量」问能不能做。）
+
+   契约（src/openminis/server/skills_api.py）：
+     GET /api/skills/env → {required:[{name,skills,set}], values:{…}, count}
+     PUT /api/skills/env → {values:{…}} —— **整份覆盖**，空值 = 删掉那一项
+   所以这里维护一份内存副本，每次改动整份提交，再拿回服务端的最新状态重画。
+   ─────────────────────────────────────────────────────────────────── */
+async function loadEnvVars() {
+  const reqBox = $('envRequired');
+  const listBox = $('envList');
+  reqBox.innerHTML = '';
+  listBox.innerHTML = '';
+  reqBox.appendChild(el('div', 'empty-note', '加载中…'));
+  try {
+    settings.env = await api('/skills/env');
+  } catch (e) {
+    reqBox.innerHTML = '';
+    reqBox.appendChild(el('div', 'empty-note', '加载失败：' + e.message));
+    return;
+  }
+  renderEnvVars();
+}
+
+function envRow(key, opts) {
+  const row = el('div', 'env-row');
+  row.appendChild(el('span', 'env-key mono', key));
+
+  const val = el('span', 'env-val mono');
+  const shown = !!opts.reveal;
+  const v = opts.value || '';
+  val.textContent = v ? (shown ? v : '•'.repeat(Math.min(Math.max(v.length, 6), 24))) : '（未设置）';
+  if (!v) val.classList.add('empty');
+  row.appendChild(val);
+
+  if (opts.skills && opts.skills.length) {
+    row.appendChild(el('span', 'env-desc', '需要：' + opts.skills.join('、')));
+  }
+
+  if (v) {
+    const eye = el('button', 'btn ghost small', shown ? '隐藏' : '显示');
+    eye.addEventListener('click', () => {
+      // 存进 settings 而不是行对象：重画会重建每一行，存在行上的状态一画就没了
+      // （第一版就是这么写的：点"显示"闪一下又被打码）。
+      settings.envReveal = settings.envReveal || {};
+      settings.envReveal[key] = !settings.envReveal[key];
+      renderEnvVars();
+    });
+    row.appendChild(eye);
+  }
+
+  const input = document.createElement('wa-input');
+  input.className = 'env-input';
+  input.setAttribute('type', 'password');
+  input.setAttribute('placeholder', v ? '改：填新值' : '填值');
+  row.appendChild(input);
+
+  const save = el('button', 'btn small', '保存');
+  save.addEventListener('click', () => {
+    const next = input.value;
+    if (!String(next || '').trim()) return envHint('先填一个值再保存');
+    envSave({ ...(settings.env.values || {}), [key]: next });
+  });
+  row.appendChild(save);
+
+  if (v) {
+    const del = el('button', 'btn ghost small', '删除');
+    del.addEventListener('click', () => {
+      const next = { ...(settings.env.values || {}) };
+      delete next[key];
+      envSave(next);
+    });
+    row.appendChild(del);
+  }
+  return row;
+}
+
+function renderEnvVars() {
+  const d = settings.env || {};
+  const values = d.values || {};
+  const required = d.required || [];
+  const reqBox = $('envRequired');
+  const listBox = $('envList');
+  reqBox.innerHTML = '';
+  listBox.innerHTML = '';
+
+  const seen = new Set();
+  if (required.length) {
+    reqBox.appendChild(el('h3', '', '技能需要的'));
+    for (const item of required) {
+      seen.add(item.name);
+      reqBox.appendChild(envRow(item.name, {
+        value: values[item.name] || '',
+        skills: item.skills || [],
+        reveal: !!(settings.envReveal && settings.envReveal[item.name]),
+      }));
+    }
+  }
+  const others = Object.keys(values).filter((k) => !seen.has(k)).sort();
+  listBox.appendChild(el('h3', '', others.length ? '其它变量' : ''));
+  if (!others.length) {
+    listBox.appendChild(el('div', 'empty-note',
+      '还没有别的变量。没有技能声明、也没有自己加的时候这里就是空的。'));
+  }
+  for (const key of others) {
+    listBox.appendChild(envRow(key, {
+      value: values[key],
+      reveal: !!(settings.envReveal && settings.envReveal[key]),
+    }));
+  }
+  envHint(`当前共 ${d.count || 0} 个变量。保存后立刻生效（下一条命令就带上）。`);
+}
+
+async function envSave(values) {
+  try {
+    settings.env = await api('/skills/env', {
+      method: 'PUT', body: JSON.stringify({ values: values || {} }),
+    });
+    renderEnvVars();
+    toast('环境变量已保存');
+  } catch (e) {
+    envHint('保存失败：' + e.message);
+  }
+}
+
+function envAdd() {
+  const key = ($('envNewKey').value || '').trim();
+  const value = $('envNewValue').value;
+  if (!key) return envHint('先填名称，例如 MY_API_KEY');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    return envHint('名称只能用字母、数字、下划线，且不能以数字开头（shell 里要是合法变量名）');
+  }
+  if (!String(value || '').trim()) return envHint('值不能为空（空值等于删除）');
+  $('envNewKey').value = '';
+  $('envNewValue').value = '';
+  envSave({ ...(settings.env && settings.env.values) || {}, [key]: value });
+}
+
+function envHint(text) {
+  const node = $('envHint');
+  if (node) node.textContent = text || '';
+}
+
 /* ── 助理（子代理）───────────────────────────────────────────────────────
    内核把「可以被派活的成员」存在 subagents 里；agent 的工具说明只列得出这些 id，
    所以这个面板不是装饰 —— 不在这里建，模型就只能瞎猜 id（用户实测报「subagent 不存在」）。
@@ -3147,6 +3295,7 @@ function switchSettingsPane(name) {
   if (name === 'soul' && !settings.soulLoaded) loadSoul();
   if (name === 'identity' && settings.model) { renderIdentities(); renderIdentityTools(); }
   if (name === 'skills' && !settings.skillsLoaded) loadSkills();
+  if (name === 'env') loadEnvVars();
   if (name === 'assistants' && !settings.subagentsLoaded) loadSubagents();
   if (name === 'guard') loadGuard();
   if (name === 'plugins') loadPlugins();
