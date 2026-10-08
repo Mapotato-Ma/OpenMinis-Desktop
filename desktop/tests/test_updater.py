@@ -668,3 +668,120 @@ def test_relaunch_script_can_be_rendered_anywhere(tmp_path):
     assert f'cd /d "{tmp_path / "app"}"' in text, "启动前没回安装目录"
     assert "openminis-relaunch.log" in text, "没有日志 —— 失败后无据可查"
     assert "start \"\"" in text
+
+
+# ---------------------------------------------------------------------------
+# 两条路必须**同一个基线**：检查说"有载荷可装"，安装就得真的去装
+#   2026-10-08 补漏（v0.4.20 换了检查段、安装段还留着壳版本）：
+#   壳版本 > 已装载荷版本时（用户手动装了新壳、载荷还是上一版）——
+#     检查 → kind=payload（"可小更新"）→ 界面弹出「下载并安装（2.4 MB）」
+#     安装 → 拿壳版本去比 → kind=none → phase=done、"已是最新" → **静默无操作**
+#   而用户看到的是"点了没反应"，没有任何报错。这类 bug 只会静默发生，
+#   所以钉的不是文案，是"两处 current 相等、且是载荷版本"这个真行为。
+# ---------------------------------------------------------------------------
+def _update_app(tmp_path, monkeypatch, *, installed: str, latest: str, shell: str):
+    """把两条更新路由挂起来：载荷清单是 stub，壳版本与载荷版本可分别指定。
+
+    ``shell > installed`` 就是出事的那种状态（清单里的壳指纹与本机一致 → 只该走
+    "小更新"那条路，于是"用哪个版本去比"成了唯一变量）。
+    """
+    from fastapi import FastAPI
+
+    from desktop import paths, ui_mount
+
+    payload = _fake_payload(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(updater, "shell_version", lambda: shell)
+    raw = _manifest(version=latest, shellId=updater.own_shell_id())
+    monkeypatch.setattr(updater, "fetch_manifest", lambda url, **kw: updater.parse_manifest(raw))
+    # 安装段用的是**它自己 import 的那个** ``paths.payload_root``，一并指到假载荷
+    monkeypatch.setattr(paths, "payload_root", lambda: payload)
+
+    desktop_dir = Path(__file__).resolve().parent.parent / ".." / "web" / "desktop"
+    app = FastAPI()
+    ui_mount.attach(app, desktop_dir=(desktop_dir if desktop_dir.is_dir() else None))
+    return app, ui_mount
+
+
+def _wait_for_update(ui_mount, timeout: float = 20.0) -> dict:
+    """安装段在后台线程里跑 —— 等它落到终态，别用 sleep 猜进度。"""
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = dict(ui_mount._update_state)  # noqa: SLF001 - 断言要钉的就是它
+        if state.get("phase") in {"ready", "done", "failed", "manual"}:
+            return state
+        time.sleep(0.02)
+    raise AssertionError(f"{timeout}s 内更新线程没有结束：{dict(ui_mount._update_state)}")
+
+
+def test_apply_and_check_use_the_very_same_current_version(tmp_path, monkeypatch):
+    """安装段的 current 必须**就是**检查段那个值，而且必须是**载荷**版本。
+
+    只钉"两处相等"不够 —— 两边都错成壳版本也会相等。所以同时钉住它等于
+    ``own_version()``（= 已装载荷 0.4.19），并且**不等于**壳版本 0.4.21：
+    两处中任何一处改回 ``__version__``，这条就红。
+    """
+    from fastapi.testclient import TestClient
+
+    app, ui_mount = _update_app(
+        tmp_path, monkeypatch, installed="0.4.19", latest="0.4.20", shell="0.4.21"
+    )
+
+    seen: list[str] = []
+
+    def _fake_plan(*, current_version, current_shell=None, url=None):  # noqa: ANN001
+        seen.append(current_version)
+        raise updater.UpdateError("到此为止（测试只关心拿哪个版本去比）")
+
+    monkeypatch.setattr(updater, "plan", _fake_plan)
+    monkeypatch.setattr(updater, "save_state", lambda state: None)
+    with TestClient(app) as c:
+        c.get("/api/desktop/update")          # 检查那段
+        c.post("/api/desktop/update")         # 安装那段（后台线程）
+        _wait_for_update(ui_mount)
+
+    assert len(seen) == 2, f"两条路没都走到 plan：{seen}"
+    assert seen[0] == seen[1], f"检查与安装的版本基线不一致：{seen}"
+    assert seen[0] == updater.own_version() == "0.4.19", seen
+    assert seen[0] != "0.4.21", "拿烧在 exe 里的壳版本当基线 —— 正是这次要修的 bug"
+
+
+def test_apply_really_installs_when_the_shell_is_newer_than_the_payload(tmp_path, monkeypatch):
+    """壳 0.4.21 > 载荷 0.4.19、清单 0.4.20：检查说"可小更新"，安装就得真的下+装。
+
+    改之前安装段拿壳版本 0.4.21 跟 0.4.20 比 → ``kind=none`` → ``phase=done``、
+    note="已是最新（0.4.21）"：界面明明弹着「下载并安装（2.4 MB）」，点下去什么
+    都不会发生，而且不报错。
+    """
+    from fastapi.testclient import TestClient
+
+    app, ui_mount = _update_app(
+        tmp_path, monkeypatch, installed="0.4.19", latest="0.4.20", shell="0.4.21"
+    )
+
+    steps: list[tuple[str, str]] = []
+    archive = tmp_path / "update.zip"
+    archive.write_bytes(b"zip")
+    monkeypatch.setattr(
+        updater, "download",
+        lambda asset, dest, on_progress=None: (steps.append(("download", asset.url)), archive)[1],
+    )
+    monkeypatch.setattr(
+        updater, "install_payload",
+        lambda zip_path, payload_dir, *, expect_shell: steps.append(("install", str(zip_path))),
+    )
+    monkeypatch.setattr(updater, "cleanup_old_downloads", lambda keep=None, **kw: None)
+    monkeypatch.setattr(updater, "save_state", lambda state: None)
+
+    with TestClient(app) as c:
+        check = c.get("/api/desktop/update").json()
+        assert check["available"] is True and check["kind"] == "payload", check
+        assert check["current"] == "0.4.19", check
+        c.post("/api/desktop/update")
+        final = _wait_for_update(ui_mount)
+
+    assert final["phase"] == "ready", final         # 不是 done / "已是最新"
+    assert "已是最新" not in str(final.get("note") or ""), final
+    assert final.get("version") == "0.4.20", final
+    assert [s[0] for s in steps] == ["download", "install"], steps
