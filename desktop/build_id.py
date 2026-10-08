@@ -5,4 +5,4 @@
 改了壳就跑 `python scripts/shell_id.py --write`，CI 会校验它没跑偏。
 """
 
-SHELL_ID = "e1a6fa6b4c883a30"
+SHELL_ID = "67bdf2278df2373c"

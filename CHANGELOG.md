@@ -1,5 +1,48 @@
 # 变更日志
 
+## v0.4.17 — 浏览器工具真的能用了：驱动系统自带的 Edge/Chrome（2026-10-06）
+
+用户第 4 件。选型报告在服务器 `/root/bench/REPORT.md`（367 行，全实测），结论是
+**路线 2 —— Playwright 驱动系统自带的 Edge/Chrome**。
+
+### 为什么不是「打包自带 Chromium」
+* 打包：安装包 **+795MB**（下载 186.8MiB → 装完 658MB：有头 393 + headless shell 261 + ffmpeg 5）；
+* 驱动系统自带的：**+137MB**（只是 playwright 包本身），且**内核跟着系统更新、永远最新**；
+* Windows 10/11 **必然自带 Edge** = 零浏览器下载。CDN 在国内还几乎拉不动（实测 701 秒只下 10%）。
+
+### 实现
+* **新写自包含驱动** `src/openminis/tools/browser/driver.py`，**没有复活**那 2453 行死代码。
+  理由：那层整片挂在 `agent.*`/`common.*`（`BaseTool`/`ToolResult`/`logger`/`state_dir`…）
+  上、而且它是**同步** API 而工具侧是 async。新驱动一个文件覆盖 22 个 action +
+  整数 ref 快照 + SSRF 守卫 + channel 探测，并且**没装 playwright 也能 import**
+  （据此如实报「引擎缺失」，而不是谎报成功）。
+* 探测顺序 `msedge` → `chrome` → 自带 Chromium；都起不来时把「为什么、怎么修」原样回给模型。
+* 照搬死代码的两个好设计：**整数 ref 快照**（导航后自动作废，避免模型点错）、
+  **SSRF 守卫**（拦云元数据；故意放行 loopback 与内网 —— agent 打开自己刚起的 dev server 是常见用法）。
+* 打包：`pyproject` 加 `browser` extra 并并入 `desktop`/`build`；`build-desktop.bat` 与
+  Windows CI 的 pip 行加 `playwright>=1.63`；spec 的 `collect_all` 列表加 `playwright`
+  —— **刻意不跑 `playwright install chromium`**，那会再塞 658MB 进产物。
+
+### 验证（真机，不是推理）
+在用户的 PC（Windows + Edge 156）上端到端跑通：
+
+```
+引擎就绪：msedge        navigate 百度 HTTP 200
+snapshot 83 个可交互元素（整数 ref）
+click ref=0 → 真的跳到 iana.org（ref 机制有效）
+get_text 376 字 / execute_js 取到标题 / 截图 68KB 落盘
+SSRF 守卫 ✓ 拦住 169.254.169.254
+```
+
+服务器四步全绿、60 秒；新增 `desktop/tests/test_browser_driver.py`（12 条，
+含一条 **schema ↔ 实现一致性护栏**：schema 里声明的 action 必须都有实现分支）。
+
+### ⚠️ 这一版是**换壳**，要装整包
+`packaging/OpenMinisDesktop.spec` 变了 → 壳指纹 **`e1a6fa6b4c883a30` → `67bdf2278df2373c`**
+→ 更新器会要求下载**完整安装包**，走不了 2.4MB 那条载荷路径。这是预期行为，
+不是 bug（那条路径本来就是为了"只改载荷"的版本准备的）。
+
+
 ## v0.4.16 — 实时上下文状态 + 手动压缩会话（2026-10-06）
 
 用户第 5、6 件。按我排的顺序先做这两件：**纯载荷、2.4MB 界面内更新**；browser 要往运行时

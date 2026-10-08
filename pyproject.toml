@@ -48,11 +48,20 @@ dev = [
 # GUI toolkit installed.
 desktop = [
     "pywebview>=5.0",
+    "playwright>=1.63",
 ]
 # Everything `build-desktop.bat` / the Windows CI job needs on top of the above.
 build = [
     "pywebview>=5.0",
+    "playwright>=1.63",
     "pyinstaller>=6.6",
+]
+
+# 浏览器工具（agent 用的那个）走**系统自带的 Edge/Chrome**，所以这里只装
+# playwright 包本身（约 137MB），**不要**跑 `playwright install chromium`
+# —— 那会再塞 658MB 浏览器进安装包（2026-10-06 实测），而系统里本来就有 Edge。
+browser = [
+    "playwright>=1.63",
 ]
 
 [project.scripts]

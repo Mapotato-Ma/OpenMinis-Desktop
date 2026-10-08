@@ -3,12 +3,12 @@
 Ported from: src/android/app/src/main/java/com/openminis/app/tools/BrowserUseTool.kt
 Original package: com.openminis.app.tools
 
-PORT: Kotlin has a full browser subsystem under ``com.openminis.app.browser``
-that does the actual screenshotting / DOM scraping — the Python port does
-not include a headless browser yet, so ``execute`` returns a structured
-"not yet ported" message instead of pretending to act. The schema is
-complete so the LLM still gets the right tool surface and can be re-pointed
-at a real driver once one lands.
+PORT: 引擎在 ``tools/browser/driver.py``（自包含实现）。
+
+选型结论是**驱动系统自带的 Edge/Chrome**，而不是打包 Playwright 自带的 Chromium：
+后者会让安装包多背 **658MB**（2026-10-06 实测：下载 186.8MiB、装完 658MB），
+前者只要 playwright 包本身的 137MB，而且浏览器内核跟着系统更新、永远最新。
+真 Windows 上 ``channel="msedge"`` 已实测可用（Edge 156，取元素 6.9ms/83 个）。
 """
 
 from __future__ import annotations
@@ -77,9 +77,9 @@ class BrowserUseTool:
                 "metadata, get_backbone to get a structural overview of the "
                 "page DOM as a simplified tree, fetch to download files using "
                 "the page's session, and new_tab / close_tab / list_tabs to "
-                "manage tabs. NOTE: the browser engine is not yet ported to "
-                "the Python runtime — calls return a clear 'engine not "
-                "ported' message rather than silently no-op'ing."
+                "manage tabs. 引擎用系统自带的 Edge/Chrome，不需要下载浏览器。"
+                "第一次操作某个页面之前先做一次 snapshot：它会给每个可交互元素一个"
+                "整数 ref 编号，之后 click/type 用 ref 比写选择器稳。"
             ),
             parameters={
                 "tool_title": AgentToolParam(
@@ -220,15 +220,11 @@ class BrowserUseTool:
         session_id: str,
         _line_callback=None,
     ) -> ToolExecutionResult:
-        """Stub executor — the browser subsystem is not yet ported to Python.
+        """真正的分发：交给 ``tools/browser/driver.py``。
 
-        ⚠️ 这里**必须返回失败**（``success=False``）。第一版刻意返回成功，
-        理由是"怕 agent 进重试风暴"—— 实测那是更糟的坏法：
-        模型拿到成功信号**不会重试、不会绕路**，用户只看到一张绿色的工具卡
-        （2026-10-06 用户原话「browser-use 好像有点问题」，查了两轮才发现
-        它从来就没执行过任何动作）。重试风暴有 repeat_guard 兜着，
-        而"假成功"会一直骗下去。
-        Once a real driver lands this method should be replaced by a dispatch table.
+        失败必须**如实返回失败** —— 第一版桩返回 success=True，模型拿到成功信号
+        就不重试、不绕路，用户只看到绿色工具卡（2026-10-06 实测，查了两轮才发现
+        它从来没执行过任何动作）。重试风暴有 repeat_guard 兜着，假成功会一直骗下去。
         """
         try:
             args = json.loads(args_json)
@@ -237,12 +233,18 @@ class BrowserUseTool:
                 f"Error: invalid JSON args: {e}", False, tool_title=BrowserUseTool.NAME
             )
 
-        action = str(args.get("action", ""))
         tool_title = str(args.get("tool_title", BrowserUseTool.NAME))
-        hint = (
-            f"Browser engine is not yet ported to the Python runtime. "
-            f"Action '{action or '?'}' was NOT executed. "
-            f"Install a headless browser driver (e.g. Playwright) and wire it "
-            f"to BrowserUseTool.execute to enable this tool."
-        )
-        return ToolExecutionResult(hint, False, tool_title=tool_title)
+        from .browser import driver
+
+        try:
+            output = await driver.run(args)
+        except driver.BrowserUnavailable as e:
+            # 引擎起不来：把"为什么、怎么修"原样给模型和用户，别一句笼统错误。
+            return ToolExecutionResult(
+                f"浏览器引擎不可用：{e}", False, tool_title=tool_title
+            )
+        except Exception as e:
+            return ToolExecutionResult(
+                f"浏览器动作失败：{e}", False, tool_title=tool_title
+            )
+        return ToolExecutionResult(output, True, tool_title=tool_title)

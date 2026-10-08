@@ -63,7 +63,10 @@ for p in sorted(PKG.rglob("*")):
 # ---------------------------------------------------------------------------
 # collect_all swallows nothing: if the package is absent (Linux CI without the
 # GUI extra) we simply skip it and the app falls back to a browser tab.
-for _pkg in ("webview", "clr_loader", "pythonnet", "clr"):
+# playwright：agent 的浏览器工具用它驱动**系统自带**的 Edge/Chrome。
+# 只收包本身（约 137MB），**不收**它可选的 Chromium —— 我们一次 `playwright install`
+# 都不跑，那会再塞 658MB 进产物（实测），而 Windows 上 Edge 必然存在。
+for _pkg in ("webview", "clr_loader", "pythonnet", "clr", "playwright"):
     try:
         _d, _b, _h = collect_all(_pkg)
         datas += _d

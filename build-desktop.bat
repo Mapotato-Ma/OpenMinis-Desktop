@@ -52,7 +52,7 @@ echo [setup] installing dependencies
 "%PYTHON_PATH%" -m pip install --upgrade pip || goto :fail
 "%PYTHON_PATH%" -m pip install -e . || goto :fail
 rem pywebview brings WebView2 (EdgeChromium) support; PyInstaller does the packaging.
-"%PYTHON_PATH%" -m pip install "pywebview>=5.0" "pyinstaller>=6.6" || goto :fail
+"%PYTHON_PATH%" -m pip install "pywebview>=5.0" "playwright>=1.63" "pyinstaller>=6.6" || goto :fail
 
 rem --- icon ---------------------------------------------------------------
 if not exist "desktop\assets\icon.ico" (
