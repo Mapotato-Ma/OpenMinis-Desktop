@@ -558,6 +558,219 @@ def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Pat
     return script
 
 
+# ---------------------------------------------------------------------------
+# 整包替换（换壳时用）：把安装目录整个换掉
+# ---------------------------------------------------------------------------
+#: 便携包的顶层目录名（``Compress-Archive -Path dist\OpenMinisDesktop`` 打出来的
+#: zip 里就是这一个目录），安装目录本身也叫这个名字。
+PORTABLE_DIR_NAME = "OpenMinisDesktop"
+
+#: 整包解出来要占多少空间 —— 按 zip 的倍数估，留够余量再动手。
+_FULL_PACKAGE_SPACE_FACTOR = 3.0
+
+#: 等旧进程退出的上限（秒）。超了就**放弃替换**（不像重启那样照启动）——
+#: 半替换比不替换糟得多。
+_SWAP_WAIT_MAX_S = 90
+
+
+def install_root() -> Path | None:
+    """整包替换的目标目录 = 装着 exe 的那个目录。
+
+    源码运行（开发/测试）时返回 None —— 那里没有"安装目录"这个概念，
+    换掉 cwd 只会把开发者的仓库搞坏。
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    return Path(sys.executable).resolve().parent
+
+
+def _staging_root_for(install_dir: Path) -> Path:
+    """暂存目录：**同一个父目录**（同一个卷）才能用 move 而不是跨盘拷贝。"""
+    return install_dir.with_name(f"_openminis-update-{os.getpid()}")
+
+
+def _clean_leftovers(install_dir: Path) -> list[str]:
+    """收拾上一次更新留下的 ``*.old-*`` 与 ``_openminis-update-*``（尽力而为）。
+
+    放在**每次整包更新的开头**而不是启动路径上：启动路径要短要稳，而这里本来就
+    是"慢活"。删除失败（还有进程占着）就留着，下次再来。
+    """
+    removed: list[str] = []
+    parent = install_dir.parent
+    for path in list(parent.glob(f"{install_dir.name}.old-*")) + list(
+        parent.glob("_openminis-update-*")
+    ):
+        if path == install_dir or install_dir in path.parents:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed.append(path.name)
+    return removed
+
+
+def install_full_package(
+    archive: Path,
+    *,
+    install_dir: Path,
+    exe_name: str = "OpenMinisDesktop.exe",
+    now: float | None = None,
+) -> Path:
+    """把整包解到旁边、校验，再写一个助手脚本在**本进程退出后**完成替换。
+
+    为什么不能自己换：正在跑的 exe 是锁定文件，Windows 上换不掉自己所在的目录。
+    所以这里只做"准备好 + 安排助手"，真正的
+    **等旧进程退出 → 旧目录改名 → 新目录就位 → 启动新 exe → 清旧目录**
+    由独立进程（``_SWAP_CMD``）做，每一步失败都能回滚或体面放弃。
+    """
+    if not archive.is_file():
+        raise UpdateError(f"整包文件不在：{archive}")
+    staging = _staging_root_for(install_dir)
+    shutil.rmtree(staging, ignore_errors=True)
+    # 收拾上次的残留必须**在解压之前**：`_clean_leftovers` 按通配删 `_openminis-update-*`，
+    # 放到解压之后会把刚解出来的这份也一起删掉（测试当场抓到的）。
+    _clean_leftovers(install_dir)
+
+    need = int(archive.stat().st_size * _FULL_PACKAGE_SPACE_FACTOR)
+    try:
+        free = shutil.disk_usage(install_dir.parent).free
+    except OSError:  # 拿不到就不拦，交给解压失败去报
+        free = need
+    if free < need:
+        raise UpdateError(
+            f"安装目录所在盘只剩 {free / 1048576:.0f}MB，整包解压大约要 "
+            f"{need / 1048576:.0f}MB —— 先腾点空间"
+        )
+
+    _safe_extract(archive, staging)
+    staged = staging / PORTABLE_DIR_NAME
+    if not (staged / exe_name).is_file():
+        if (staging / exe_name).is_file():
+            staged = staging      # 有人手工重打包、没有顶层目录，也认
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise UpdateError(f"整包里找不到 {exe_name} —— 这不是便携包")
+    if not (staged / "payload" / "payload.json").is_file():
+        shutil.rmtree(staging, ignore_errors=True)
+        raise UpdateError("整包里没有载荷清单（payload/payload.json）")
+
+    return schedule_swap(
+        install_dir=install_dir, staged=staged, exe_name=exe_name, now=now
+    )
+
+
+#: 替换助手脚本。与重启助手同一套路（独立进程 + 日志），但多了"改名让位 / 回滚"。
+#: 每一步都写日志：脚本会自删，不留日志的话失败之后**无据可查**。
+_SWAP_CMD = """@echo off
+rem 由 OpenMinis Desktop 更新器写出：等旧进程退出 → 旧目录改名 → 新目录就位 → 启动。
+setlocal
+set "LOG=%~dp0openminis-swap.log"
+set "INSTALL={install_dir}"
+set "NEW={staged}"
+set "OLD={install_dir}.old-{stamp}"
+set "EXE={exe_name}"
+echo [%DATE% %TIME%] 等待 PID {pid} 退出 >> "%LOG%"
+set /a WAITED=0
+:wait
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+if errorlevel 1 goto moveold
+set /a WAITED+=1
+if %WAITED% GEQ {waited_max} (
+  echo [%DATE% %TIME%] 等满 {waited_max} 秒旧进程仍在，放弃替换（半替换更糟） >> "%LOG%"
+  goto done
+)
+timeout /t 1 /nobreak >nul
+goto wait
+:moveold
+set /a TRY=0
+:retryold
+move "%INSTALL%" "%OLD%" >> "%LOG%" 2>&1
+if not errorlevel 1 goto movenew
+set /a TRY+=1
+if %TRY% GEQ 15 (
+  echo [%DATE% %TIME%] 旧目录改名失败（多半还有子进程占着），放弃 >> "%LOG%"
+  goto done
+)
+timeout /t 2 /nobreak >nul
+goto retryold
+:movenew
+move "%NEW%" "%INSTALL%" >> "%LOG%" 2>&1
+if errorlevel 1 (
+  echo [%DATE% %TIME%] 新目录就位失败，回滚旧目录 >> "%LOG%"
+  move "%OLD%" "%INSTALL%" >> "%LOG%" 2>&1
+  goto done
+)
+cd /d "%INSTALL%"
+start "" "%INSTALL%\\%EXE%"
+echo [%DATE% %TIME%] 已启动新版本 >> "%LOG%"
+rem 清场：旧目录先等它松手，暂存根目录顺手删掉；失败不影响使用
+set /a TRY=0
+:cleanold
+rmdir /s /q "%OLD%" 2>nul
+if not exist "%OLD%" goto cleanstaging
+set /a TRY+=1
+if %TRY% LSS 15 ( timeout /t 2 /nobreak >nul & goto cleanold )
+echo [%DATE% %TIME%] 旧目录没删掉（留着不影响使用，下次更新会收拾） >> "%LOG%"
+:cleanstaging
+rmdir /s /q "{staging_root}" 2>nul
+:done
+del "%~f0"
+"""
+
+
+def swap_script_text(
+    *, pid: int, install_dir: Path, staged: Path, exe_name: str, stamp: str,
+    waited_max: int = _SWAP_WAIT_MAX_S,
+) -> str:
+    """渲染替换助手脚本。抽出来是为了能在**任何平台**上检查它写了什么。"""
+    return _SWAP_CMD.format(
+        pid=pid, install_dir=str(install_dir), staged=str(staged), exe_name=exe_name,
+        stamp=stamp, staging_root=str(staged.parent), waited_max=waited_max,
+    )
+
+
+def schedule_swap(
+    *, install_dir: Path, staged: Path, exe_name: str = "OpenMinisDesktop.exe",
+    pid: int | None = None, now: float | None = None,
+) -> Path:
+    """写脚本 + 起独立进程去完成替换。返回助手脚本路径。
+
+    非 Windows 上不写脚本（与 ``schedule_relaunch`` 同理由：那不是发布目标）。
+    """
+    if sys.platform != "win32":
+        return Path(tempfile.gettempdir()) / f"openminis-swap-{os.getpid()}.cmd"
+    pid = pid if pid is not None else os.getpid()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now else time.time()))
+    script = Path(tempfile.gettempdir()) / f"openminis-swap-{pid}.cmd"
+    script.write_text(
+        swap_script_text(pid=pid, install_dir=install_dir, staged=staged,
+                         exe_name=exe_name, stamp=stamp),
+        encoding="utf-8",
+    )
+    flags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    )
+    base: dict[str, Any] = {
+        # 三流都接 DEVNULL：父进程一退，继承来的句柄就悬了（重启助手踩过这个坑）
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["cmd", "/c", str(script)],
+            creationflags=flags | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0),
+            **base,
+        )
+    except OSError as exc:
+        logger.warning("swap helper (breakaway) failed: %s — 去掉该标志重试", exc)
+        subprocess.Popen(  # noqa: S603
+            ["cmd", "/c", str(script)], creationflags=flags, **base
+        )
+    return script
+
+
 #: 上一次更新的结果（落盘）。进程内的 ``_update_state`` 一重启就空 ——
 #: 用户点完重启再打开，看到的是"还没检查"，没人知道刚才到底成没成。
 STATE_FILE = "state.json"

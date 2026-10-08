@@ -4504,7 +4504,7 @@ async function loadAbout() {
 
 const UPDATE_LABEL = { idle: '还没检查', checking: '正在检查…', downloading: '正在下载…',
   installing: '正在安装…', ready: '已就绪，重启生效', failed: '失败',
-  done: '已是最新', manual: '需要整包装' };
+  done: '已是最新', manual: '需要整包装', restart: '整包已就位，重启即完成替换' };
 
 function updateHint(t) {
   const el2 = $('updateStatus');
@@ -4555,20 +4555,23 @@ async function checkUpdate() {
     updateHint({ phase: r.available ? 'idle' : 'done', note: r.available ? r.reason : '' });
     const apply = $('btnApplyUpdate');
     if (apply) {
-      // 整包（换壳）**不能**应用内自动装：正在跑的 exe 换不掉自己，而"退出后由
-      // 助手替换安装目录"这一步还没做。与其显示一个点了会失败的按钮，不如把
-      // 该做什么写清楚 + 给直链。
-      apply.hidden = !r.available || r.kind === 'full';
-      apply.textContent = `下载并安装（${(r.bytes / 1048576).toFixed(1)} MB）`;
+      // 整包（换壳）现在也能应用内装：下载 → 解压到安装目录旁边 → **退出后**由
+      // 独立助手替换安装目录（正在跑的 exe 换不掉自己所在的目录，所以必须退出一次）。
+      // 所以：按钮保留，但做成两步确认，文案把"会退出一次"和"能回滚"说清楚。
+      apply.hidden = !r.available;
+      apply.dataset.kind = r.kind || '';
+      delete apply.dataset.armed;
       if (r.kind === 'full') {
         const mb = (r.bytes / 1048576).toFixed(1);
+        apply.textContent = `下载并安装整包（${mb} MB）`;
         updateHint({
-          phase: 'manual',
-          note: `这次换了壳，需要装整包（${mb}MB）：到发布页下载 `
-            + 'OpenMinisDesktop-portable.zip 解压覆盖安装目录即可。'
-            + '数据与设置都在用户目录（openminis），不会丢。'
-            + '发布页：github.com/Mapotato-Ma/OpenMinis-Desktop/releases/latest',
+          phase: 'idle',
+          note: `这次换了壳，要装整包（${mb}MB）。点按钮后：下载 → 解压到安装目录旁边 → `
+            + '提示重启 → 退出后由独立助手替换安装目录（旧版本会留成 .old-<时间>，'
+            + '能回滚）。数据与设置都在用户目录（openminis），不受影响。',
         });
+      } else {
+        apply.textContent = `下载并安装（${(r.bytes / 1048576).toFixed(1)} MB）`;
       }
     }
     const restart = $('btnRestartUpdate');
@@ -4582,7 +4585,16 @@ async function checkUpdate() {
 
 async function applyUpdate() {
   const btn = $('btnApplyUpdate');
-  if (btn) btn.setAttribute('loading', '');
+  /* 整包要下 78MB 并且会让应用**退出一次**，所以先要一次确认。用两步点按而不是
+     原生对话框 —— pywebview 里 window.confirm 不一定起得来（不赌这个）。 */
+  if (btn && btn.dataset.kind === 'full' && btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = '确认：下载整包并准备替换（会退出一次）';
+    updateHint({ phase: 'idle',
+      note: '再点一次就开始下载。下载完会请你重启，重启后自动完成替换。' });
+    return;
+  }
+  if (btn) { delete btn.dataset.armed; btn.setAttribute('loading', ''); }
   try {
     const r = await api('/desktop/update', { method: 'POST' });
     if (r.ok === false) throw new Error(r.error || '无法开始更新');
@@ -4591,10 +4603,14 @@ async function applyUpdate() {
       await new Promise((done) => setTimeout(done, 500));
       const t = await api('/desktop/update/status');
       updateHint(t);
-      if (t.phase === 'ready') {
+      if (t.phase === 'ready' || t.phase === 'restart') {
         if (btn) btn.hidden = true;
         const restart = $('btnRestartUpdate');
-        if (restart) restart.hidden = false;
+        if (restart) {
+          restart.hidden = false;
+          // 整包那条路：重启就是"完成替换"那一步，说清楚点。
+          if (t.phase === 'restart') restart.textContent = '重启并完成替换';
+        }
         return;
       }
       if (t.phase === 'failed' || t.phase === 'done' || t.phase === 'manual') return;

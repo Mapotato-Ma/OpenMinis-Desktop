@@ -570,3 +570,38 @@ test('缩放：桥存在但没落到本窗口时，照样回落 CSS（不因为"
   assert.deepEqual(env.trust, [], '桥回了 ok 但本窗口视口没变 → 不许标信任');
   assert.equal(env.fallbacks.length, 1, '必须回落 CSS，否则用户看到的就是"缩放失效"');
 });
+
+/* ── 整包（换壳）更新：按钮必须真的能点、点了必须确认 ────────────────────────
+ * 以前整包是"给个直链，自己下"（诚实但没用）。现在能应用内装：下载 → 解压到旁边
+ * → 退出后由独立助手替换安装目录。代价是**会退出一次**，所以按钮不能藏起来、
+ * 但要两步确认。这里钉的是**真赋值**（藏按钮/丢确认都会被抓住）。
+ */
+test('整包更新：按钮不再被藏起来（以前 apply.hidden 带 kind==="full"）', () => {
+  const app = read('app.js');
+  assert.ok(/apply\.hidden = !r\.available;/.test(app), '整包的「下载并安装」按钮还是被藏着的');
+  assert.ok(!/apply\.hidden = !r\.available \|\| r\.kind === 'full'/.test(app),
+    '仍然把整包排除在按钮之外 —— 应用内装那条路又断了');
+  assert.ok(/apply\.dataset\.kind = r\.kind/.test(app), '没有记下这次是哪种更新（确认步骤要靠它）');
+});
+
+test('整包更新：两步确认真的会拦住第一次点击', () => {
+  const app = read('app.js');
+  const i = app.indexOf('async function applyUpdate(');
+  assert.ok(i > 0, '抠不出 applyUpdate');
+  const fn = app.slice(i, i + 1200);
+  assert.ok(/dataset\.armed !== '1'/.test(fn), '没有"未确认"的判断');
+  assert.ok(/dataset\.armed = '1'/.test(fn), '第一次点击没有进入已确认状态');
+  const arm = fn.indexOf("dataset.armed = '1'");
+  const guard = fn.indexOf("dataset.armed !== '1'");
+  const req = fn.indexOf("await api('/desktop/update', { method: 'POST' })");
+  assert.ok(guard < req && arm < req, '确认的判断必须发生在真正开始下载之前');
+});
+
+test('整包更新：终态多了一个 restart（重启即完成替换）', () => {
+  const app = read('app.js');
+  assert.ok(/t\.phase === 'ready' \|\| t\.phase === 'restart'/.test(app),
+    '轮询没认 "restart" 终态 —— 整包装好之后界面会一直转圈');
+  assert.ok(/restart: '整包已就位/.test(app), '没有 restart 阶段的文案');
+  assert.ok(app.includes('restartStage') || app.includes("restart.textContent = '重启并完成替换'"),
+    '整包那条路的重启按钮没有说清"这一步就是完成替换"');
+});

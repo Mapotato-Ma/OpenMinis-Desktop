@@ -420,6 +420,43 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             {"ok": True, "relaunch": str(script) if script else None}, headers=_NO_STORE
         )
 
+    def _run_full_update(result: Any, state: dict[str, Any]) -> None:
+        """换壳的整包更新：下载 → 解开到旁边 → 安排助手在**退出后**替换安装目录。
+
+        以前这条只给直链（诚实但没用）。现在能自己做，代价是**必须退出一次**：
+        正在跑的 exe 是锁定文件，换不掉自己所在的目录 —— 所以真正的替换交给
+        独立进程（``updater.schedule_swap``），它会等本进程退出再动手。
+        """
+        from . import updater  # noqa: PLC0415
+
+        install_dir = updater.install_root()
+        if install_dir is None:
+            state.update({"phase": "manual",
+                          "note": "这是源码运行、不是安装版，只能手动换整包"})
+            return
+        if result.asset is None:
+            state.update({"phase": "manual", "note": result.reason})
+            return
+        state.update({"phase": "downloading", "full": True,
+                      "version": result.info.version,
+                      "total": result.asset.bytes, "done": 0})
+        archive = updater.download(
+            result.asset,
+            updater.updates_dir(),
+            on_progress=lambda done, total: state.update(
+                {"done": done, "total": total or result.asset.bytes}
+            ),
+        )
+        state.update({"phase": "installing"})
+        script = updater.install_full_package(archive, install_dir=install_dir)
+        updater.save_state({
+            "summary": f"整包 {result.info.version} 已准备好，重启即完成替换",
+            "version": result.info.version,
+            "at": int(time.time() * 1000),
+        })
+        state.update({"phase": "restart", "version": result.info.version,
+                      "helper": str(script), "installDir": str(install_dir)})
+
     def _run_update() -> None:
         """后台更新流程：探清单 → 下载 → 校验 → 换载荷。"""
         from . import updater  # noqa: PLC0415
@@ -439,8 +476,10 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             if result.kind == "none" or result.asset is None:
                 state.update({"phase": "done", "note": result.reason})
                 return
+            if result.kind == "full":
+                _run_full_update(result, state)
+                return
             if result.kind != "payload":
-                # 换壳的更新需要替换 exe，这一步还没做（见 CHANGELOG 的"还没做"）。
                 state.update({"phase": "manual", "note": result.reason})
                 return
 
