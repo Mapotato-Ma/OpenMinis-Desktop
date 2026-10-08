@@ -36,7 +36,6 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import __version__
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount, Route
@@ -428,8 +427,12 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
 
         state = _update_state
         try:
+            # **基线必须和 `_update_check` 一模一样**（`updater.own_version()` =
+            # 已装载荷的版本）。上一版只改了检查段、安装段还留着壳版本：壳比载荷新时
+            # （用户换了新壳、载荷还是上一版）检查说"有载荷可更新"，用户点「下载并安装」
+            # 却在这里比出 none/"已是最新" —— **静默什么都不做**，看着像按钮坏了。
             result = updater.plan(
-                current_version=__version__,
+                current_version=updater.own_version(),
                 current_shell=updater.own_shell_id(),
                 url=updater.MANIFEST_URL,
             )
