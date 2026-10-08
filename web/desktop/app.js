@@ -1127,6 +1127,47 @@ function fileLabel(path) {
   return EXT_LABEL[ext] || '文本';
 }
 
+/** 一键还原出厂：把**运行过程中产生的**数据全清掉（保留供应商/密钥/设置/人设/插件）。 */
+async function factoryReset() {
+  const step1 = await confirmDialog(
+    '还原出厂设置：将清掉全部会话与消息、工作区分组与绑定、记忆（人设保留）、知识库、'
+    + '定时任务、已安装技能（内置技能会自动装回）、沙箱拦截记录与白名单、配置变更审计、缓存。'
+    + '模型服务与密钥、设置、人设、通道插件、日志会保留；会话工作目录里的文件也保留。',
+    { title: '还原出厂设置', okText: '继续', danger: true },
+  );
+  if (!step1) return;
+  const step2 = await confirmDialog(
+    '最后确认：这会删掉你的全部记忆、知识库与定时任务，且无法撤销。确定还原吗？',
+    { title: '真的要还原？', okText: '还原出厂', danger: true },
+  );
+  if (!step2) return;
+
+  const btn = $('btnFactoryReset');
+  if (btn) btn.setAttribute('loading', '');
+  try {
+    const r = await api('/system/factory-reset', { method: 'POST' });
+    const report = (r && r.report) || [];
+    const pending = (r && r.pending) || [];
+    const summary = report.map((x) => `${x.label} ${x.detail}`).join('；');
+    window.__lastResetReport = summary;
+    toast('已还原出厂' + (pending.length ? `（${pending.length} 项被占用，下次启动补删）` : ''));
+    console.log('[factory-reset]', summary, 'kept:', (r && r.kept) || []);
+    // 界面上的缓存状态全部归零：会话、工作区、各设置页的"已加载"标记。
+    state.sessionId = null;
+    if (typeof currentWorkspace !== 'undefined') currentWorkspace = null;
+    for (const k of Object.keys(settings || {})) {
+      if (k.endsWith('Loaded')) settings[k] = false;
+    }
+    if (typeof loadSessions === 'function') await loadSessions();
+    if (typeof newSession === 'function') newSession();
+    if (typeof loadWorkspaces === 'function') { try { await loadWorkspaces(); } catch (e) { /* 忽略 */ } }
+  } catch (e) {
+    toast('还原失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.removeAttribute('loading');
+  }
+}
+
 /** 状态栏的文件信息：语言 · 行数（截断时标 +）。关掉预览要清空 —— 否则会留着上一个文件的。 */
 function setStatusFile(path, content, truncated) {
   const node = $('statusFile');
@@ -2486,6 +2527,7 @@ function wire() {
   { const b = $('btnDownloadLogs'); if (b) b.addEventListener('click', downloadLogs); }
   { const b = $('btnOpenLogs'); if (b) b.addEventListener('click', openLogsFolder); }
   { const b = $('btnClearData'); if (b) b.addEventListener('click', clearAllData); }
+  { const b = $('btnFactoryReset'); if (b) b.addEventListener('click', factoryReset); }
   { const b = $('btnCheckUpdate'); if (b) b.addEventListener('click', checkUpdate); }
   { const b = $('btnApplyUpdate'); if (b) b.addEventListener('click', applyUpdate); }
   { const b = $('btnRestartUpdate'); if (b) b.addEventListener('click', restartForUpdate); }
@@ -2977,6 +3019,11 @@ function openSubagentDialog(existing) {
   $('saDraftRequest').value = '';
   const prov = $('saProvider');
   prov.innerHTML = '';
+  // 哨兵选项：内置「通用代理」用它 —— 派发时自动跟随当前对话的模型。
+  const inheritOpt = document.createElement('wa-option');
+  inheritOpt.value = '@current';
+  inheritOpt.textContent = '沿用当前对话模型（内置通用代理）';
+  prov.appendChild(inheritOpt);
   const providers = reg.providers || [];
   for (const p of providers) {
     const o = document.createElement('wa-option');
@@ -2986,6 +3033,9 @@ function openSubagentDialog(existing) {
   }
   prov.value = (existing && existing.providerId) || (providers[0] && providers[0].id) || '';
   $('saModel').value = (existing && existing.model) || '';
+  if (existing && (existing.providerId === '@current' || existing.model === '@current')) {
+    saHint('这是内置通用代理：模型在派发时沿用当前对话，不需要在这里选。');
+  }
   renderSaChecks('saTools', reg.tools || [], (existing && existing.tools) || []);
   renderSaChecks('saSkills', reg.skills || [], (existing && existing.skills) || []);
   $('saDelete').hidden = !existing;
@@ -3045,7 +3095,12 @@ async function saveSubagent() {
   if (!name) return saHint('名称不能为空');
   if (!id) return saHint('id 不能为空（只能小写字母、数字、- 和 _）');
   if (!payload.providerId) return saHint('先选一个模型服务 —— 没有的话去「模型服务」加一个');
-  if (!payload.model) return saHint('模型 id 不能为空');
+  if (payload.providerId === '@current') {
+    // 沿用当前对话模型：派发时才定模型，这里不填 id。
+    payload.model = '@current';
+  } else if (!payload.model) {
+    return saHint('模型 id 不能为空');
+  }
   const btn = $('saSave');
   btn.disabled = true;
   try {

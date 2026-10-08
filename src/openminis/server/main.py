@@ -123,6 +123,23 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         ensure_memory_layout()
     except Exception:  # pragma: no cover - 启动绝不能因记忆布局失败
         logger.exception("memory layout setup failed")
+    # 「还原出厂」上次没删掉的东西（Windows 上被占用的文件）在这里补删 ——
+    # 放在装技能之前：补删的可能正好是被清空的技能目录。
+    try:
+        from .factory_reset import run_pending_reset
+
+        run_pending_reset()
+    except Exception:  # pragma: no cover - 补删失败不该拦住启动
+        logger.exception("pending factory-reset cleanup failed")
+    # 内置「通用代理」（沿用当前对话的模型）。只在没播种过时建一次；用户删掉它
+    # 之后不该每次启动又冒出来 —— 还原出厂会删掉播种标记，于是重新播种。
+    try:
+        from ..agent.subagents import ensure_builtin_subagent
+        from ..settings.store import SettingsStore
+
+        ensure_builtin_subagent(SettingsStore.get())
+    except Exception:  # pragma: no cover - 播种失败不该拦住启动
+        logger.exception("builtin subagent seed failed")
     # Bundled skills + the generated builtin-tool manifest. Idempotent: an
     # existing (possibly user-edited) bundle is never overwritten.
     try:
@@ -1348,6 +1365,15 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
 
     runtime.chunk_sink = sink  # type: ignore[assignment]
     model_label = (conf.get("model") or "").strip() or None
+    # 本轮对话的模型：内置「通用代理」派发时沿用**这一轮**的 provider/model
+    # （而不是"设置里当前选中的那个" —— 会话可能带着自己的模型选择）。
+    try:
+        from ..agent.subagents import set_current_model
+
+        set_current_model(str(conf.get("id") or conf.get("providerId") or ""),
+                          model_label or "")
+    except Exception:  # pragma: no cover - 只是提示信息，不该影响对话
+        logger.debug("set_current_model failed", exc_info=True)
 
     messages = await chat_store.load_runtime_history(sid)
     # 附件（图片）：默认只把**路径**带进上下文，真正的「看懂」交给 read_image /

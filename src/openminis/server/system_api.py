@@ -239,6 +239,24 @@ async def storage() -> dict[str, Any]:
     }
 
 
+@router.post("/factory-reset")
+async def factory_reset_endpoint() -> dict[str, Any]:
+    """还原出厂：清掉一切运行期数据（保留供应商/密钥/设置/人设/插件）。
+
+    **为什么放在内核而不是桌面壳里**：``desktop/ui_mount.py`` 参与「壳指纹」
+    计算（``scripts/shell_id.py``），在那边加一行路由就会让所有用户被迫重下
+    78MB 整包；这里是内核侧 → 走 2.4MB 载荷更新。功能完全一样：
+    界面调 ``/api/system/factory-reset``。
+    """
+    from . import factory_reset as _factory_reset  # noqa: PLC0415
+
+    try:
+        return await _factory_reset.factory_reset()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("factory-reset failed")
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # memory — 记忆管理 (与 MemoryTools 同一目录; 前端可编辑 GLOBAL.md / 每日日志)
 # ---------------------------------------------------------------------------

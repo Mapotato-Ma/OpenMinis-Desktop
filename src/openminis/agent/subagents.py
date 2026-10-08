@@ -21,6 +21,7 @@ forward compatibility and always comes back empty in the registry.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import time
@@ -49,6 +50,48 @@ __all__ = [
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+#: 「沿用当前对话的模型」哨兵。内置通用代理用它 —— 用户不必为子代理再挑一次
+#: 模型，派发时自动跟随那一轮对话用的 provider/model。
+INHERIT_MODEL = "@current"
+
+#: 内置通用代理的 id（播种一次；用户删掉后还原出厂会再播一次）。
+BUILTIN_SUBAGENT_ID = "general"
+
+#: 本轮对话实际使用的模型（providerId, model）。``_run_chat`` 建好 provider 之后
+#: 写入，``run_subagent`` 在哨兵模式下读它 —— 这样"沿用当前对话的模型"是**真
+#: 那一轮**用的模型（含会话级/兜底链的选择），而不是"现在设置里选中的那个"。
+_current_model: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "openminis_current_model", default=None
+)
+
+
+def set_current_model(provider_id: str, model: str) -> None:
+    """由服务端在每轮对话开始时调用（见 ``server/main.py`` 的 ``_run_chat``）。"""
+    _current_model.set((str(provider_id or ""), str(model or "")))
+
+
+def current_model() -> tuple[str, str] | None:
+    return _current_model.get()
+
+
+def _resolve_inherited_model(store) -> tuple[str, str]:
+    """哨兵模式下的模型来源：先看本轮对话，再退回"当前设置的模型服务"。"""
+    got = current_model()
+    if got and got[0]:
+        return got
+    data = store.load()
+    pid = str(data.get("activeProviderId") or "")
+    conf = (data.get("providers") or {}).get(pid) or {}
+    return pid, str(conf.get("model") or "")
+
+
+def _inherits_current_model(cfg: dict[str, Any]) -> bool:
+    return (
+        str(cfg.get("providerId") or "").strip() == INHERIT_MODEL
+        or str(cfg.get("model") or "").strip() == INHERIT_MODEL
+    )
+
 
 DEFAULT_FIELDS: dict[str, Any] = {
     "emoji": "🤖",
@@ -165,6 +208,31 @@ def _validate(store, cfg: dict[str, Any], existing: bool) -> None:
     pid = str(cfg.get("providerId") or cfg.get("providerType") or "").strip()
     if not pid:
         raise SubagentError("providerId 不能为空（模型服务实例里选一个）")
+    if pid == INHERIT_MODEL or str(cfg.get("model") or "").strip() == INHERIT_MODEL:
+        # 哨兵：模型在**派发时**才确定（沿用当前对话）。此刻不能校验实例/Key ——
+        # 那会把"还没配好模型就先建通用代理"变成保存失败。
+        # 注意 ``_validate`` 的契约是**就地改 cfg 并返回 None**，落盘由
+        # ``upsert_subagent`` 负责。
+        cfg["providerId"] = INHERIT_MODEL
+        cfg["providerType"] = ""
+        cfg["model"] = INHERIT_MODEL
+        cfg["tools"] = _clean_tools(cfg.get("tools"), known_tool_ids(), sid)
+        cfg["skills"] = _clean_strings("skills", cfg.get("skills"), sid, "skills")
+        cfg["mcpServers"] = _clean_strings("mcpServers", cfg.get("mcpServers"), sid,
+                                           "mcpServers")
+        try:
+            cfg["maxRounds"] = max(1, min(int(cfg.get("maxRounds", 6)), 12))
+        except (TypeError, ValueError) as exc:
+            raise SubagentError("maxRounds 必须是整数(1-12)") from exc
+        cfg["name"] = name
+        cfg["emoji"] = str(cfg.get("emoji") or "🤖")[:4]
+        cfg["description"] = str(cfg.get("description") or "")[:200]
+        cfg["persona"] = str(cfg.get("persona") or "").strip()
+        if not cfg["persona"]:
+            cfg["persona"] = (
+                f"你是「{name}」。基于给定的任务专注、可靠地完成工作，用中文回复。"
+            )
+        return
     instances = store.provider_instances()
     conf = next((c for c in instances if c.get("id") == pid), None)
     if conf is None:
@@ -220,6 +288,58 @@ def upsert_subagent(store, payload: dict[str, Any], sid: str | None = None) -> d
     sub[cfg["id"]] = cfg
     store.save(data)
     return dict(cfg)
+
+
+#: 内置「通用代理」的出厂配置。工具集 = 全部（``subagent_delegate`` 会被
+#: ``run_subagent`` 自动剔除，防止无限委派）。
+BUILTIN_SUBAGENT: dict[str, Any] = {
+    "id": BUILTIN_SUBAGENT_ID,
+    "name": "通用代理",
+    "emoji": "🧩",
+    "description": "内置通用助理：沿用当前对话的模型，能跑命令、读写文件、查网页、开浏览器。",
+    "persona": (
+        "你是通用代理：拿到任务后独立完成，动手而不是只给建议 —— 需要事实就查、"
+        "需要验证就跑一遍，最后用中文给出结论（做了什么、结果如何、有什么前提）。"
+    ),
+    "providerId": INHERIT_MODEL,
+    "model": INHERIT_MODEL,
+    "tools": [
+        "shell_execute", "file_read", "file_write", "file_edit", "ls",
+        "search_files", "web_fetch", "web_search", "browser_use", "read_image",
+        "memory_get", "memory_write", "skill_use", "send", "image_gen",
+    ],
+    "skills": [],
+    "maxRounds": 8,
+}
+
+
+def ensure_builtin_subagent(store, *, force: bool = False) -> str | None:
+    """播种内置「通用代理」。返回新建的 id，已经有就返回 None。
+
+    只在**没播种过**的时候建（标记文件 ``<data>/subagents.seeded``）——
+    用户手工删掉它之后不该每次启动又冒出来；「还原出厂」会删掉标记，
+    下次启动就重新播种，这正好对应"回到刚装好的状态"。
+    """
+    from ..core.context import app_context
+
+    marker = app_context().data_dir / "subagents.seeded"
+    sub = store.load().get("subagents") or {}
+    if not force:
+        if marker.exists():
+            return None
+        if BUILTIN_SUBAGENT_ID in sub:
+            # 老版本（还没标记文件）已经手工建过同 id 的：认下来，不再重复播种，
+            # 更不覆盖用户改过的配置。
+            marker.write_text("kept", encoding="utf-8")
+            return None
+    try:
+        upsert_subagent(store, dict(BUILTIN_SUBAGENT))
+    except SubagentError as exc:
+        logger.warning("内置通用代理播种失败：%s", exc)
+        return None
+    marker.write_text(str(int(time.time() * 1000)), encoding="utf-8")
+    logger.info("已播种内置通用代理（沿用当前对话的模型）")
+    return BUILTIN_SUBAGENT_ID
 
 
 def delete_subagent(store, sid: str) -> bool:
@@ -508,19 +628,37 @@ async def run_subagent(
 
     # cfg.providerId 指的是模型服务**实例**；老配置只有 providerType（协议），
     # 那就退回该协议下的第一个实例。
-    pid = str(cfg.get("providerId") or cfg.get("providerType") or "")
     data = store.load()
-    conf = dict(data["providers"].get(pid) or {})
-    if not conf:
-        conf = next(
-            (dict(c) for c in store.provider_instances() if c.get("type") == pid),
-            {},
-        )
-    if not conf:
-        raise SubagentError(f"subagent {subagent_id} 的模型服务实例不存在: {pid or '(空)'}")
-
-    conf["model"] = cfg.get("model") or conf.get("model", "")
-    provider = build_provider(pid, conf)
+    if _inherits_current_model(cfg):
+        # 内置通用代理：沿用**派发时那一轮**的模型（``_run_chat`` 会把它写进
+        # 上下文变量）。这样用户不必为子代理再挑一次模型 —— 也不会有"聊天用
+        # DeepSeek、子代理却还在用老模型"的错位。
+        pid, model_id = _resolve_inherited_model(store)
+        if not pid:
+            raise SubagentError(
+                "「通用代理」要沿用当前对话的模型，但现在还没设定模型服务 —— "
+                "先去 设置 → 模型服务 配一个。"
+            )
+        conf = dict((data.get("providers") or {}).get(pid) or {})
+        if not conf:
+            raise SubagentError(f"模型服务实例不存在: {pid}")
+        if model_id:
+            conf = {**conf, "model": model_id}
+        provider = build_provider(pid, conf)
+    else:
+        pid = str(cfg.get("providerId") or cfg.get("providerType") or "")
+        conf = dict(data["providers"].get(pid) or {})
+        if not conf:
+            conf = next(
+                (dict(c) for c in store.provider_instances() if c.get("type") == pid),
+                {},
+            )
+        if not conf:
+            raise SubagentError(
+                f"subagent {subagent_id} 的模型服务实例不存在: {pid or '(空)'}"
+            )
+        conf["model"] = cfg.get("model") or conf.get("model", "")
+        provider = build_provider(pid, conf)
 
     inner_tools = {
         name: t

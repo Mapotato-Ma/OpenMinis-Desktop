@@ -174,7 +174,11 @@ def test_rest_crud(store):
     _configure(store)
     with TestClient(app) as c:
         body = c.get("/api/subagents").json()
-        assert body["subagents"] == []
+        # 启动会播种内置「通用代理」（沿用当前对话的模型）—— 列表里应当先有它，
+        # 用户新建的助理和它并列。
+        ids = [x["id"] for x in body["subagents"]]
+        assert ids == ["general"], ids
+        assert body["subagents"][0]["model"] == "@current"
         assert body["registry"]["providers"]
 
         r = c.post("/api/subagents", json={

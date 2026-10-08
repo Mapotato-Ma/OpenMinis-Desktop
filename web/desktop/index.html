@@ -656,12 +656,20 @@
         <div class="settings-block">
           <h3>数据</h3>
           <p class="pane-sub">
-            清空全部会话、消息与分组，用于排除历史数据的影响。
-            <strong>供应商、模型、人格、技能与其它设置一律保留。</strong>此操作不可撤销。
+            <strong>清空所有对话数据</strong>：只清会话、消息与分组，用于排除历史数据的影响。
+            供应商、模型、人格、技能与其它设置一律保留。<br>
+            <strong>还原出厂设置</strong>：把<strong>运行过程中产生</strong>的东西全清掉 ——
+            会话、记忆、知识库、定时任务、已安装技能（内置技能会自动装回）、沙箱拦截记录与白名单、
+            用量与配置审计、缓存、工作区分组。
+            模型服务与密钥、设置、人设、通道插件、日志会保留；会话工作目录里的文件也保留。
+            两者都不可撤销。
           </p>
-          <div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn" id="btnClearData" style="--wa-color-fill-loud:var(--danger)">
               <wa-icon library="om" name="trash-2" class="ic"></wa-icon>清空所有对话数据
+            </button>
+            <button class="btn" id="btnFactoryReset" style="--wa-color-fill-loud:var(--danger)">
+              <wa-icon library="om" name="trash-2" class="ic"></wa-icon>还原出厂设置
             </button>
           </div>
         </div>

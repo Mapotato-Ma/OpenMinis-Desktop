@@ -497,6 +497,24 @@ async def clear_all_chat_data() -> dict[str, int]:
     return counts
 
 
+async def clear_all_workspaces() -> int:
+    """删掉全部分组（工作区）及其真实路径绑定，返回删掉的数量。
+
+    「还原出厂」用。与 :func:`clear_all_chat_data` 刻意不同：那个**保留**分组
+    （绑定是用户配置，删了会让前端的 ``currentWorkspace`` 变悬空 id），而还原
+    出厂连分组一起清 —— 会话都没了，留着一堆空壳分组只会让界面显示"空工作区"。
+    调用方（``factory_reset``）负责让前端把缓存的工作区状态一起归零。
+    """
+    await ensure_db()
+    removed = 0
+    async with _get_db().session() as s:
+        dao = ChatDao(s)
+        for folder in await dao.list_folders():
+            await dao.delete_folder(folder.id)
+            removed += 1
+    return removed
+
+
 # -- runtime transcript cache ------------------------------------------------
 def _cache_runtime(session_id: str, messages: list[LLMMessage]) -> None:
     _RUNTIME[session_id] = messages
