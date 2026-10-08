@@ -207,3 +207,42 @@ async def test_client_disconnect_kills_the_running_command(ws_env, tmp_path):
     if left > 0:
         await asyncio.sleep(left)
     assert not marker.exists(), "断开之后命令的子孙还在跑"
+
+
+async def test_stop_while_the_process_is_still_spawning_still_tells_the_ui(
+    ws_env, monkeypatch
+):
+    """停止帧撞进「进程还没起来」的窗口时，界面也必须收到「已停止」。
+
+    现场（CI 的 windows-latest）：Windows 上 spawn 要现找 Git Bash，几秒才起来，
+    停止帧正好落进那个窗口 → 命令本来就没进程可杀，而代码只在 ``proc is not None``
+    那一支回话 → **一句话都不回**，抽屉的「正在跑」永远不灭（界面像卡住）。
+    这里把 spawn 人为变慢来**确定性地**复现那个窗口，不依赖平台速度。
+    """
+    real_spawn = asyncio.create_subprocess_shell
+    entered = asyncio.Event()
+
+    async def slow_spawn(*args, **kwargs):
+        entered.set()
+        await asyncio.sleep(5)   # 假装 Git Bash discovery 很慢
+        return await real_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", slow_spawn)
+    ws = _FakeWS()
+    ws.push({"type": "shell", "command": "echo hi"})
+    endpoint = asyncio.create_task(server_main.websocket_endpoint(ws))
+    try:
+        assert await _until(lambda: bool(server_main._RUNNING_SHELL), 1.0), "命令没登记进表"
+        assert await _until(entered.is_set, 1.0), "还没进到 spawn 就被别的东西挡住了"
+
+        ws.push({"type": "stop"})
+        assert await _until(
+            lambda: any(
+                f.get("type") == "error" and "停止" in str(f.get("error"))
+                for f in ws.sent
+            ),
+            2.0,
+        ), f"窗口期按下停止后界面没收到「已停止」({_kinds(ws)})"
+        assert await _until(lambda: not server_main._RUNNING_SHELL, 2.0), "登记没清掉"
+    finally:
+        await _shutdown(endpoint, ws)

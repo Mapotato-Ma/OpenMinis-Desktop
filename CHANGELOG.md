@@ -34,6 +34,14 @@
 - 内核算出 5 种子代理帧，前端**一个分支都没有**（全落 `default`）→ 开着子代理时界面只有一张不动的卡。
   现在有群聊气泡（头像/名字/模型/任务/状态 + 逐条工具）。`fallback` 帧也接了。
 
+### Windows CI 抓到的一个真漏（同批修掉）
+- `windows-latest` 上 `test_ping_is_answered_while_a_terminal_command_runs` 红：
+  `界面没收到「已停止」(['pong','done'])`。查下来**不是测试脆**，是内核漏了一个窗口 ——
+  停止帧赶在「命令刚派下去、进程还没起来」时到（Windows 上 spawn 要现找 Git Bash，几秒才起来），
+  而通知只写在 `proc is not None` 那一支 → 那个窗口里界面收不到任何回话，抽屉的「正在跑」永远不灭。
+- 修：窗口期也发「命令已停止」（`_notify_shell_stopped`，与杀进程支共用同一句话），
+  并补一条**确定性**回归测试（把 spawn 人为变慢来复现窗口，不依赖平台速度）。
+
 ### 测试
 - 服务器四步全绿；新增/改写：`tests/test_compaction.py`(+2)、`tests/test_ws_shell_nonblocking.py`(4)、
   `tests/test_guard_confirm_wiring.py`(2)、`desktop/tests/test_settings_dirty.py`(5)、

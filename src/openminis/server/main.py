@@ -1641,6 +1641,12 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
         # 停止帧 / 连接断开：光取消 await 只是不再读输出，命令还得真收掉。
         if proc is not None:
             _kill_shell(client_id, proc, notify=True)
+        else:
+            # 取消赶在进程起来之前（上面那个窗口）：**没有进程要杀，但界面必须收到
+            # 「已停止」** —— 否则抽屉的「正在跑」永远不灭、界面像卡住了。
+            # 现场：CI 的 windows-latest 上 spawn 要现找 Git Bash，几秒才起来，
+            # 停止帧正好落进这个窗口 → 一条回话都没有（只收到 pong 和 done）。
+            _notify_shell_stopped(client_id)
         raise
 
     await _safe_send(client_id, {"type": "done", "exitCode": code})
@@ -1667,11 +1673,27 @@ def _kill_shell(client_id: str, proc: Any, *, notify: bool = False) -> None:
         except Exception:  # pragma: no cover - 杀不掉也要让界面知道停了
             logger.debug("terminal command kill failed", exc_info=True)
         if notify:
-            try:
-                # 前端抽屉按 ``error`` 帧熄灭「正在跑」——用 done 帧会被当成一轮对话结束。
-                await _safe_send(client_id, {"type": "error", "error": "命令已停止"})
-            except Exception:  # pragma: no cover
-                logger.debug("terminal stop notice failed", exc_info=True)
+            _notify_shell_stopped(client_id)
+
+    _spawn_bg(_run())
+
+
+_STOPPED_NOTE = "命令已停止"
+
+
+def _notify_shell_stopped(client_id: str) -> None:
+    """告诉界面「命令已停止」——抽屉按 ``error`` 帧熄灭「正在跑」（用 done 帧会被
+
+    当成一轮对话结束）。
+    派成后台任务而不是直接 await：取消路径上本任务正在被取消，在这里 await 可能被
+    二次取消打断（与 ``_kill_shell`` 同一条理由）。
+    """
+
+    async def _run() -> None:
+        try:
+            await _safe_send(client_id, {"type": "error", "error": _STOPPED_NOTE})
+        except Exception:  # pragma: no cover
+            logger.debug("terminal stop notice failed", exc_info=True)
 
     _spawn_bg(_run())
 
