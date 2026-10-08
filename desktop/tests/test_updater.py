@@ -658,16 +658,28 @@ def test_relaunch_script_can_be_rendered_anywhere(tmp_path):
     """重启助手脚本：等进程有上限、先 cd 回安装目录、每步写日志。
 
     这三条都是 2026-10-08 那次"窗口没了也拉不起来"的教训（原版死等 + 不记日志，
-    失败之后无据可查）。
+    失败之后无据可查）。再加一条更硬的要求：脚本必须**纯 ASCII** —— cmd 是按控制台
+    码页读 .cmd 的，而安装路径常常带中文（`F:\\桌面\\07-代码\\...`）。真机演练：
+    内嵌中文路径时 `move` 连试 15 次全失败，改走环境变量后一次成功。
     """
-    text = updater.relaunch_script_text(
-        pid=4242, exe=tmp_path / "app" / "OpenMinisDesktop.exe", app_root=tmp_path / "app"
-    )
-    assert "PID eq 4242" in text
-    assert "GEQ" in text, "没有等待上限 —— 旧进程不退会永久卡住助手"
-    assert f'cd /d "{tmp_path / "app"}"' in text, "启动前没回安装目录"
+    text = updater.relaunch_script_text()
+    assert all(ord(ch) < 128 for ch in text), "脚本里混进了非 ASCII —— 中文路径会被读花"
+    assert "\\\\" not in text, "多了个反斜杠会让启动路径变成 C:\\a\\\\b\\exe"
+    assert "OM_UPD_APPROOT" in text and "OM_UPD_EXE" in text, "路径没走环境变量"
+    assert 'cd /d "%APP%"' in text, "启动前没回安装目录"
+    assert "GEQ %OM_UPD_WAITMAX%" in text, "没有等待上限 —— 旧进程不退会永久卡住助手"
     assert "openminis-relaunch.log" in text, "没有日志 —— 失败后无据可查"
-    assert "start \"\"" in text
+    assert 'start "" "%APP%\\%EXE%"' in text
+    assert text.index(":wait") < text.index(":start"), "必须先等旧进程退出再启动"
+
+
+def test_helper_env_carries_paths_verbatim(tmp_path):
+    """路径经环境变量传进 cmd —— 中文、空格、方括号都不该被改动。"""
+    weird = tmp_path / "桌面 区[07]-代码" / "OpenMinisDesktop"
+    env = updater.helper_env(**{updater._ENV_INSTALL: weird, updater._ENV_EXE: None})
+    assert env[updater._ENV_INSTALL] == str(weird)
+    assert updater._ENV_EXE not in env, "None 不该变成字符串写进环境"
+    assert "PATH" in env or "SYSTEMROOT" in env, "没继承原环境 —— cmd 会找不到 tasklist"
 
 
 # ---------------------------------------------------------------------------

@@ -477,44 +477,114 @@ def install_payload(archive: Path, payload_dir: Path, *, expect_shell: str | Non
 #:   * **先 ``cd /d`` 回安装目录**再启动，避免继承一个奇怪的当前目录；
 #:   * **每一步写日志**（``openminis-relaunch.log``）—— 助手脚本自己会自删，
 #:     不留日志的话失败之后**无据可查**（现在就查不到）。
-_RELAUNCH_CMD = """@echo off
-rem 由 OpenMinis Desktop 的更新器写出来：等旧进程退出 → 回安装目录 → 启动新版本。
+_RELAUNCH_CMD = r"""@echo off
+rem OpenMinis Desktop: start the app again after it exits (used by an update).
+rem ASCII only on purpose - every path travels in an environment variable, because
+rem cmd.exe reads this file in the console code page and install paths are often
+rem non-ASCII (e.g. F:\<chinese>\...). See updater.helper_env.
 setlocal
 set "LOG=%~dp0openminis-relaunch.log"
-echo [%DATE% %TIME%] 等待 PID {pid} 退出 >> "%LOG%"
+set "APP=%OM_UPD_APPROOT%"
+set "EXE=%OM_UPD_EXE%"
+echo [%DATE% %TIME%] waiting for pid %OM_UPD_PID% to exit >> "%LOG%"
 set /a WAITED=0
 :wait
-tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+tasklist /FI "PID eq %OM_UPD_PID%" 2>nul | find "%OM_UPD_PID%" >nul
 if errorlevel 1 goto start
 set /a WAITED+=1
-if %WAITED% GEQ {waited_max} (
-  echo [%DATE% %TIME%] 等满 {waited_max} 秒进程仍在，不再等，直接启动 >> "%LOG%"
+if %WAITED% GEQ %OM_UPD_WAITMAX% (
+  echo [%DATE% %TIME%] waited %OM_UPD_WAITMAX%s, process still there - starting anyway >> "%LOG%"
   goto start
 )
 timeout /t 1 /nobreak >nul
 goto wait
 :start
-cd /d "{app_root}"
-echo [%DATE% %TIME%] 启动 "{exe}"（工作目录 %CD%） >> "%LOG%"
-start "" "{exe}"
-echo [%DATE% %TIME%] start 返回 %errorlevel% >> "%LOG%"
+cd /d "%APP%"
+echo [%DATE% %TIME%] starting "%APP%\%EXE%" from %CD% >> "%LOG%"
+start "" "%APP%\%EXE%"
+echo [%DATE% %TIME%] start returned %errorlevel% >> "%LOG%"
 del "%~f0"
+exit /b 0
 """
+
+def script_encoding() -> str:
+    """写 ``.cmd`` 助手脚本用的编码。
+
+    **必须是系统的 ANSI 码页**（Windows 上是 ``mbcs``，简中机器 = CP936）：``cmd.exe``
+    读 .cmd 文件是按 ANSI 解的，而我们写进去的东西里有**安装路径** ——
+    用户完全可能装在 ``F:\\桌面\\07-代码\\...`` 这种目录下，写成 UTF-8 就会被读成乱码，
+    ``move`` / ``start`` 全部指向不存在的路径。这类失败还很隐蔽：脚本照样"跑完"了，
+    只是什么都没动。
+
+    非 Windows 上返回 utf-8（那里没有 cmd，这两个助手脚本也用不上）。
+    """
+    return "mbcs" if sys.platform == "win32" else "utf-8"
+
+
+def write_helper_script(path: Path, text: str) -> Path:
+    """把助手脚本写盘：按 ``script_encoding()`` 编码，并且**显式写成 CRLF**。
+
+    CRLF 不是风格问题：``cmd.exe`` 解析 .cmd 时要 CRLF，纯 LF 的文件会**整个跑不起来**
+    （真机演练：LF 的脚本 `cmd /c` 返回 1、日志一个字都没有）。Windows 上
+    ``write_text`` 的换行翻译碰巧能救回来，但那是隐式的 —— 这里写死，别指望运气。
+    """
+    body = text.replace("\r\n", "\n")
+    for enc in (script_encoding(), "utf-8"):
+        try:
+            path.write_text(body, encoding=enc, newline="\r\n")
+            return path
+        except (LookupError, UnicodeEncodeError):  # pragma: no cover - 只在怪环境
+            continue
+    path.write_bytes(body.encode("utf-8", "replace"))  # pragma: no cover
+    return path
+
 
 #: 等旧进程退出的上限（秒）。超过就照启动 —— 让用户拿到窗口比等到天荒地老有用。
 _RELAUNCH_WAIT_MAX_S = 60
 
+#: 助手脚本共用的环境变量名。**为什么参数走环境变量、不写进脚本**：
+#: ``.cmd`` 里的字节要按控制台码页解释，而安装路径完全可能是
+#: ``F:\桌面\07-代码\...`` —— 无论按 UTF-8 还是 ANSI 写进去，cmd 都可能读成
+#: 另一条不存在的路径，而失败是**静默**的：脚本照跑、日志照写，只是什么都没动。
+#: Windows 的环境变量是 UTF-16，跟文件编码、控制台码页都无关。
+#: 真机演练（2026-10-08）：路径写进 ANSI 的 .cmd → ``move`` 连试 15 次全失败；
+#: 改成环境变量传参 → 一次成功。
+_ENV_INSTALL = "OM_UPD_INSTALL"
+_ENV_NEW = "OM_UPD_NEW"
+_ENV_STAGING = "OM_UPD_STAGING"
+_ENV_EXE = "OM_UPD_EXE"
+_ENV_APPROOT = "OM_UPD_APPROOT"
+_ENV_STAMP = "OM_UPD_STAMP"
+_ENV_PID = "OM_UPD_PID"
+_ENV_WAITMAX = "OM_UPD_WAITMAX"
 
-def relaunch_script_text(*, pid: int, exe: Path, app_root: Path) -> str:
-    """渲染重启助手脚本。单独抽出来是为了能在**任何平台**上测它写了什么 ——
-    真正要 spawn ``cmd`` 的那步只在 Windows 上跑得起来。"""
-    return _RELAUNCH_CMD.format(
-        pid=pid, exe=str(exe), app_root=str(app_root),
-        waited_max=_RELAUNCH_WAIT_MAX_S,
-    )
+
+def helper_env(**extra: object) -> dict[str, str]:
+    """当前进程环境 + 助手脚本要的参数（值转字符串，None 丢掉）。"""
+    env = dict(os.environ)
+    for key, value in extra.items():
+        if value is not None:
+            env[key] = str(value)
+    return env
 
 
-def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Path | None:
+
+
+def relaunch_script_text(*, waited_max: int = _RELAUNCH_WAIT_MAX_S) -> str:
+    """渲染重启助手脚本（纯 ASCII；参数走环境变量，见 ``helper_env``）。
+
+    抽成函数是为了能在**任何平台**上检查它写了什么 —— 真正要 spawn ``cmd``
+    的那步只在 Windows 上跑得起来。
+    """
+    return _RELAUNCH_CMD
+
+
+
+
+def schedule_relaunch(
+    *, pid: int | None = None, exe: Path | None = None,
+    waited_max: int = _RELAUNCH_WAIT_MAX_S,
+) -> Path | None:
     """安排"退出后重启"。返回写出来的助手脚本路径（Windows）或 None。
 
     非 Windows 上不写脚本：那些平台不是发布目标，硬写一个 .sh 只会变成没人维护的
@@ -526,9 +596,13 @@ def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Pat
     pid = pid if pid is not None else os.getpid()
     app_dir = exe.resolve().parent
     script = Path(tempfile.gettempdir()) / f"openminis-relaunch-{pid}.cmd"
-    script.write_text(
-        relaunch_script_text(pid=pid, exe=exe, app_root=app_dir), encoding="utf-8"
-    )
+    write_helper_script(script, relaunch_script_text(waited_max=waited_max))
+    env = helper_env(**{
+        _ENV_PID: pid,
+        _ENV_EXE: exe.name,
+        _ENV_APPROOT: app_dir,
+        _ENV_WAITMAX: waited_max,
+    })
     flags = (
         getattr(subprocess, "DETACHED_PROCESS", 0)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -540,6 +614,7 @@ def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Pat
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
+        "env": env,
     }
     try:
         # 带上 BREAKAWAY：万一这个进程活在某个 Job 对象里（安装器/启动器常见），
@@ -556,6 +631,8 @@ def schedule_relaunch(*, pid: int | None = None, exe: Path | None = None) -> Pat
             ["cmd", "/c", str(script)], creationflags=flags, **base
         )
     return script
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -660,22 +737,25 @@ def install_full_package(
 
 #: 替换助手脚本。与重启助手同一套路（独立进程 + 日志），但多了"改名让位 / 回滚"。
 #: 每一步都写日志：脚本会自删，不留日志的话失败之后**无据可查**。
-_SWAP_CMD = """@echo off
-rem 由 OpenMinis Desktop 更新器写出：等旧进程退出 → 旧目录改名 → 新目录就位 → 启动。
+_SWAP_CMD = r"""@echo off
+rem OpenMinis Desktop: finish a full-package update after the app has exited.
+rem ASCII only on purpose - every path travels in an environment variable, because
+rem cmd.exe reads this file in the console code page and install paths are often
+rem non-ASCII (e.g. F:\<chinese>\...). See updater.helper_env.
 setlocal
 set "LOG=%~dp0openminis-swap.log"
-set "INSTALL={install_dir}"
-set "NEW={staged}"
-set "OLD={install_dir}.old-{stamp}"
-set "EXE={exe_name}"
-echo [%DATE% %TIME%] 等待 PID {pid} 退出 >> "%LOG%"
+set "INSTALL=%OM_UPD_INSTALL%"
+set "NEW=%OM_UPD_NEW%"
+set "OLD=%OM_UPD_INSTALL%.old-%OM_UPD_STAMP%"
+set "EXE=%OM_UPD_EXE%"
+echo [%DATE% %TIME%] waiting for pid %OM_UPD_PID% to exit >> "%LOG%"
 set /a WAITED=0
 :wait
-tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+tasklist /FI "PID eq %OM_UPD_PID%" 2>nul | find "%OM_UPD_PID%" >nul
 if errorlevel 1 goto moveold
 set /a WAITED+=1
-if %WAITED% GEQ {waited_max} (
-  echo [%DATE% %TIME%] 等满 {waited_max} 秒旧进程仍在，放弃替换（半替换更糟） >> "%LOG%"
+if %WAITED% GEQ %OM_UPD_WAITMAX% (
+  echo [%DATE% %TIME%] gave up after %OM_UPD_WAITMAX%s - old process still running >> "%LOG%"
   goto done
 )
 timeout /t 1 /nobreak >nul
@@ -687,7 +767,7 @@ move "%INSTALL%" "%OLD%" >> "%LOG%" 2>&1
 if not errorlevel 1 goto movenew
 set /a TRY+=1
 if %TRY% GEQ 15 (
-  echo [%DATE% %TIME%] 旧目录改名失败（多半还有子进程占着），放弃 >> "%LOG%"
+  echo [%DATE% %TIME%] could not rename the install dir (still locked) - giving up >> "%LOG%"
   goto done
 )
 timeout /t 2 /nobreak >nul
@@ -695,57 +775,59 @@ goto retryold
 :movenew
 move "%NEW%" "%INSTALL%" >> "%LOG%" 2>&1
 if errorlevel 1 (
-  echo [%DATE% %TIME%] 新目录就位失败，回滚旧目录 >> "%LOG%"
+  echo [%DATE% %TIME%] could not move the new build in - rolling back >> "%LOG%"
   move "%OLD%" "%INSTALL%" >> "%LOG%" 2>&1
   goto done
 )
 cd /d "%INSTALL%"
-start "" "%INSTALL%\\%EXE%"
-echo [%DATE% %TIME%] 已启动新版本 >> "%LOG%"
-rem 清场：旧目录先等它松手，暂存根目录顺手删掉；失败不影响使用
+start "" "%INSTALL%\%EXE%"
+echo [%DATE% %TIME%] started the new build >> "%LOG%"
 set /a TRY=0
 :cleanold
 rmdir /s /q "%OLD%" 2>nul
 if not exist "%OLD%" goto cleanstaging
 set /a TRY+=1
 if %TRY% LSS 15 ( timeout /t 2 /nobreak >nul & goto cleanold )
-echo [%DATE% %TIME%] 旧目录没删掉（留着不影响使用，下次更新会收拾） >> "%LOG%"
+echo [%DATE% %TIME%] old dir left behind (harmless; the next update cleans it) >> "%LOG%"
 :cleanstaging
-rmdir /s /q "{staging_root}" 2>nul
+rmdir /s /q "%OM_UPD_STAGING%" 2>nul
 :done
 del "%~f0"
+exit /b 0
 """
 
 
-def swap_script_text(
-    *, pid: int, install_dir: Path, staged: Path, exe_name: str, stamp: str,
-    waited_max: int = _SWAP_WAIT_MAX_S,
-) -> str:
-    """渲染替换助手脚本。抽出来是为了能在**任何平台**上检查它写了什么。"""
-    return _SWAP_CMD.format(
-        pid=pid, install_dir=str(install_dir), staged=str(staged), exe_name=exe_name,
-        stamp=stamp, staging_root=str(staged.parent), waited_max=waited_max,
-    )
+def swap_script_text(*, waited_max: int = _SWAP_WAIT_MAX_S) -> str:
+    """渲染替换助手脚本（纯 ASCII；参数走环境变量，见 ``helper_env``）。"""
+    return _SWAP_CMD
+
+
 
 
 def schedule_swap(
     *, install_dir: Path, staged: Path, exe_name: str = "OpenMinisDesktop.exe",
     pid: int | None = None, now: float | None = None,
+    waited_max: int = _SWAP_WAIT_MAX_S,
 ) -> Path:
     """写脚本 + 起独立进程去完成替换。返回助手脚本路径。
 
     非 Windows 上不写脚本（与 ``schedule_relaunch`` 同理由：那不是发布目标）。
     """
-    if sys.platform != "win32":
-        return Path(tempfile.gettempdir()) / f"openminis-swap-{os.getpid()}.cmd"
     pid = pid if pid is not None else os.getpid()
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now else time.time()))
     script = Path(tempfile.gettempdir()) / f"openminis-swap-{pid}.cmd"
-    script.write_text(
-        swap_script_text(pid=pid, install_dir=install_dir, staged=staged,
-                         exe_name=exe_name, stamp=stamp),
-        encoding="utf-8",
-    )
+    if sys.platform != "win32":
+        return script
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now else time.time()))
+    write_helper_script(script, swap_script_text(waited_max=waited_max))
+    env = helper_env(**{
+        _ENV_PID: pid,
+        _ENV_INSTALL: install_dir,
+        _ENV_NEW: staged,
+        _ENV_STAGING: staged.parent,
+        _ENV_EXE: exe_name,
+        _ENV_STAMP: stamp,
+        _ENV_WAITMAX: waited_max,
+    })
     flags = (
         getattr(subprocess, "DETACHED_PROCESS", 0)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -756,6 +838,7 @@ def schedule_swap(
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
+        "env": env,
     }
     try:
         subprocess.Popen(  # noqa: S603
@@ -769,6 +852,8 @@ def schedule_swap(
             ["cmd", "/c", str(script)], creationflags=flags, **base
         )
     return script
+
+
 
 
 #: 上一次更新的结果（落盘）。进程内的 ``_update_state`` 一重启就空 ——

@@ -117,19 +117,29 @@ def test_cleans_up_leftovers_from_previous_attempts(monkeypatch, tmp_path, insta
 
 
 def _script() -> str:
-    return updater.swap_script_text(
-        pid=4321, install_dir=Path(r"F:\app\OpenMinisDesktop"),
-        staged=Path(r"F:\app\_openminis-update-99\OpenMinisDesktop"),
-        exe_name="OpenMinisDesktop.exe", stamp="20261008-213000",
-    )
+    return updater.swap_script_text()
+
+
+def test_swap_script_is_pure_ascii_and_takes_paths_from_the_environment():
+    """真机演练（2026-10-08）：把中文安装路径写进 ANSI 的 .cmd，`move` 连试 15 次
+    全失败（cmd 按控制台码页解释文件字节）；改成环境变量传参后一次成功。
+    这条钉住的就是那个性质：脚本本身不许出现非 ASCII，路径只许以 %OM_UPD_*% 出现。
+    """
+    text = _script()
+    assert all(ord(ch) < 128 for ch in text), "脚本混进了非 ASCII"
+    assert chr(92) * 2 not in text, "多了个反斜杠会让路径变成 C:\\a\\\\b"
+    assert "OM_UPD_INSTALL" in text and "OM_UPD_NEW" in text, "路径没走环境变量"
+    assert updater.helper_env(**{updater._ENV_INSTALL: r"F:\桌面\07-代码\app"})[
+        updater._ENV_INSTALL] == r"F:\桌面\07-代码\app"
 
 
 def test_swap_script_waits_for_the_old_process_first():
     text = _script()
-    wait = text.index("PID eq 4321")
+    wait = text.index('PID eq %OM_UPD_PID%')
     move_old = text.index('move "%INSTALL%" "%OLD%"')
     assert wait < move_old, "必须先等旧进程退出，否则文件还锁着"
-    assert "GEQ 90" in text and "放弃替换" in text, "等超时要**放弃**，不能硬来（半替换更糟）"
+    assert "GEQ %OM_UPD_WAITMAX%" in text and "giving up" in text, (
+        "等超时要**放弃**，不能硬来（半替换更糟）")
 
 
 def test_swap_script_order_and_rollback():
@@ -152,3 +162,39 @@ def test_swap_script_never_deletes_the_install_directory_itself():
             assert "%install%" not in stripped or "%old%" in stripped, (
                 f"清理命令指向了安装目录本身：{line}")
     assert "del \"%~f0\"" in text, "助手脚本最后要自删"
+
+
+def test_helper_scripts_go_out_in_the_ansi_codepage_on_windows(monkeypatch):
+    """cmd.exe 按 ANSI 读 .cmd。
+
+    助手脚本里带**安装路径**，而用户完全可能装在 `F:\\桌面\\07-代码\\...` 下 ——
+    写成 UTF-8 会被读成乱码路径，`move` / `start` 全部指空。失败还很隐蔽：
+    脚本"跑完"了，只是什么都没动。
+    """
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    assert updater.script_encoding() == "mbcs"
+
+
+def test_helper_scripts_use_utf8_off_windows():
+    assert updater.script_encoding() == "utf-8"
+
+
+def test_write_helper_script_falls_back_when_the_codepage_cannot_encode(monkeypatch, tmp_path):
+    """码页编不出来的字（万一）也不能把脚本写坏：退回 utf-8 并留下完整内容。"""
+    monkeypatch.setattr(updater, "script_encoding", lambda: "ascii")
+    target = tmp_path / "helper.cmd"
+    updater.write_helper_script(target, "echo 中文路径 F:\\桌面")
+    assert "中文路径 F:\\桌面" in target.read_text(encoding="utf-8")
+
+
+def test_helper_script_is_written_with_crlf(tmp_path):
+    """cmd.exe 解析 .cmd 要 CRLF —— 纯 LF 的文件整个跑不起来。
+
+    真机演练（2026-10-08）：LF 的脚本 `cmd /c` 返回 1、日志一个字都没写，
+    看着像"脚本没跑"，其实是行尾。这条把它钉死。
+    """
+    target = tmp_path / "helper.cmd"
+    updater.write_helper_script(target, "line1\nline2\n")
+    raw = target.read_bytes()
+    assert b"line1\r\nline2\r\n" in raw, f"没有写成 CRLF：{raw[:40]!r}"
+    assert b"\n\n" not in raw
