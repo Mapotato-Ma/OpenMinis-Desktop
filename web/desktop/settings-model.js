@@ -289,9 +289,13 @@
       identity: dirtyIdentities.length > 0 || state.identities.activeId !== b.activeIdentityId,
       /** 哪些身份的工具列表真的改过 —— 界面用它给单张卡片打「未保存」。 */
       identities: dirtyIdentities,
+      // 刚填进去的密钥也算未保存：服务端从不回传密钥，所以 state.keys 里只要还有东西，
+      // 就是「用户输了但还没发出去」。以前不计入，导致只填密钥时保存按钮不出现、
+      // 关面板直接把它丢掉（保存按钮的显隐就是看 dirty.any）。
+      keys: Object.keys(state.keys || {}).length > 0,
       any: false,
     };
-    dirty.any = dirty.models || dirty.agent || dirty.identity;
+    dirty.any = dirty.models || dirty.agent || dirty.identity || dirty.keys;
     return { body, dirty };
   }
 

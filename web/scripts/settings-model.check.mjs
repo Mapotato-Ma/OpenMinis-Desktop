@@ -67,6 +67,10 @@ test('规则 2：只在真的敲了密钥时才带 apiKey；留空 = 保持已�
   assert.equal(body.providers.find((p) => p.id === 'p2').apiKey, 'sk-typed');
   assert.ok(!('apiKey' in body.providers.find((p) => p.id === 'p1')), '没敲过的那个不该带上');
   assert.equal(dirty.models, false, '填密钥不算"改了服务商配置"以外的脏 —— 但它确实该亮未保存');
+  // 以前这里就到此为止了：dirty.any 不看 keys，于是"只填密钥"时保存按钮根本不出现
+  // （按钮显隐就是看 dirty.any），关面板时那个「有未保存的改动」提示也不拦 → 密钥静默丢。
+  assert.equal(dirty.keys, true, '刚敲进去的密钥必须算未保存');
+  assert.equal(dirty.any, true, '只填密钥也要点亮保存按钮');
 
   // 敲了又清空 → 回到"保持不动"
   s = M.reduce(s, { type: 'provider/setKey', id: 'p2', key: '' });
@@ -281,4 +285,13 @@ test('未知 reason 也要有兜底文案（服务端以后加了新原因）', 
   assert.equal(spec.kind, 'warn');
   assert.ok(spec.title.length > 0);
   assert.equal(spec.sub, '新原因');
+});
+
+test('只敲密钥、别的都没动 → 保存按钮必须出现（否则关面板就把密钥丢了）', () => {
+  const { dirty } = M.toPayload(M.reduce(fresh(), { type: 'provider/setKey', id: 'p1', key: 'sk-only' }));
+  assert.equal(dirty.any, true);
+  assert.equal(dirty.keys, true);
+  assert.equal(dirty.models, false, '服务商配置本身没改');
+  // 保存过一次之后（load 重建状态）就干净了 —— 密钥不在服务端回包里，靠重建来清
+  assert.equal(M.toPayload(M.load(serverPayload(), null)).dirty.any, false);
 });

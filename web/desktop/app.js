@@ -242,7 +242,7 @@ function connect() {
   };
   sock.onclose = (ev) => {
     state.wsReady = false;
-    state.streaming = false;
+    setStreaming(false);   // 统一入口：裸改 state.streaming 会让发送键停在"停止"图标
     if (ev && ev.code === 4401) {
       setWsStatus('offline', '已锁定');
       toast('服务端已锁定，请在设置中解锁', 'err');
@@ -736,6 +736,9 @@ async function selectSession(id) {
   emptyNode().style.display = 'none';
   try {
     const data = await api(`/chats/sessions/${encodeURIComponent(id)}/messages`);
+    // 归属校验：快点 A 再点 B 时，A 的响应后到会把 B 的消息区覆盖成 A 的内容
+    // （标题是 B、消息是 A，再发消息还会发给 B）。同文件 healthSeq/revealToken 是同款写法。
+    if (state.sessionId !== id) return;
     renderMessages((data && data.messages) || []);
   } catch (e) {
     toast('消息加载失败: ' + e.message, 'err');
@@ -1028,9 +1031,12 @@ function promptForRoot() {
 }
 
 async function loadTree(path = '', container = $('fileTree'), depth = 2) {
+  // 归属校验：启动 / 刷新 / 切工作区三处都会调它，旧根的响应后到会把新树覆盖掉。
+  const seq = (state.treeSeq = (state.treeSeq || 0) + 1);
   container.innerHTML = '<div class="tree-empty">加载中…</div>';
   try {
     const data = await api(fsUrl('tree', { path, depth }));
+    if (state.treeSeq !== seq) return;
     container.innerHTML = '';
     const kids = (data && data.children) || [];
     if (!kids.length) {
@@ -1039,6 +1045,7 @@ async function loadTree(path = '', container = $('fileTree'), depth = 2) {
     }
     container.appendChild(buildTreeNodes(kids, container));
   } catch (e) {
+    if (state.treeSeq !== seq) return;
     container.innerHTML = '';
     container.appendChild(el('div', 'tree-empty', '无法读取工作目录: ' + e.message));
   }
@@ -1464,6 +1471,9 @@ function termAppend(text) {
 
 /* ── inspector tabs ──────────────────────────────────────────────────── */
 function switchTab(name) {
+  // 没有对应面板就直接忽略：命令面板与持久化页签里可能残留已删掉的面板名，
+  // 照原样切会把所有面板都取消激活 → 左栏整块空白，看着像界面坏了。
+  if (!document.querySelector(`.tab-panel[data-panel="${name}"]`)) return;
   document.querySelectorAll('.ab-btn[data-ab]').forEach((b) => b.classList.toggle('active', b.dataset.ab === name));
   document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === name));
   $('inspector').classList.remove('hidden');
@@ -1550,8 +1560,6 @@ function paletteCommands() {
     { kind: 'action', label: '运行信息 / 诊断', run: () => showInfo() },
     { kind: 'action', label: '打开工作目录', run: () => openWorkspace() },
     { kind: 'tab', label: '面板：文件', run: () => switchTab('files') },
-    { kind: 'tab', label: '面板：代码', run: () => switchTab('code') },
-    { kind: 'tab', label: '面板：变更', run: () => switchTab('diff') },
     { kind: 'tab', label: '面板：信息', run: () => switchTab('info') },
   ];
   for (const s of state.sessions.slice(0, 60)) {
@@ -2149,7 +2157,9 @@ function pluginRow(p) {
     toggle.setAttribute('variant', p.enabled ? 'neutral' : 'brand');
     toggle.textContent = p.enabled ? '停用' : '启用';
     toggle.addEventListener('click', async () => {
-      try { await api(`/plugins/${encodeURIComponent(p.id)}/${p.enabled ? 'disable' : 'enable'}`, { method: 'POST' });
+      // 后端动作词表是 start/stop/restart（plugins_api.py 的 plugin_action），不是
+      // enable/disable —— 发错词必然 404「不认识的动作」，这个按钮此前点一次错一次。
+      try { await api(`/plugins/${encodeURIComponent(p.id)}/${p.enabled ? 'stop' : 'start'}`, { method: 'POST' });
         toast('已' + (p.enabled ? '停用' : '启用')); await loadPlugins();
       } catch (e) { toast('操作失败：' + e.message, 'err'); }
     });
@@ -2240,8 +2250,12 @@ async function loadKnowledge() {
       if (it.source) main.appendChild(el('div', 'list-desc dim mono', it.source));
       row.appendChild(main);
       box.appendChild(row);
+    settings.knowledgeLoaded = true;
     }
-  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+  } catch (e) {
+    settings.knowledgeLoaded = false;   // 失败要允许重试
+    box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message));
+  }
 }
 $('knowledgeQuery').addEventListener('input', () => { clearTimeout(knowledgeTimer); knowledgeTimer = setTimeout(loadKnowledge, 250); });
 $('btnKnowledgeRefresh').addEventListener('click', loadKnowledge);
@@ -2271,8 +2285,12 @@ async function loadMarketplace() {
         row.appendChild(acts);
       }
       box.appendChild(row);
+    settings.marketplaceLoaded = true;
     }
-  } catch (e) { box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message)); }
+  } catch (e) {
+    settings.marketplaceLoaded = false;   // 失败要允许重试
+    box.innerHTML = ''; box.appendChild(el('div', 'empty-note', '加载失败：' + e.message));
+  }
 }
 $('btnMktInstall').addEventListener('click', async () => {
   const url = $('mktUrl').value.trim();
@@ -2522,6 +2540,15 @@ function wire() {
   });
   $('soulBody').addEventListener('input', updateSoulCounter);
   $('btnSaveSoul').addEventListener('click', saveSoul);
+  // 人格 5 个字段以前只有 soulBody 有监听（还是为了数字符），其它字段改了界面毫无反应：
+  // 保存按钮不亮、关闭护栏不问 —— 配合「人格不进草稿」就是静默丢数据。现在每次输入都重算。
+  for (const id of ['soulName', 'soulEmoji', 'soulStyle', 'soulLang', 'soulBody']) {
+    const node = $(id);
+    if (!node || node.dataset.soulHook) continue;
+    node.dataset.soulHook = '1';
+    node.addEventListener('input', updateDirtyUI);
+    node.addEventListener('change', updateDirtyUI);   // wa-select 走 change
+  }
   $('btnReloadSoul').addEventListener('click', loadSoul);
   $('btnResetSoul').addEventListener('click', resetSoul);
   { const b = $('btnDownloadLogs'); if (b) b.addEventListener('click', downloadLogs); }
@@ -2529,6 +2556,8 @@ function wire() {
   { const b = $('btnClearData'); if (b) b.addEventListener('click', clearAllData); }
   { const b = $('btnFactoryReset'); if (b) b.addEventListener('click', factoryReset); }
   { const b = $('btnCheckUpdate'); if (b) b.addEventListener('click', checkUpdate); }
+  // 顶栏那个「危险模式已开启」芯片以前是个死按钮：是 <button>、有 hover 反馈却没人监听
+  { const c = $('dangerChip'); if (c) c.addEventListener('click', () => openSettings('guard')); }
   { const b = $('btnEnvAdd'); if (b) b.addEventListener('click', envAdd); }
   { const b = $('btnApplyUpdate'); if (b) b.addEventListener('click', applyUpdate); }
   { const b = $('btnRestartUpdate'); if (b) b.addEventListener('click', restartForUpdate); }
@@ -2854,7 +2883,9 @@ function sview() {
 
 /** 脏判定：{models, agent, identity, identities:[id], any} */
 function sdirty() {
-  return SettingsModel.toPayload(settings.model).dirty;
+  const d = SettingsModel.toPayload(settings.model).dirty;
+  if (soulDirty()) { d.soul = true; d.any = true; }   // 人格不在草稿里，见 soulDirty()
+  return d;
 }
 
 async function openSettings(pane) {
@@ -3300,8 +3331,10 @@ function switchSettingsPane(name) {
   if (name === 'guard') loadGuard();
   if (name === 'plugins') loadPlugins();
   if (name === 'scheduled') loadScheduled();
-  if (name === 'knowledge' && !settings.knowledgeLoaded) { settings.knowledgeLoaded = true; loadKnowledge(); }
-  if (name === 'marketplace' && !settings.marketplaceLoaded) { settings.marketplaceLoaded = true; loadMarketplace(); }
+  // 标记只在**加载成功**时置位（见 loadKnowledge/loadMarketplace）：以前在请求前置位，
+  // 一次失败面板就永远停在「加载失败」，只能重启应用才能再试。
+  if (name === 'knowledge' && !settings.knowledgeLoaded) loadKnowledge();
+  if (name === 'marketplace' && !settings.marketplaceLoaded) loadMarketplace();
   if (name === 'usage') loadUsage();
   if (name === 'about') { loadAbout(); loadUpdate(); }
   if (name === 'interface') renderInterfacePane();
@@ -3955,6 +3988,11 @@ async function saveSettings({ silent } = {}) {
   // 的身份」这些规则都在那边，并有 node 测试盯着。
   const { body } = SettingsModel.toPayload(settings.model);
 
+  // 人格走的是另一条路（/system/soul），但它和别的设置共用这一个「保存」按钮 ——
+  // 用户不会知道有两套。所以在这里一并提交，否则改完人格点保存会静默丢失。
+  let ok = true;
+  if (soulDirty()) ok = await saveSoul({ silent: true });
+
   try {
     const data = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
     settings.data = data;
@@ -3962,8 +4000,8 @@ async function saveSettings({ silent } = {}) {
     // 发回来」的约定一致，客户端从不需要搬运密文。
     settings.model = SettingsModel.load(data, null);
     renderSettings();
-    if (!silent) toast('已保存');
-    return true;
+    if (!silent && ok) toast('已保存');
+    return ok;
   } catch (e) {
     toast('保存失败: ' + e.message, 'err');
     return false;
@@ -4020,10 +4058,34 @@ async function loadSoul() {
     $('soulBody').value = d.body || '';
     settings.soulLoaded = true;
     settings.soulLimit = d.limit || null;
+    settings.soulServer = soulForm();   // 基线：用来算「人格改过没有」
     updateSoulCounter();
   } catch (e) {
     toast('人格加载失败: ' + e.message, 'err');
   }
+}
+
+/** 人格表单的当前值 —— 字段名与保存载荷一致，方便直接比较。 */
+function soulForm() {
+  return {
+    name: $('soulName').value.trim(),
+    emoji: $('soulEmoji').value.trim(),
+    style: $('soulStyle').value.trim(),
+    lang: $('soulLang').value,
+    body: $('soulBody').value,
+  };
+}
+
+/** 人格有没有未保存的改动。
+ *  人格**不在草稿模型里**（它走 DOM 直读 + /system/soul 这条独立的路），
+ *  所以必须单独算：不补这一步，用户改完人格点顶部「保存」会静默丢失，
+ *  关闭设置时的「有未保存的改动」提示也不会拦（它问的是 sdirty()）。 */
+function soulDirty() {
+  const s = settings.soulServer;
+  if (!s) return false;
+  const f = soulForm();
+  return f.name !== s.name || f.emoji !== s.emoji || f.style !== s.style
+    || f.lang !== s.lang || f.body !== s.body;
 }
 
 function updateSoulCounter() {
@@ -4037,7 +4099,7 @@ function updateSoulCounter() {
   $('soulCounter').textContent = text;
 }
 
-async function saveSoul() {
+async function saveSoul({ silent } = {}) {
   const payload = {
     metadata: {
       name: $('soulName').value.trim() || 'Minis',
@@ -4052,9 +4114,12 @@ async function saveSoul() {
     const d = await api('/system/soul', { method: 'PUT', body: JSON.stringify(payload) });
     settings.soulLimit = d.limit || settings.soulLimit;
     updateSoulCounter();
-    toast('人格已保存');
+    await loadSoul();   // 回读：服务端会归一化（空名补默认、语言回落），不回读界面会骗人
+    if (!silent) toast('人格已保存');
+    return true;
   } catch (e) {
-    toast('保存失败: ' + e.message, 'err');
+    toast('人格保存失败: ' + e.message, 'err');
+    return false;
   }
 }
 
@@ -4573,7 +4638,13 @@ async function loadGuardMode() {
   try {
     const d = await api('/guard/mode');
     setGuardModeUi((d && d.mode) === 'danger');
-  } catch { /* 老内核没有这个接口：静默跳过 */ }
+  } catch (e) {
+    const m = String((e && e.message) || '');
+    if (/404|not found|不存在/i.test(m)) return;   // 老内核确实没有这个接口
+    // 读失败时勾选框会停在"正常模式"，而守卫可能一条都没在拦 —— 这属于"不知道"，
+    // 不能显示成一个确定的值。
+    toast('沙箱模式状态读取失败：' + m + '（界面显示的"正常模式"可能不准）', 'err');
+  }
 }
 
 function setGuardModeUi(danger) {
