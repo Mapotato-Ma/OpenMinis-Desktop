@@ -64,6 +64,24 @@ class WindowAPI:
         except Exception:  # pragma: no cover
             logger.debug("destroy unsupported", exc_info=True)
 
+    def zoom_capability(self) -> dict[str, Any]:
+        """本窗口的原生缩放能力 —— 问的是**本进程**的 WebView2 控件。
+
+        为什么走桥而不走 HTTP：缩放是**每个窗口各自的事**。HTTP 那条路由后端
+        进程处理，而它只能操作自己进程里的控件 —— 双开（第二个实例复用后端、
+        自己开窗口）时它会把缩放设到**别的窗口**上却回 ok=True，用户看到的是
+        「百分数变了、窗口不动」（v0.4.23 修的就是这个静默谎报）。
+        """
+        from . import native_zoom  # noqa: PLC0415
+
+        return native_zoom.capability()
+
+    def set_zoom(self, factor: Any) -> dict[str, Any]:
+        """把**本窗口**的缩放交给 WebView2；只有「设进去 + 读回来一致」才 ok=True。"""
+        from . import native_zoom  # noqa: PLC0415
+
+        return native_zoom.set_zoom(factor)
+
     def pick_folder(self, initial: str = "") -> str:
         """Open the native "choose a folder" dialog; return the path, or "".
 

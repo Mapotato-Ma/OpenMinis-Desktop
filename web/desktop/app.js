@@ -2933,10 +2933,33 @@ function setZoomMode(mode, reason) {
   renderInterfacePane();
 }
 
-async function probeNativeZoom() {
+/* 原生缩放优先问**本窗口**的宿主桥（`window.pywebview.api`，即 pywebview 的
+   js_api）。HTTP 那条路由后端进程处理、只作用于它自己的窗口 —— 双开时会把缩放
+   设到**别人的窗口**上还回 ok:true（v0.4.23 修的就是这个静默谎报）。
+   桥不在（浏览器 / --upstream-ui）时才退回 HTTP。 */
+function zoomBridge() {
+  const api = window.pywebview && window.pywebview.api;
+  return api && typeof api.set_zoom === 'function' ? api : null;
+}
+
+/* 桌面窗口里 pywebview 会在页面加载后补上 window.pywebview；启动时我们可能比它
+   早。等一小会儿，别因为抢跑就退回 HTTP —— 那正是会落到别人窗口上的那条路。 */
+function waitForZoomBridge(waitMs) {
+  const ready = zoomBridge();
+  if (ready || !window.__OPENMINIS_DESKTOP__) return Promise.resolve(ready);
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(zoomBridge()); } };
+    window.addEventListener('pywebviewready', done, { once: true });
+    setTimeout(done, waitMs > 0 ? waitMs : 0);
+  });
+}
+
+async function probeNativeZoom(waitMs) {
+  const bridge = await waitForZoomBridge(typeof waitMs === 'number' ? waitMs : 3000);
   let cap = null;
   try {
-    cap = await api('/desktop/zoom');
+    cap = bridge ? await bridge.zoom_capability() : await api('/desktop/zoom');
   } catch (e) {
     setZoomMode('css', '取不到宿主的缩放能力：' + e.message);
     return;
@@ -2981,8 +3004,13 @@ function nativeZoomTookThisWindow(beforeW, z) {
 
 async function pushNativeZoom(z, verify) {
   const before = window.innerWidth;
+  /* 优先走本窗口的宿主桥：缩放是每个窗口各自的事（HTTP 那条路会落到后端进程
+     自己的窗口上，双开时就是「百分数变了、窗口不动」）。 */
+  const bridge = zoomBridge();
   try {
-    const res = await api('/desktop/zoom', { method: 'POST', body: JSON.stringify({ factor: z }) });
+    const res = bridge
+      ? await bridge.set_zoom(z)
+      : await api('/desktop/zoom', { method: 'POST', body: JSON.stringify({ factor: z }) });
     if (!res || !res.ok) { fallbackToCssZoom((res && res.reason) || '宿主拒绝了这次缩放'); return; }
     if (!verify) { setZoomMode('native', ''); return; }
     if (await nativeZoomTookThisWindow(before, z)) { UiPrefs.trustNativeZoom(true); setZoomMode('native', ''); return; }

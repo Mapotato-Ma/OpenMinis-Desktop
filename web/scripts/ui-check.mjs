@@ -456,35 +456,52 @@ test('记忆页：读 mtime（后端字段）、能改能删、有整理入口',
  */
 function zoomFns() {
   const src = read('app.js');
-  const start = src.indexOf('function requestNativeZoom(');
+  const start = src.indexOf('function zoomBridge(');
   const end = src.indexOf('function fallbackToCssZoom(');
   assert.ok(start >= 0 && end > start, '抠不出缩放这段（函数被改名或挪走了？）');
   const body = src.slice(start, end);
   return function make(env) {
     return new Function(
       'api', 'setZoomMode', 'fallbackToCssZoom', 'UiPrefs', 'window', 'setTimeout',
-      `${body}; return { requestNativeZoom, pushNativeZoom, nativeZoomTookThisWindow };`,
+      `${body}; return { probeNativeZoom, requestNativeZoom, pushNativeZoom, nativeZoomTookThisWindow };`,
     )(env.api, env.setZoomMode, env.fallbackToCssZoom, env.UiPrefs, env.window, setTimeout);
   };
 }
 
 function zoomEnv(opts) {
-  const moves = !!(opts && opts.moves);
-  const env = { posts: [], trust: [], fallbacks: [], modes: [], window: { innerWidth: 1200 } };
-  env.api = async (path, o) => {
-    const z = JSON.parse(o.body).factor;
-    env.posts.push({ path, factor: z });
-    // moves=true 模拟「后端就是本窗口的进程」：引擎级缩放会让 CSS px 视口变小。
-    // moves=false 模拟双开：后端缩的是另一个进程的窗口，本窗口宽度不变。
-    if (moves) env.window.innerWidth = Math.round(1200 / z);
-    return { ok: true, applied: z };
+  const o = opts || {};
+  const env = {
+    calls: [], posts: [], bridgeCalls: [], trust: [], fallbacks: [], modes: [],
+    window: { innerWidth: 1200 },
   };
+  const setWidth = (z) => { if (o.moves) env.window.innerWidth = Math.round(1200 / z); };
+  env.api = async (path, req) => {
+    const factor = req && req.body ? JSON.parse(req.body).factor : null;
+    env.calls.push({ path, factor });
+    if (factor != null) { env.posts.push({ path, factor }); setWidth(factor); }
+    return { ok: true, handle: true, ready: true, applied: factor == null ? 1.728 : factor };
+  };
+  if (o.bridge) {
+    env.window.__OPENMINIS_DESKTOP__ = true;
+    env.window.addEventListener = () => {};
+    env.window.pywebview = {
+      api: {
+        set_zoom: async (z) => { env.bridgeCalls.push(z); setWidth(z); return { ok: true, applied: z }; },
+        zoom_capability: async () => {
+          env.bridgeCaps = (env.bridgeCaps || 0) + 1;
+          return { handle: true, ready: true, applied: 1.728 };
+        },
+      },
+    };
+  }
   env.setZoomMode = (m, why) => env.modes.push([m, why]);
   env.fallbackToCssZoom = (why) => env.fallbacks.push(why);
   env.UiPrefs = {
-    trusted: !!(opts && opts.trusted),
+    trusted: !!o.trusted,
     isNativeTrusted() { return this.trusted; },
     trustNativeZoom(ok) { env.trust.push(ok); this.trusted = !!ok; return !!ok; },
+    setNativeZoomHook(fn) { env.hook = fn; this.trusted = false; },
+    applyAll() { env.applyAlls = (env.applyAlls || 0) + 1; return {}; },
   };
   return env;
 }
@@ -517,4 +534,39 @@ test('缩放：回到 100% 时视口本来就不变，不能误判成「没落�
   await new Promise((r) => setTimeout(r, 300));
   assert.deepEqual(env.trust, [true], '100% 没有可观测差异，判成功即可');
   assert.equal(env.fallbacks.length, 0);
+});
+
+test('缩放：桌面窗口优先走**本窗口**的宿主桥，一个 HTTP 都不发', async () => {
+  // 双开的根因就是 HTTP 那条路由后端进程处理、只能作用它自己的窗口。
+  // 桥（window.pywebview.api）在**本进程**里，缩的必然是本窗口。
+  const env = zoomEnv({ moves: true, bridge: true });
+  const fns = zoomFns()(env);
+  await fns.probeNativeZoom(0);
+  assert.equal(env.bridgeCaps, 1, '有桥就该问桥要能力（HTTP 是后端进程的视角）');
+  assert.deepEqual(env.calls, [], '有桥时不该发任何 HTTP 请求');
+  await fns.pushNativeZoom(1.2, true);
+  assert.deepEqual(env.bridgeCalls, [1.2], '缩放该走本窗口的桥');
+  assert.deepEqual(env.calls, [], '有桥时仍然不该有 HTTP —— 那条路会落到别的窗口上');
+  assert.deepEqual(env.trust, [true], '本窗口视口真的变了 → 标信任');
+  assert.equal(env.fallbacks.length, 0);
+});
+
+test('缩放：没有桥（浏览器 / --upstream-ui）时才退回 HTTP', async () => {
+  const env = zoomEnv({ moves: true, bridge: false });
+  env.window.__OPENMINIS_DESKTOP__ = false;
+  const fns = zoomFns()(env);
+  await fns.probeNativeZoom(0);
+  assert.equal(env.calls.length, 1, '没有桥才用 HTTP 探能力');
+  await fns.pushNativeZoom(1.2, true);
+  assert.deepEqual(env.posts, [{ path: '/desktop/zoom', factor: 1.2 }], '没有桥才走 HTTP 缩放');
+  assert.deepEqual(env.trust, [true]);
+});
+
+test('缩放：桥存在但没落到本窗口时，照样回落 CSS（不因为"有桥"就盲目信任）', async () => {
+  const env = zoomEnv({ moves: false, bridge: true });
+  const fns = zoomFns()(env);
+  await fns.pushNativeZoom(1.2, true);
+  assert.deepEqual(env.bridgeCalls, [1.2]);
+  assert.deepEqual(env.trust, [], '桥回了 ok 但本窗口视口没变 → 不许标信任');
+  assert.equal(env.fallbacks.length, 1, '必须回落 CSS，否则用户看到的就是"缩放失效"');
 });
