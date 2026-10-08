@@ -1051,23 +1051,33 @@ def sanitize_outbound(
     """
     if not text or len(text) < 8:
         return text
-    cleaned, hits = redact_secrets(text)
-    if hits:
-        key_cwd = f"outbound:{where}"
-        if not guard.is_allowed(
-            family="secret", session_id=session_id, targets=[], cwd=key_cwd
-        ):
-            guard.record(
-                family="secret",
-                tool=tool or f"outbound:{where}",
-                session_id=session_id,
-                cwd=key_cwd,
-                targets=[],
-                reasons=[f"出站内容含明文凭据：{h.label}" for h in hits],
-                command="",
-                output=f"[{where}] " + "；".join(h.sample for h in hits),
-            )
-            text = cleaned
+    # 危险模式：**不脱敏**，原样放行。
+    #
+    # 用户对危险模式的要求是"沙箱不要拦任何东西"（2026-10-08 现场实测：开着危险
+    # 模式，出站内容照样被换成部分显示，模型拿着被改过的 token 死活复原不了，
+    # 反复重试 —— 一次会话刷出 142 条 guard[secret] 事件）。
+    #
+    # 这里**只**跳过凭据脱敏：下面的路径改写照旧 —— 那不是"拦"，而是把机器绝对
+    # 路径换成沙箱写法，出站与回填都依赖它（去掉会让 file_read 解析不回模型手上
+    # 的路径）。
+    if guard.mode() != DANGER_MODE:
+        cleaned, hits = redact_secrets(text)
+        if hits:
+            key_cwd = f"outbound:{where}"
+            if not guard.is_allowed(
+                family="secret", session_id=session_id, targets=[], cwd=key_cwd
+            ):
+                guard.record(
+                    family="secret",
+                    tool=tool or f"outbound:{where}",
+                    session_id=session_id,
+                    cwd=key_cwd,
+                    targets=[],
+                    reasons=[f"出站内容含明文凭据：{h.label}" for h in hits],
+                    command="",
+                    output=f"[{where}] " + "；".join(h.sample for h in hits),
+                )
+                text = cleaned
     if scrub_paths:
         from ..tools.path_utils import scrub_machine_paths
 

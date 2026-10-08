@@ -704,6 +704,68 @@ async def _safe_send(client_id: str, payload: dict[str, Any]) -> None:
 #: 否则「暂停」帧要等本轮结束才被读到，按钮就形同虚设。
 _RUNNING_CHATS: dict[str, asyncio.Task[None]] = {}
 
+#: 同一条连接上正在跑的轮次，key = client_id。
+#:
+#: **为什么还要这一份**：新会话的第一条消息**没有 session_id**（id 是服务端在
+#: ``_run_chat`` 里才创建的，随 ``chatSession`` 帧回给界面）。那时若只按会话 id
+#: 登记，这一轮就**根本没进表** —— 界面随后从帧里学到 id，用户按停止时带着这个
+#: id 来查，查不到就回「没在跑」，模型在后台继续。2026-10-08 现场日志：
+#: ``stop requested but nothing is running (891db6…)``，然后工具继续跑到用户
+#: 重启 App 为止。按连接登记是**兜底**：用户按的是自己的停止键，停就是了。
+_RUNNING_BY_CLIENT: dict[str, tuple[str, asyncio.Task[None]]] = {}
+
+
+def _register_running(
+    sid: str, task: asyncio.Task[None], client_id: str = ""
+) -> None:
+    """登记一个正在跑的轮次（会话 id 生效后由 ``_run_chat`` 再调一次）。
+
+    同一个 id 被新任务覆盖时，旧任务的 done 回调**不能**误删新任务 ——
+    所以清理时先核对自己是不是当前那个。
+    """
+
+    def _cleanup(
+        t: asyncio.Task[None], key: str = sid, cid: str = client_id
+    ) -> None:
+        if key and _RUNNING_CHATS.get(key) is t:
+            _RUNNING_CHATS.pop(key, None)
+        entry = _RUNNING_BY_CLIENT.get(cid)
+        if cid and entry is not None and entry[1] is t:
+            _RUNNING_BY_CLIENT.pop(cid, None)
+
+    task.add_done_callback(_cleanup)
+    if sid:
+        _RUNNING_CHATS[sid] = task
+    if client_id:
+        _RUNNING_BY_CLIENT[client_id] = (sid, task)
+
+
+def _dismiss_pending_confirms() -> int:
+    """把还没被回答的沙箱确认弹窗按「拒绝」结掉（停止时用）。
+
+    不这么做的话：用户按停止，界面还挂着一个等他点的确认框，而等它的那个工具
+    已经取消了 —— 点下去没有任何反应，只能重启界面。
+    """
+    n = 0
+    for fut in list(_PENDING_CONFIRM.values()):
+        if not fut.done():
+            fut.set_result("deny")
+            n += 1
+    return n
+
+
+def _interrupt_session_shell(sid: str) -> str:
+    """杀掉该会话正在跑的命令（连子孙一起）。无 sid 时什么也不做。"""
+    if not sid:
+        return ""
+    try:
+        from ..tools.shell_execute_tool import get_coordinator
+
+        return get_coordinator().interrupt(f"db-{sid}")
+    except Exception:  # pragma: no cover - 中断失败不该影响停止帧的回应
+        logger.debug("session shell interrupt failed", exc_info=True)
+        return ""
+
 #: 即发即忘的后台任务（记忆整理等）。asyncio 只持弱引用，不存一份的话
 #: 任务可能在跑完前被 GC 回收。
 _BG_TASKS: set[asyncio.Task[Any]] = set()
@@ -788,24 +850,43 @@ async def _handle_stop(client_id: str, msg: dict[str, Any]) -> None:
     停止按钮从来没生效过）。现在把三种情况分开说清楚。
     """
     sid = str(msg.get("session_id") or msg.get("sessionId") or "").strip()
-    if not sid:
-        logger.warning("stop frame arrived without a session id — refused")
-        await _safe_send(client_id, {
-            "type": "error",
-            "error": "停止失败：这一帧没有带会话 id，服务端不知道该停哪一轮",
-        })
-        return
-    task = _RUNNING_CHATS.get(sid)
-    stopped = task is not None and not task.done()
+
+    # 先按会话 id 找；找不到再按**连接**找 —— 用户按的是自己的停止键，
+    # 这一轮到底登记在哪个 id 下（新会话首轮可能还没 id）不该影响"停"这件事。
+    registered = ""
+    task = _RUNNING_CHATS.get(sid) if sid else None
+    if task is not None and task.done():
+        task = None
+    if task is None:
+        entry = _RUNNING_BY_CLIENT.get(client_id)
+        if entry is not None and not entry[1].done():
+            registered, task = entry
+
+    stopped = task is not None
     if stopped:
-        task.cancel()  # type: ignore[union-attr]
-        # asyncio.wait 不会把子任务的取消抛给当前协程（`await task` 会）。
-        await asyncio.wait({task})  # type: ignore[arg-type]
-        logger.info("chat stopped by client (%s)", sid)
+        assert task is not None
+        task.cancel()
+        dismissed = _dismiss_pending_confirms()
+        # 取消协程只停住「等待」：命令本身还在持久 shell 里跑，一次性兜底
+        # 还占着工作线程。这里把进程树真收掉，才对得起按钮上的"停止"。
+        # 会话 id 用登记里的那个（权威），帧里带的只当参考。
+        note = _interrupt_session_shell(registered or sid)
+        try:
+            # asyncio.wait 不会把子任务的取消抛给当前协程（`await task` 会）。
+            # 加超时：工具卡在不可中断的线程里时，别把收帧循环一起挂住。
+            await asyncio.wait_for(asyncio.wait({task}), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("stop: turn did not unwind within 5s (%s)", sid or client_id)
+        logger.info(
+            "chat stopped by client (%s) — killed: %s; dismissed confirms: %s",
+            registered or sid, note or "n/a", dismissed,
+        )
     else:
-        logger.info("stop requested but nothing is running (%s)", sid)
+        logger.info("stop requested but nothing is running (%s)",
+                    sid or f"client={client_id}")
     await _safe_send(
-        client_id, {"type": "done", "sessionId": sid, "stopped": stopped}
+        client_id,
+        {"type": "done", "sessionId": sid or registered, "stopped": stopped},
     )
 
 
@@ -958,9 +1039,9 @@ async def _handle_chat(client_id: str, msg: dict[str, Any]) -> None:
         )
         return
     task = asyncio.create_task(_run_chat(client_id, msg))
-    if sid:
-        _RUNNING_CHATS[sid] = task
-        task.add_done_callback(lambda _t, key=sid: _RUNNING_CHATS.pop(key, None))
+    # 按连接一并登记：新会话的首轮**还没有 session_id**（id 由 _run_chat 创建），
+    # 只按 id 登记的话那一轮根本不进表，用户按停止就查不到（2026-10-08 现场）。
+    _register_running(sid, task, client_id)
 
 
 async def _auto_organize_after_chat(every: int) -> None:
@@ -999,6 +1080,12 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
         await _safe_send(client_id,
             {"type": "chatSession", "sessionId": sid, "title": created.title},
         )
+
+    # sid 此刻才真正确定（新会话是刚创建的）—— 补登记一次，让「停止」能按
+    # 会话 id 找到这一轮，而不是只能靠连接兜底。
+    _me = asyncio.current_task()
+    if _me is not None:
+        _register_running(sid, _me, client_id)
 
     store = SettingsStore.get()
 

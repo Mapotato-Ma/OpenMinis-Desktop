@@ -295,6 +295,24 @@ def _resolve_session_host_path(session_id: str, path: str) -> Path | None:
             if resolved_abs == er or er in resolved_abs.parents:
                 return resolved_abs
 
+    # 走到这里说明它是一个**根路径**（POSIX 的 ``/x``，Windows 的 ``\x`` 或
+    # ``C:\x``），但既不在工作区、也不在只读根里 —— **不能再当"工作区相对
+    # 路径"去猜**。
+    #
+    # 猜的后果是谎报：用户实测 ``/tmp/baidu_shot.png`` 明明就在那儿（shell 里
+    # ``cp`` 回的是 "are the same file"），read_image 却报 "File not found" ——
+    # 因为它被拼成 ``<工作区>/tmp/baidu_shot.png`` 去找了。回 None，上层就能
+    # 说清"这个路径不在工作区里，先拷进来"，模型才知道下一步该干什么。
+    #
+    # 只对**读**路径生效（file_read / read_image 共用这份实现）；
+    # file_write / file_edit 用自己那份，写侧语义不变。
+    if not rooted and (
+        candidate.startswith(("/", "\\"))
+        or (len(candidate) > 1 and candidate[1] == ":")
+    ):
+        logger.warning("file_read rejected absolute path outside roots: %s", path)
+        return None
+
     candidate = candidate.lstrip("/") or ""
 
     # Reject escape attempts before touching the filesystem.

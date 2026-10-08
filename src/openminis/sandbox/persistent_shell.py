@@ -29,18 +29,72 @@ import asyncio
 import os
 import re
 import shutil
+import signal
 import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from openminis.core.context import app_context
 from openminis.core.logging import get_logger
 
-__all__ = ["PersistentShell", "ShellSpec", "detect_shell_spec"]
+__all__ = ["PersistentShell", "ShellSpec", "detect_shell_spec", "kill_process_tree", "new_group_kwargs"]
 
 logger = get_logger(__name__)
+
+#: Windows ``CREATE_NEW_PROCESS_GROUP`` —— 让 shell 独占一个进程组，
+#: ``taskkill /T`` 才有东西可连坐。
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def new_group_kwargs() -> dict[str, Any]:
+    """spawn 参数：把 shell 放进**独立进程组**，中断时才能连子孙一起杀。
+
+    POSIX 上如果不开新会话，``os.getpgid(pid)`` 就是我们自己的组 ——
+    ``killpg`` 会把自己也杀掉（这不是理论风险，是最容易写出来的 bug）。
+    """
+    if os.name == "nt":
+        return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def kill_process_tree(pid: int, proc: Any = None) -> str:
+    """同步杀掉 ``pid`` 的整棵进程树，返回一句人话（给日志/工具结果用）。
+
+    **为什么必须连子孙一起杀**：真正在干活的是 shell 底下的 curl / python /
+    node。``proc.kill()`` 只杀 shell 本身，它们会变成孤儿继续跑 —— 用户按了
+    「停止」，命令却还在后台烧 CPU、还在往外发请求。这是「停止停不下来」的
+    另一半根因（2026-10-08 用户实测：按停止后工具仍在继续执行）。
+
+    **为什么不发 Ctrl-C**：这个 shell 的 stdin 是**管道**不是 tty，往里写
+    ``\\x03`` 构不成任何信号；Windows 上 ``terminate()`` 也只杀直接子进程。
+    """
+    if os.name == "nt":
+        try:
+            import subprocess as _sp
+
+            _sp.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=10,
+            )
+            return f"已终止进程树 (pid={pid})"
+        except Exception as exc:  # pragma: no cover - 杀不掉就退回单进程
+            logger.debug("taskkill failed: %s", exc)
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            return f"已终止进程组 (pid={pid})"
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            logger.debug("killpg failed (%s), falling back to proc.kill", exc)
+    if proc is not None:
+        try:
+            proc.kill()
+            return f"已终止进程 (pid={pid})"
+        except Exception as exc:  # pragma: no cover
+            logger.debug("proc.kill failed: %s", exc)
+    return f"无法终止进程 (pid={pid})"
 
 # [T-android-shell-death-diagnosability] Death-capture windows. The head must
 # comfortably hold proot's error line(s) printed BEFORE the multi-KB talloc leak
@@ -278,6 +332,8 @@ class PersistentShell:
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(self.cwd),
                 env=self._env,
+                # 独立进程组：中断时要能连子孙一起杀（见 kill_process_tree）。
+                **new_group_kwargs(),
             )
         except (OSError, FileNotFoundError) as exc:
             logger.error("PersistentShell[%s]: failed to spawn %s: %s",
@@ -452,12 +508,39 @@ class PersistentShell:
         try:
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError:
-            # Timeout — cancel pending, but don't kill the shell.
-            self._pending = None
+            # 超时不能只丢下等待 —— 那条命令**还在 shell 里跑**，它接下来的输出
+            # 会掺进下一条命令的回显里（现场症状：模型看到两段输出拼在一起，
+            # 以为命令写错了，然后换个写法再撞一次）。所以超时也把进程树收掉，
+            # 下一条命令从干净的 shell 重新开始。
+            note = self.interrupt_now()
+            logger.warning("PersistentShell[%s]: command timed out after %ss; %s",
+                           self.session_id, int(timeout), note)
             return f"[Command timed out after {int(timeout)}s]", 124
         except asyncio.CancelledError:
-            self._pending = None
+            # 用户按了「停止」：把这条工具调用**真的杀掉**，而不是只丢掉等待。
+            note = self.interrupt_now()
+            logger.info("PersistentShell[%s]: command cancelled by caller; %s",
+                        self.session_id, note)
             raise
+
+    def interrupt_now(self) -> str:
+        """同步杀掉当前命令（整棵进程树），并把这个 shell 标记为已死。
+
+        同步是**故意的**：调用点位于取消/超时处理里，那里任何 ``await`` 都可能
+        被第二次取消打断，于是「停止」又退化成「只丢下等待」。Windows 上
+        ``taskkill`` 要几百毫秒，这点阻塞换「真的停住」是划算的。
+
+        杀掉之后 shell 就没了 —— 下一条命令经 ``ensure_started()`` 自动重建
+        （约 1 秒 + 环境变量重注入），比留着一个脏 shell 强。
+        """
+        proc = self._process
+        self._dead = True
+        self._pending = None
+        self._process = None
+        if proc is None or proc.returncode is not None:
+            return "shell 已经停了"
+        return kill_process_tree(proc.pid, proc)
+
 
     # --- environment ------------------------------------------------------
     async def apply_environment(
@@ -506,17 +589,14 @@ class PersistentShell:
                 proc.stdin.close()
         except Exception:
             pass
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            return
+        # 连子孙一起杀：只 terminate() 会留下一堆孤儿 curl/python（见
+        # kill_process_tree 的说明）。
+        kill_process_tree(proc.pid, proc)
         try:
             await asyncio.wait_for(proc.wait(), 3.0)
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            logger.debug("PersistentShell[%s]: not reaped in 3s after kill",
+                         self.session_id)
 
 
 def _shell_quote(value: str) -> str:

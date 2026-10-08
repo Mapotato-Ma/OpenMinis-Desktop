@@ -14,12 +14,33 @@ PORT: 引擎在 ``tools/browser/driver.py``（自包含实现）。
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Optional
 
 from ..data.model.agent_tool_definition import AgentToolDefinition, AgentToolParam
 from .tool_execution_result import ToolExecutionResult
 
 __all__ = ["BrowserUseTool", "BROWSER_ACTIONS"]
+
+
+def _screenshot_dir(session_id: str) -> Optional[Path]:
+    """截图默认目录：本会话工作区下的 ``browser-shots/``。
+
+    必须是**工作区内**的目录，否则 read_image（只在工作区里解析路径）读不回来。
+    拿不到工作区就返回 None —— 那时退回驱动自带的默认值，宁可不改行为。
+    """
+    try:
+        from .shell_execute_tool import get_coordinator
+
+        base = Path(get_coordinator().cwd_for(session_id))
+    except Exception:  # pragma: no cover - 协调器不可用就不改默认值
+        return None
+    try:
+        target = base / "browser-shots"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    except Exception:  # pragma: no cover - 目录建不出来也别让工具炸
+        return None
 
 
 # Aligned with the Kotlin BrowserAction enum. Kept as a tuple so the order
@@ -235,6 +256,20 @@ class BrowserUseTool:
 
         tool_title = str(args.get("tool_title", BrowserUseTool.NAME))
         from .browser import driver
+
+        # 截图默认落在**会话工作区**里，而不是 POSIX 的 ``/tmp``。真机上踩出
+        # 来两个坑（2026-10-08）：
+        # 1. Windows 上 ``Path("/tmp/minis-shots")`` 是 ``\tmp\minis-shots``（盘根），
+        #    跟 shell 认的 ``%TEMP%`` 根本不是一回事；
+        # 2. 更要命的是**读不回来** —— read_image 只在会话工作区内解析路径，
+        #    截图落在外面就永远 "Cannot resolve path"。截图工具不能看等于白截。
+        # 模型显式给了 path 就照它的来（它可能有意放到别处）。
+        if str(args.get("action") or "") == "screenshot" and not str(
+            args.get("path") or ""
+        ).strip():
+            default_dir = _screenshot_dir(session_id)
+            if default_dir is not None:
+                args["path"] = str(default_dir)
 
         try:
             output = await driver.run(args)

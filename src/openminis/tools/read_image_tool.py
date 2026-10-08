@@ -112,7 +112,12 @@ class ReadImageTool:
             host = _resolve_session_host_path(session_id, path) or _resolve_global(path)
             if host is None:
                 return ToolExecutionResult(
-                    f"Error: Cannot resolve path: {path}", False, tool_title=tool_title
+                    f"Error: Cannot resolve path: {path}\n"
+                    "（图片只能从**会话工作区**里读。这个路径不在工作区内 —— "
+                    "先用 shell_execute 把它拷进工作区再读，例如 "
+                    "`cp <源文件> <工作区目录>/`；也可以让它把图直接存到工作区。）",
+                    False,
+                    tool_title=tool_title,
                 )
             if not host.exists():
                 return ToolExecutionResult(
@@ -203,6 +208,18 @@ def _resolve_global(path: str) -> Path | None:
         if candidate.startswith(prefix):
             candidate = candidate[len(prefix) :]
             break
+    else:
+        # 没命中沙箱前缀：**绝对路径不能当工作区相对路径去猜**。
+        #
+        # 猜的后果是谎报：用户实测 ``/tmp/baidu_shot.png`` 明明存在（``cp`` 回
+        # "are the same file"），read_image 却报 "File not found" —— 因为它被
+        # 当成 ``<工作区>/tmp/baidu_shot.png`` 去找了。回 None 让上层说清
+        # "这个路径不在工作区里"，模型才知道该先拷进来。
+        if candidate.startswith(("/", "\\")) or (
+            len(candidate) > 1 and candidate[1] == ":"
+        ):
+            logger.debug("read_image: absolute path outside sandbox: %s", path)
+            return None
     candidate = candidate.lstrip("/") or ""
     if not candidate:
         return None

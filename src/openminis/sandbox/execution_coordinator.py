@@ -19,7 +19,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from openminis.core.logging import get_logger
 from openminis.sandbox.persistent_shell import PersistentShell
@@ -61,6 +61,9 @@ class ExecutionCoordinator:
         # created inside that workspace instead of the global default
         # (``external_files_dir/<session_id>``).
         self._cwd_overrides: dict[str, Path] = {}
+        # 一次性兜底执行（持久 shell 起不来时）正在跑的子进程：取消/停止时要能
+        # 杀掉它 —— ``subprocess.run`` 在工作线程里，取消协程杀不动它。
+        self._fallback_procs: dict[str, Any] = {}
 
     def set_extra_env(self, env: dict[str, str]) -> None:
         """Replace the merged env applied to every newly created session shell.
@@ -213,6 +216,39 @@ class ExecutionCoordinator:
         self._cwd_overrides.pop(session_id, None)
         if shell is not None:
             await shell.stop()
+
+    def interrupt(self, session_id: str) -> str:
+        """把该会话**正在跑的命令**连子孙一起杀掉（用户按「停止」时调用）。
+
+        调用点是取消路径，所以这里是**同步**的：任何 ``await`` 都可能被第二次
+        取消打断，于是「停止」又退化成「只丢下等待」。返回一句人话给日志。
+
+        杀完 shell 就没了，下一条命令会自动重建（``ensure_started``）——
+        用户要的是「停下」，不是「保留那个脏 shell」。
+        """
+        notes: list[str] = []
+        shell = self._shells.pop(session_id, None)
+        if shell is not None:
+            notes.append(shell.interrupt_now())
+        proc = self._fallback_procs.pop(session_id, None)
+        if proc is not None:
+            try:
+                proc.kill()
+                notes.append("已终止一次性兜底进程")
+            except Exception as exc:  # pragma: no cover - 进程可能已经退出
+                logger.debug("fallback proc kill failed: %s", exc)
+        # 环境变量注入缓存跟着 shell 一起作废，下一条命令重新注入。
+        self._last_injected_env.pop(session_id, None)
+        self._last_injected_keys.pop(session_id, None)
+        return "；".join(notes) if notes else "没有正在跑的命令"
+
+    def register_fallback(self, session_id: str, proc: Any) -> None:
+        """登记「一次性兜底执行」的子进程，让停止按钮能一起收掉。"""
+        self._fallback_procs[session_id] = proc
+
+    def unregister_fallback(self, session_id: str, proc: Any) -> None:
+        if self._fallback_procs.get(session_id) is proc:
+            self._fallback_procs.pop(session_id, None)
 
     async def shutdown(self) -> None:
         for shell in list(self._shells.values()):

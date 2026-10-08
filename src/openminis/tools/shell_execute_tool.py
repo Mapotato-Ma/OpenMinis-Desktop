@@ -101,7 +101,7 @@ class ShellExecuteTool:
         self, session_id: str, command: str, timeout: int,
         env_extra: Optional[dict[str, str]] = None,
     ) -> Optional[tuple[str, int]]:
-        """持久 shell 失效时的一次性执行兜底（同步 subprocess，线程内跑）。
+        """持久 shell 失效时的一次性执行兜底（Popen + 工作线程等待）。
 
         返回 ``(output, exit_code)``；连兜底都失败（找不到 shell 等）返回
         ``None``，让上层继续走持久 shell 的失败提示。
@@ -111,7 +111,12 @@ class ShellExecuteTool:
         from .path_utils import workspace_root
 
         try:
-            from ..sandbox.persistent_shell import detect_shell_spec
+            from ..sandbox.persistent_shell import (
+                detect_shell_spec,
+                kill_process_tree,
+                new_group_kwargs,
+            )
+
             from ..core.logging import get_logger
 
             spec = detect_shell_spec()
@@ -122,39 +127,56 @@ class ShellExecuteTool:
         overrides = getattr(coordinator, "_cwd_overrides", None)
         if isinstance(overrides, dict):
             cwd = overrides.get(session_id) or str(workspace_root())
+        run_env = None
+        if env_extra:
+            import os as _os
+
+            run_env = {**_os.environ, **env_extra}
+        if spec.name == "cmd.exe":
+            argv = [spec.executable, "/d", "/s", "/c", command]
+        else:
+            argv = [spec.executable, "--noprofile", "--norc", "-c", command]
+        limit = max(float(timeout), 1.0)
         try:
-
-            def _run() -> tuple[str, int]:
-                run_env = None
-                if env_extra:
-                    import os as _os
-
-                    run_env = {**_os.environ, **env_extra}
-                if spec.name == "cmd.exe":
-                    argv = [spec.executable, "/d", "/s", "/c", command]
-                else:
-                    argv = [spec.executable, "--noprofile", "--norc", "-c", command]
-                proc = _sp.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=max(float(timeout), 1.0),
-                    cwd=cwd,
-                    env=run_env,
-                    errors="replace",
-                )
-                out = (proc.stdout or "") + (proc.stderr or "")
-                return out.strip() or "(no output)", proc.returncode
-
-            result = await asyncio.to_thread(_run)
-            logger.warning(
-                "PersistentShell[%s] unusable (exit=-1); one-shot fallback ran "
-                "the command (exit=%d)", session_id, result[1],
+            # 用 Popen 而不是 subprocess.run：run() 整个跑在工作线程里，外层
+            # 取消协程时**杀不动它**（这正是「按了停止，命令还在跑」的一条路径）。
+            # Popen 拿得到 pid，登记到协调器后停止按钮就能把它一起收掉。
+            proc = _sp.Popen(
+                argv,
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+                cwd=cwd,
+                env=run_env,
+                errors="replace",
+                **new_group_kwargs(),
             )
-            return result
         except Exception as exc:
-            logger.warning("one-shot shell fallback failed: %s", exc)
+            logger.warning("one-shot shell fallback spawn failed: %s", exc)
             return None
+        coordinator.register_fallback(session_id, proc)
+        try:
+            try:
+                out, err = await asyncio.to_thread(proc.communicate, timeout=limit)
+            except _sp.TimeoutExpired:
+                kill_process_tree(proc.pid, proc)
+                return f"[Command timed out after {int(limit)}s]", 124
+            except asyncio.CancelledError:
+                # 用户按了停止 —— 杀掉，别留孤儿进程在后台继续跑。
+                kill_process_tree(proc.pid, proc)
+                raise
+            except Exception as exc:  # pragma: no cover - 兜底绝不能把异常抛上去
+                kill_process_tree(proc.pid, proc)
+                logger.warning("one-shot shell fallback failed: %s", exc)
+                return None
+        finally:
+            coordinator.unregister_fallback(session_id, proc)
+        result = (((out or "") + (err or "")).strip() or "(no output)", proc.returncode)
+        logger.warning(
+            "PersistentShell[%s] unusable (exit=-1); one-shot fallback ran "
+            "the command (exit=%d)", session_id, result[1],
+        )
+        return result
 
     async def execute(
         self,

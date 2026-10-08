@@ -387,7 +387,12 @@ def test_shell_one_shot_fallback_on_dead_persistent(monkeypatch):
             return _types.SimpleNamespace(output="", exit_code=-1)
         return _inner()
     tool.coordinator = _types.SimpleNamespace(
-        execute=_dead_execute, _cwd_overrides={},
+        execute=_dead_execute,
+        _cwd_overrides={},
+        cwd_for=lambda session_id: None,
+        # 兜底执行的子进程要登记给协调器，停止按钮才杀得掉它（2026-10-08）。
+        register_fallback=lambda session_id, proc: None,
+        unregister_fallback=lambda session_id, proc: None,
     )
     result = asyncio.run(tool.execute('{"command": "echo fallback_ok"}', "s1"))
     assert result.success, result.output

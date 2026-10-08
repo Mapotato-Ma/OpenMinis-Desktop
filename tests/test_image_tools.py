@@ -288,6 +288,27 @@ def test_read_image_missing_file(store, workspace):
     assert res.success is False
 
 
+def test_read_image_does_not_pretend_an_outside_path_is_missing(store, workspace):
+    """工作区外的**绝对路径**要如实说是越界，不能回一句"文件不存在"。
+
+    现场（2026-10-08）：shell 里 ``cp`` 同一条路径回的是 "are the same file"
+    （文件明明就在），read_image 却报 ``File not found`` —— 因为它把绝对路径
+    当成"工作区相对"去找了 ``<工作区>/tmp/baidu_shot.png``。模型据此以为文件
+    丢了，于是一遍遍换写法重试，白烧好几轮。
+    """
+    _setup_chat(store)
+    from openminis.settings.catalog import build_tool_registry
+
+    reg = build_tool_registry(["read_image"])
+    res = asyncio.run(reg["read_image"].executor(
+        json.dumps({"path": "/tmp/definitely-not-here.png", "tool_title": "看图"}),
+        "sess"))
+    assert res.success is False
+    assert "Cannot resolve path" in res.output
+    assert "File not found" not in res.output, "越界不能说成文件不存在"
+    assert "工作区" in res.output, "要说清该怎么改（先拷进工作区）"
+
+
 # ---------------------------------------------------------------------------
 # 最大边长可配
 # ---------------------------------------------------------------------------

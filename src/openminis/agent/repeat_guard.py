@@ -282,7 +282,10 @@ class RepeatGuard:
             if run_streak >= self.config.effect_run_critical:
                 msg = (
                     f"[LOOP BLOCKED] CRITICAL: {tool_name} 已连续执行 {run_streak} 次。"
-                    "任务大概率已完成，停止执行，对照已有产出总结收尾。"
+                    "**先停下来自检**：手上的结果够不够回答用户？"
+                    "如果够，立刻用文本总结收尾；"
+                    "如果确实还要继续（例如在逐项排查一批文件），"
+                    "把多条命令**合并成一次调用**再往下走，别一条一条地刷。"
                 )
                 logger.warning("CRITICAL effect_tool_runaway tool=%s streak=%s",
                                tool_name, run_streak)

@@ -200,6 +200,29 @@ def test_sanitize_outbound_records_and_masks(env):
     assert event.cwd == "outbound:frontend"
 
 
+def test_danger_mode_does_not_redact_outbound_text(env):
+    """危险模式 = 一条都不拦，**出站内容也不再脱敏**。
+
+    用户对危险模式的要求是"沙箱不要拦任何东西"，但第一版的 ``sanitize_outbound``
+    只查白名单、根本不看模式：开着危险模式，模型手上的 token / cookie 照样被换成
+    "部分显示"，它复原不了就反复重试（2026-10-08 现场一次会话刷出 142 条
+    ``guard[secret] blocked tool=outbound:llm``）。
+    """
+    from openminis.sandbox.guard import DANGER_MODE, NORMAL_MODE
+
+    text = "把 token=Xk92dLm3q 写进配置"
+    guard.set_mode(DANGER_MODE)
+    try:
+        assert sanitize_outbound(text, where="llm", session_id="s1") == text, (
+            "危险模式下不该动出站文本"
+        )
+        assert guard.events() == [], "危险模式不该记拦截事件"
+    finally:
+        guard.set_mode(NORMAL_MODE)
+    # 普通模式照旧脱敏（别为了危险模式把守卫整体关掉）
+    assert "Xk92dLm3q" not in sanitize_outbound(text, where="llm", session_id="s1")
+
+
 def test_sanitize_message_parts_redacts_tool_results(env):
     from openminis.data.model import LLMMessage
     from openminis.data.model.agent_content_part import Text, ToolResult
