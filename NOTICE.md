@@ -66,6 +66,11 @@
 | `src/openminis/settings/attachments.py`（`_file_mtime`） | `<user-attached-files>` 的 `modified` 改用**文件真实 mtime**，取不到就留空 | 改前写的是"组装这段 XML 的时刻"（`strftime(now)`）：语义不对（等于说"这个文件是现在改的"），同一条消息在不同时刻重建还会得到不同字节 |
 | `tests/test_perf_and_freshness.py`（`test_system_prompt_carries_current_time`） | 改名并改成「系统提示只到天、不许出现时分」（原来断言的是 `current_time_block`） | 被断言的那个函数已经不存在了；新断言钉的正是上面那条缓存前提 —— 系统提示里一旦出现 `HH:MM`，前缀就每分钟变一次 |
 
+| `src/openminis/settings/store.py`（`apply_full` 拆出 `_apply_full_locked`，深拷贝 + `_mutation_lock`） | 保存设置改成「复制 → 校验候选 → 原子落盘 → 才发布」 | R13：改前是 `data = self.load()` 之后就地把候选值写进那份**共享内存配置**，校验放最后 —— 一个非法请求被拒（400）之后，内存里那个 provider 已经没了（磁盘还在），用户当场失去配置、重启又"自己好了"。护栏：`tests/test_settings.py::test_a_rejected_save_changes_neither_memory_nor_disk`（断言内存与磁盘**都**相等，而不只是看 400） |
+| `src/openminis/sandbox/execution_coordinator.py`（`set_session_cwd` / `clear_session_cwd` / 新增 `_drop_shell`）/ `src/openminis/agent/subagents.py`（新增 `bind_subagent_project`，无分配时也撤销） | 换工作目录时**把已有 shell 一起收掉**（`interrupt_now` 连子孙进程），下一次 execute 在新根里重建；同根重复设置不动手；子代理这一轮没分配项目就 `clear_session_cwd` | R16：改前只写 override 而运行中的 shell 保留启动时的目录 —— 同一会话里"文件工具按新项目解析、shell 还在旧项目里跑"。换项目对文件工具生效、对 shell 不生效，读写不是一个项目。护栏：`tests/test_channel_and_cwd.py`（换根收掉、同根不杀、撤销绑定也收、子代理无分配走 clear） |
+| `src/openminis/server/main.py`（`_shell_frame` / `_chat_frame` / `_ROUTED_FRAME_TYPES` + `_safe_send` 漏斗） | 会分流的帧一律带 `channel`：终端那条路盖 `"shell"`，其余在 `_safe_send` 里补 `"chat"` | R08：改前前端拿"现在终端忙不忙"（`state.termBusy`）猜一条 `delta`/`error` 该进聊天还是进终端抽屉 —— 终端在跑命令时，聊天里的一条报错被当成终端错误（聊天那一轮永不结束），旧会话/机器人通道的帧也能糊进当前会话。归属必须由帧自己说。护栏：`tests/test_channel_and_cwd.py::test_routed_frames_always_carry_a_channel` |
+| `tests/test_settings.py`（新增一条 R13 断言） | 新增用例，不改上游既有断言 | 上一条的护栏；`apply_full` 的"拒绝无副作用"是这条流水里最容易回归的一处 |
+
 上游修好之后删掉这些改动即可回到「一行未改」——判据是 `curl` 一份上游 `main`
 的对应文件，确认问题已经不在。
 

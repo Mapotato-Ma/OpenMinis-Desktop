@@ -245,6 +245,10 @@ class SettingsStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (app_context().data_dir / _FILE_NAME)
         self._io_lock = threading.Lock()
+        #: 一次"读 → 改 → 校验 → 落盘 → 发布"期间持有的锁（R13）。
+        #: ``_io_lock`` 只保护单次读/写，管不了这整条链 —— 两个并发 PUT 会在
+        #: 各自的副本上做校验，最后一个赢，中间那个的改动静默消失。
+        self._mutation_lock = threading.RLock()
         self._data: dict[str, Any] | None = None
 
     # -- construction ------------------------------------------------------
@@ -300,7 +304,22 @@ class SettingsStore:
 
         Returns the resulting stored snapshot.
         """
-        data = self.load()
+        # R13：整条链在一把锁里 —— 而且**改的是一份深拷贝**。
+        #
+        # 改前是 ``data = self.load()`` 然后就地改：``load()`` 返回的是那个共享的
+        # ``self._data``，于是校验还没跑完，内存里那份配置**已经被改了**。一个非法请求
+        # 被拒绝（400）之后内存里少了一个 provider、磁盘上还在 —— 用户当场失去配置
+        # （聊天下一条就报"厂商配置不存在"），重启又"自己好了"。
+        #
+        # 现在：复制 → 校验候选 → 原子落盘 → 才发布。拒绝 = 一个字节都不动，
+        # 内存与磁盘都保持原样（护栏断言两边都相等，而不只是看 400）。
+        with self._mutation_lock:
+            return self._apply_full_locked(payload)
+
+    def _apply_full_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        import copy
+
+        data = copy.deepcopy(self.load())
         errors: list[str] = []
 
         # 自定义模型类型 —— 先处理,好让 providers 里的 modelTypes 覆盖能识别

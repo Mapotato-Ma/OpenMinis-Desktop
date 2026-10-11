@@ -126,17 +126,24 @@ for route in reversed(routes):            # 倒着插 → 清单顺序即匹配�
 
 | 帧 | 字段 | 前端行为 |
 |---|---|---|
-| `delta` | `text`, `sessionId?` | 追加到当前文本块 |
-| `toolStart` | `id`, `name`, `input` | 插一张折叠工具卡 |
+| `delta` | `channel`, `text`, `sessionId?` | 追加到当前文本块（终端帧进抽屉） |
+| `toolStart` | `id`, `name`, `input`, `sessionId` | 插一张折叠工具卡 |
 | `toolEnd` | `id`, `ok`, `output`, `ms` | 结算卡片状态与输出 |
 | `chatSession` | `sessionId`, `title` | 首次对话后回填会话 id |
-| `done` | `sessionId` 或 `exitCode` | 结束本轮 / 结束终端命令 |
+| `done` | `channel`, `sessionId` 或 `exitCode` | 结束本轮 / 结束终端命令 |
 | `usage` | `totalTokens` | 更新状态栏 |
-| `error` | `error`, `locked?` | 报错；`locked` 时提示去解锁 |
+| `error` | `channel`, `error`, `locked?` | 报错；`locked` 时提示去解锁 |
 
-**一个坑**：`delta` 帧被对话和终端共用，唯一的区别是对话帧带 `sessionId`、
-终端帧不带。前端靠 `state.termBusy && f.sessionId == null` 分流。
-改协议时别把终端帧加上 `sessionId`。
+**帧归属由帧自己说**（R08）：会分流的那几种帧一律带 `channel` —— 终端（沙箱抽屉）
+那条路是 `"shell"`，其余在 `_safe_send` 这个漏斗里补 `"chat"`。改前 `delta` 是对话与
+终端共用的，前端只能靠 `state.termBusy && f.sessionId == null` **猜**这帧是谁的：
+终端跑命令时，聊天里的一条报错会被当成终端错误（聊天那一轮永不结束）；旧会话或机器人
+通道的帧也能糊进当前会话的正文。现在归属判定只认帧上的字段。
+
+同理，前端**发送**那条路也冻结身份（R09）：进入发送时抓一次 `{sid, workspace, gen}`，
+绑定与发帧都用它。改前是 `await bindSessionWorkspace(...)` 之后才读 `state.sessionId`
+—— 绑定是个网络往返，等它回来时用户可能已经切到别的会话，于是 A 的消息发给了 B。
+排队待发的消息也带着它归属的会话一起排队。
 
 ### REST
 

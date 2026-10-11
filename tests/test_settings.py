@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -124,6 +126,34 @@ def test_activating_unconfigured_provider_is_rejected(store):
     with TestClient(app) as c:
         r = c.put("/api/settings", json={"activeProviderId": "anthropic"})
         assert r.status_code == 400
+
+
+def test_a_rejected_save_changes_neither_memory_nor_disk(store):
+    """R13：被拒绝的保存**一个字节都不许改** —— 内存和磁盘都要和拒绝前相等。
+
+    改前 ``apply_full`` 是 ``data = self.load()`` 之后就地把候选值写进去（``load()``
+    返回的就是那份共享的内存配置），校验放到最后。于是：请求被拒（400）了，磁盘没变，
+    **内存里那个 provider 已经没了** —— 用户当场失去配置（下一条消息就报"厂商配置
+    不存在"），重启又"自己好了"。只看 400 是抓不到这个的。
+    """
+    with TestClient(app) as c:
+        _put(c, providers=[{"id": "gw-a", "type": "openAI", "apiKey": "sk-a",
+                            "model": "", "baseUrl": ""}])
+        before = copy.deepcopy(store.load())
+        on_disk_before = store.path.read_text(encoding="utf-8")
+
+        # 一个必然被拒的请求：合法 provider 后面跟一个非法类型
+        r = c.put("/api/settings", json={
+            "providers": [
+                {"id": "gw-a", "type": "openAI", "apiKey": "sk-a", "model": "", "baseUrl": ""},
+                {"id": "gw-b", "type": "不存在的厂商", "apiKey": "x", "model": "", "baseUrl": ""},
+            ],
+        })
+        assert r.status_code == 400, r.text
+
+    assert store.load() == before, "被拒绝的保存改了内存里的配置"
+    assert list(store.load()["providers"]) == ["gw-a"], "provider 被那次失败的保存删掉了"
+    assert store.path.read_text(encoding="utf-8") == on_disk_before, "磁盘被改了"
 
 
 def test_identity_tool_override(store):

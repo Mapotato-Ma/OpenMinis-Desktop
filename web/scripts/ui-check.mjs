@@ -625,3 +625,28 @@ test('缓存命中率看得见、Anthropic 的提示缓存 TTL 有入口', () =>
   const model = read('settings-model.js');
   assert.ok(/promptCacheTtl/.test(model), 'setting-model 没带上这个字段（保存会丢）');
 });
+
+test('帧归属按帧上的通道判定，不再拿"终端忙不忙"去猜（R08）', () => {
+  const app = read('app.js');
+  // 负向断言只看**代码**：注释里会引用老写法（那正是解释为什么要改它），
+  // 直接扫全文会把解释当成违规。
+  const code = app.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(/function isShellFrame/.test(app) && /function belongsToCurrentSession/.test(app),
+    '没有归属判定函数');
+  assert.ok(/f\.channel === 'shell'/.test(app), '没按 channel 认终端帧');
+  // 老写法必须消失：那就是"终端在跑命令时，聊天报错被吞成终端错误"的来源
+  assert.ok(!/f\.sessionId == null && state\.termBusy/.test(code), '还在用 termBusy 猜帧归属');
+  assert.ok(!/if \(state\.termBusy\) \{\s*\n\s*state\.termBusy = false;\s*\n\s*termBuffer = null;\s*\n\s*termLine\(f\.error/.test(code),
+    'error 帧还在按"终端忙不忙"分派');
+  assert.ok(/case 'done':\s*\n\s*if \(isShellFrame\(f\)\)/.test(app), 'done 帧没按通道分派');
+});
+
+test('发送身份在进入发送时冻结（R09）', () => {
+  const app = read('app.js');
+  assert.ok(/function captureTurnIdentity/.test(app), '没有冻结发送身份');
+  assert.ok(/sendTurn\(text, typed, att, identity\)/.test(app), 'sendTurn 没有接身份参数');
+  assert.ok(/bindSessionWorkspace\(id\.workspace, id\.sid\)/.test(app),
+    '绑定没有用冻结下来的 sid —— 等待期间切会话会把消息发给别人');
+  // 出队时也要带上原来的会话（排队期间用户可能已经切走）
+  assert.ok(/sid: next\.sid, workspace: next\.workspace/.test(app), '队列没带会话归属');
+});

@@ -707,6 +707,33 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+#: 帧的**通道归属** [R08]。改前前端是拿"现在终端忙不忙"（``state.termBusy``）去猜
+#: 一条 ``delta`` / ``error`` 该进聊天还是进终端抽屉 —— 终端在跑命令时，聊天里的一条
+#: 报错会被当成终端错误（聊天这一轮永远不结束），反过来旧会话的帧也能糊到当前会话上。
+#: 归属必须是帧自己说的，不是收帧那一刻的界面状态。
+SHELL_CHANNEL = "shell"
+CHAT_CHANNEL = "chat"
+
+
+def _shell_frame(payload: dict[str, Any]) -> dict[str, Any]:
+    """给终端（沙箱抽屉）的帧盖通道标记。"""
+    return {**payload, "channel": SHELL_CHANNEL}
+
+
+def _chat_frame(payload: dict[str, Any]) -> dict[str, Any]:
+    """给聊天回合的帧盖通道标记（聊天帧一律另带 sessionId）。"""
+    return {**payload, "channel": CHAT_CHANNEL}
+
+
+#: 会被前端**分流**的那几种帧。没标通道的一律按聊天算 —— 唯一会自己标的是终端那条路
+#: （``_shell_frame``）。放在这一个漏斗里补，比在十几个 emit 点各写一遍可靠。
+_ROUTED_FRAME_TYPES = frozenset({
+    "delta", "done", "error", "usage", "chatSession", "toolStart", "toolEnd",
+    "fallback", "subagentStart", "subagentDelta", "subagentToolStart",
+    "subagentToolEnd", "subagentEnd",
+})
+
+
 async def _safe_send(client_id: str, payload: dict[str, Any]) -> None:
     """send_json that swallows WebSocketDisconnect so chat runs survive a
     mid-stream client drop (e.g. user closes the browser tab).
@@ -723,6 +750,8 @@ async def _safe_send(client_id: str, payload: dict[str, Any]) -> None:
                 payload[key] = sanitize_outbound(value, where="frontend")
     except Exception:  # pragma: no cover - 脱敏失败不该丢帧
         logger.debug("frontend secret scan failed", exc_info=True)
+    if payload.get("type") in _ROUTED_FRAME_TYPES and "channel" not in payload:
+        payload = {**payload, "channel": CHAT_CHANNEL}
     try:
         await manager.send_json(client_id, payload)
     except WebSocketDisconnect:
@@ -1350,6 +1379,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                 "name": chunk.name,
                 "input": chunk.args or {},
                 "sessionId": sid,
+                "channel": CHAT_CHANNEL,
             })
         elif isinstance(chunk, LLMStreamChunk.ToolResult):
             # Final state of that tool call: success / error + truncated body.
@@ -1396,7 +1426,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                     for path in images:
                         if path not in generated_images:
                             generated_images.append(path)
-            await _safe_send(client_id, frame)
+            await _safe_send(client_id, {**frame, "channel": CHAT_CHANNEL})
         elif isinstance(chunk, LLMStreamChunk.Usage):
             # Token usage of a finished assistant turn — surfaced to the
             # Web client so the chat can display per-step counts, and summed
@@ -1608,18 +1638,19 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
     """
     command = str(msg.get("command", ""))
     if not command:
-        await _safe_send(client_id, {"type": "error", "error": "empty command"})
+        await _safe_send(client_id, _shell_frame(
+            {"type": "error", "error": "empty command"}))
         return
 
     try:
         from ..sandbox.console_auth import console_auth
 
         if console_auth.has_password() and not console_auth.is_unlocked():
-            await _safe_send(client_id, {
+            await _safe_send(client_id, _shell_frame({
                 "type": "error",
                 "error": "控制台已锁定：请先在沙箱页输入控制台密码解锁",
                 "locked": True,
-            })
+            }))
             return
     except Exception:  # pragma: no cover - 闸门故障时按放行处理（与旧行为一致）
         logger.debug("console auth check failed", exc_info=True)
@@ -1642,7 +1673,7 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
                 **new_group_kwargs(),
             )
         except Exception as e:
-            await _safe_send(client_id, {"type": "error", "error": str(e)})
+            await _safe_send(client_id, _shell_frame({"type": "error", "error": str(e)}))
             return
 
         assert proc.stdout is not None
@@ -1650,13 +1681,14 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
             if not line:
                 break
-            await _safe_send(client_id, {"type": "delta", "text": line.decode(errors="replace")}
-            )
+            await _safe_send(client_id, _shell_frame(
+                {"type": "delta", "text": line.decode(errors="replace")}
+            ))
         code = await proc.wait()
     except TimeoutError:
         if proc is not None:
             _kill_shell(client_id, proc)
-        await _safe_send(client_id, {"type": "error", "error": "timeout"})
+        await _safe_send(client_id, _shell_frame({"type": "error", "error": "timeout"}))
         return
     except asyncio.CancelledError:
         # 停止帧 / 连接断开：光取消 await 只是不再读输出，命令还得真收掉。
@@ -1670,7 +1702,7 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
             _notify_shell_stopped(client_id)
         raise
 
-    await _safe_send(client_id, {"type": "done", "exitCode": code})
+    await _safe_send(client_id, _shell_frame({"type": "done", "exitCode": code}))
 
 
 def _kill_shell(client_id: str, proc: Any, *, notify: bool = False) -> None:
@@ -1712,7 +1744,8 @@ def _notify_shell_stopped(client_id: str) -> None:
 
     async def _run() -> None:
         try:
-            await _safe_send(client_id, {"type": "error", "error": _STOPPED_NOTE})
+            await _safe_send(client_id, _shell_frame(
+                {"type": "error", "error": _STOPPED_NOTE}))
         except Exception:  # pragma: no cover
             logger.debug("terminal stop notice failed", exc_info=True)
 
@@ -1731,7 +1764,8 @@ async def _dispatch_shell(client_id: str, msg: dict[str, Any]) -> None:
         # 同一条连接上已有命令在跑 → 拒绝新的一条（前端 termBusy 也是这么说的：
         # 「上一条命令还在执行」）。放两条并行跑的话，输出 delta 和 done 帧会互相
         # 踩（前一条的 done 会把抽屉的 busy 灯熄掉，后一条还在跑）。
-        await _safe_send(client_id, {"type": "error", "error": "上一条命令还在执行"})
+        await _safe_send(client_id, _shell_frame(
+            {"type": "error", "error": "上一条命令还在执行"}))
         return
     _register_shell(client_id, asyncio.create_task(_handle_shell(client_id, msg)))
 

@@ -608,6 +608,33 @@ def group_block(store, ids: list[str], humans: list[str] | None = None) -> str:
 # ---------------------------------------------------------------------------
 # 运行子代理 —— 主 agent 的 subagent_delegate 工具与后端「识图」都走这里。
 # ---------------------------------------------------------------------------
+def bind_subagent_project(session_id: str, subagent_id: str) -> None:
+    """把这个成员本轮的「项目分配」落到执行协调器上（R16）。
+
+    有分配 → ``set_session_cwd``；**没有分配 → ``clear_session_cwd``**（撤销上一次的
+    绑定）。改前只在有分配时写 override，于是"A 项目 → 无分配"这个序列里，文件工具
+    回到了默认根、而这个成员的 shell 还停在 A 目录继续跑命令 —— 读到的文件和写下的
+    文件不是一个项目。
+
+    抽成函数是为了让这条接线本身可测（不必真的跑一轮委派）。
+    """
+    try:
+        from pathlib import Path
+
+        from .subagent_events import project_for
+        from ..tools.shell_execute_tool import get_coordinator
+
+        key = f"{session_id}:sub:{subagent_id}"
+        project_dir = project_for(subagent_id)
+        coordinator = get_coordinator()
+        if project_dir:
+            coordinator.set_session_cwd(key, Path(project_dir))
+        else:
+            coordinator.clear_session_cwd(key)
+    except Exception:  # pragma: no cover - 分配失败不该打断委派
+        logger.debug("subagent project cwd failed", exc_info=True)
+
+
 async def run_subagent(
     store, subagent_id: str, task: str, session_id: str
 ) -> str:
@@ -680,18 +707,11 @@ async def run_subagent(
 
     # 「分配项目」：这个成员被指定了项目 → 它的 shell root 到那个目录，
     # 而不是会话默认的工作空间 —— 群聊里每个成员可以各写各的项目目录。
-    project_dir = project_for(subagent_id)
-    if project_dir:
-        try:
-            from pathlib import Path
-
-            from ..tools.shell_execute_tool import get_coordinator
-
-            get_coordinator().set_session_cwd(
-                f"{session_id}:sub:{subagent_id}", Path(project_dir)
-            )
-        except Exception:  # pragma: no cover - 分配失败不该打断委派
-            logger.debug("subagent project cwd failed", exc_info=True)
+    #
+    # R16：**没有分配时也要撤销上一次的绑定**。改前只在有分配时写 override，
+    # 于是"A 项目 → 无分配"这个序列里，文件工具回到了默认根、而这个成员的 shell
+    # 还停在 A 目录继续跑命令 —— 读到的文件和写下的文件不是一个项目。
+    bind_subagent_project(session_id, subagent_id)
 
     speaker = {
         "id": room,
@@ -699,7 +719,7 @@ async def run_subagent(
         "name": cfg.get("name") or subagent_id,
         "emoji": cfg.get("emoji") or "🤖",
         "model": conf.get("model", ""),
-        "project": project_dir or "",
+        "project": project_for(subagent_id) or "",
     }
 
     inner_sink = None

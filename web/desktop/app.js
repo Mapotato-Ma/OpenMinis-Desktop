@@ -28,6 +28,8 @@ const state = {
   termHistory: [],
   termIdx: -1,
   termBusy: false,
+  /** 发送代次：每一轮发送 +1（R09）。冻结下来的身份用它区分"这是哪一次发送"。 */
+  turnGen: 0,
   currentFile: null,
   changes: [],         // file edits seen this session, for the diff tab
   filter: '',
@@ -459,7 +461,10 @@ async function flushQueue() {
   if (state.streaming || !state.queue.length) { renderQueue(); return; }
   const next = state.queue.shift();
   renderQueue();
-  await sendTurn(next.text, next.typed, next.att);
+  // 排队时捕获的身份一路带下去：出队时用户可能早就切到别的会话了（R09）。
+  await sendTurn(next.text, next.typed, next.att, {
+    sid: next.sid, workspace: next.workspace, gen: next.gen,
+  });
 }
 
 function endTurn() {
@@ -501,6 +506,23 @@ function setStatusTurn(txt) {
 }
 
 /* ── frame dispatch ──────────────────────────────────────────────────── */
+
+/* 帧归属（R08）：谁的消息归谁，只认帧上的字段，不看"当前界面忙不忙"。
+   后端给终端（沙箱抽屉）的帧盖 `channel: "shell"`，其余一律按聊天算；聊天帧另带
+   `sessionId`。改前是 `f.sessionId == null && state.termBusy` 这种猜法 —— 终端在跑
+   命令时聊天里的报错会被当成终端错误，旧会话/别的通道的帧也能糊进当前会话。 */
+function isShellFrame(f) { return !!f && f.channel === 'shell'; }
+/** 这一帧属于**当前正在看的会话**吗（没有 sessionId 的帧算当前 —— 那是本回合自己的）。 */
+function belongsToCurrentSession(f) {
+  if (!f || f.sessionId == null) return true;
+  return !state.sessionId || f.sessionId === state.sessionId;
+}
+/** 只把属于当前会话的正文写进正文区；别的会话的帧直接丢（服务端已落库，切过去会读回来）。 */
+function appendChatDelta(f) {
+  if (!belongsToCurrentSession(f)) return;
+  appendDelta(f.text || '');
+}
+
 function handleFrame(f) {
   switch (f.type) {
     case 'guard_confirm':
@@ -509,15 +531,22 @@ function handleFrame(f) {
       break;
     case 'delta':
       // Chat and shell deltas share a frame type; only chat carries a
-      // sessionId. While a terminal command is in flight, route the
-      // session-less ones to the drawer instead of the transcript.
-      if (f.sessionId == null && state.termBusy) termAppend(f.text || '');
-      else if (f.text) appendDelta(f.text);
+      // sessionId.
+      //
+      // 归属由**帧自己**说（后端给终端帧盖 channel="shell"）：改前这里是
+      // `f.sessionId == null && state.termBusy` —— 拿"现在终端忙不忙"去猜这帧是谁的。
+      // 后果实测过：终端在跑命令时，聊天里的一条 400 会把正文写进终端抽屉；反过来
+      // 旧会话/别的通道（机器人）的 delta 也能糊到当前会话的正文里。收帧那一刻的界面
+      // 状态不是证据，帧上的通道才是。
+      if (isShellFrame(f)) termAppend(f.text || '');
+      else if (f.text) appendChatDelta(f);
       break;
     case 'toolStart':
-      addToolCardToTurn(f.id, f.name, f.input);
+      if (belongsToCurrentSession(f)) addToolCardToTurn(f.id, f.name, f.input);
       break;
     case 'toolEnd': {
+      // toolEnd 帧没有 sessionId（后端只在 toolStart 上带）：它归**当前这一轮**，
+      // 没有正在跑的正文就什么也不画。
       const t = state.turn;
       const card = t && f.id ? t.toolCards.get(f.id) : null;
       settleToolCard(card, f.ok, f.output, f.ms);
@@ -538,6 +567,7 @@ function handleFrame(f) {
       subagentFrame(f);
       break;
     case 'fallback': {
+      if (!belongsToCurrentSession(f)) break;
       // 主模型限流/超时切兜底模型：以前完全静默，用户只会觉得"模型变笨了"
       const note = el('div', 'fallback-note',
         '⚠ 主模型这轮不可用（' + (f.reason || '限流或超时') + '），已改用 '
@@ -547,7 +577,10 @@ function handleFrame(f) {
       break;
     }
     case 'chatSession':
-      if (f.sessionId && f.sessionId !== state.sessionId) {
+      // 只在**这一轮是我们发起的**时候认领新会话 id（新会话首条消息没有 id，id 由
+      // 服务端的 chatSession 帧回给界面）。别的通道（机器人）跑出来的帧也会带
+      // chatSession 广播过来 —— 无条件认领会把用户正看着的会话切走（R08）。
+      if (f.sessionId && f.sessionId !== state.sessionId && state.streaming) {
         state.sessionId = f.sessionId;
         updateSessionHeader();
         // 服务端替我们新建了会话（首条消息没带 session_id）→ 立刻归到面板的工作区。
@@ -559,7 +592,17 @@ function handleFrame(f) {
       renderContextUsage(f);
       break;
     case 'done':
-      if (f.exitCode != null && state.termBusy) {
+      if (isShellFrame(f)) {
+        // 终端帧：按帧自己的通道熄灭抽屉的 busy 灯，不再看"终端忙不忙"这种全局状态。
+        if (state.termBusy) {
+          state.termBusy = false;
+          termBuffer = null;
+          if (f.exitCode != null && f.exitCode !== 0) termLine(`[退出码 ${f.exitCode}]`, 'err');
+        }
+      } else if (!belongsToCurrentSession(f)) {
+        // 别的会话的一轮结束了 —— 不许碰当前会话的流式状态与队列（R08）。
+        break;
+      } else if (f.exitCode != null && state.termBusy) {
         state.termBusy = false;
         termBuffer = null;
         if (f.exitCode !== 0) termLine(`[退出码 ${f.exitCode}]`, 'err');
@@ -574,12 +617,15 @@ function handleFrame(f) {
       }
       break;
     case 'error':
-      if (state.termBusy) {
+      if (isShellFrame(f)) {
+        // 终端错误只熄灭终端那一侧。改前只要 state.termBusy 就按终端错误处理 ——
+        // 终端在跑命令时，聊天里的一条报错会被吞成"终端错了"，聊天这一轮永不结束。
         state.termBusy = false;
         termBuffer = null;
         termLine(f.error || '命令执行失败', 'err');
         break;
       }
+      if (!belongsToCurrentSession(f)) break;   // 别的会话的报错，与当前会话无关
       if (state.turn) {
         appendDelta(`\n\n> ⚠️ ${f.error}`);
         // A model-provider failure is fixed in settings, not by retrying.
@@ -628,7 +674,11 @@ async function send() {
   if (state.streaming) {
     // 生成中再发 = **排队**，内容不丢。
     // 改前这里只 toast 一句「上一条还在处理中」就 return 了 —— 打好的字白打。
-    state.queue.push({ text, typed, att });
+    // 队列元素**带上它归属的会话**（R09）：出队时用户可能已经切到别的会话了。
+    state.queue.push({
+      text, typed, att,
+      sid: state.sessionId, workspace: currentWorkspace, gen: state.turnGen,
+    });
     renderQueue();
     return;
   }
@@ -636,8 +686,20 @@ async function send() {
   await sendTurn(text, typed, att);
 }
 
+/** 这一轮的身份（R09）：进入发送时抓一次，之后绑定与发帧都用它。
+
+    改前是 `await bindSessionWorkspace(...)` 之后再读 `state.sessionId` —— 而绑定是个
+    网络往返：等它回来时用户可能已经点去会话 B 了，于是 **A 的消息被发给了 B**
+    （实测复现过：绑定暂停、切到 B、恢复后 WS 帧里的 session_id 是 B）。身份必须
+    在进入发送那一刻冻结，而不是在等待之后重新读一遍全局状态。 */
+function captureTurnIdentity() {
+  state.turnGen = (state.turnGen || 0) + 1;
+  return { sid: state.sessionId, workspace: currentWorkspace, gen: state.turnGen };
+}
+
 /** 真正把一条消息送出去（手动发送和排队出队都走这里）。 */
-async function sendTurn(text, typed, att) {
+async function sendTurn(text, typed, att, identity) {
+  const id = identity || captureTurnIdentity();
 
   emptyNode().style.display = 'none';
   const node = el('div', 'msg user');
@@ -674,9 +736,20 @@ async function sendTurn(text, typed, att) {
   // 看不到用户的项目（用户实测：面板里明明有文件，agent 说工作区是空的）。
   // 老会话（v0.4.1 之前建的）从来没绑过，这一步正好补上，是幂等的。
   // currentWorkspace 为空时不动 —— 那可能是用户有意让会话待在默认沙箱。
-  if (state.sessionId && currentWorkspace) await bindSessionWorkspace(currentWorkspace);
+  // 绑定与发帧用**同一份**身份：绑定落地的是 id.sid，帧也发往 id.sid。
+  if (id.sid && id.workspace) await bindSessionWorkspace(id.workspace, id.sid);
 
-  wsSend({ type: 'chat', text, session_id: state.sessionId || undefined });
+  if (state.sessionId !== id.sid) {
+    // 等待期间视图切走了。消息**照发**给它原本的会话（服务端会落库），但当前视图
+    // 不认领这一轮 —— 后续帧按帧归属被丢掉（R08），切回去就能看到。比"发给错误的
+    // 会话"好得多：那会让用户把 A 的问题算到 B 头上。
+    endTurn();
+    toast('已把消息发到原来的会话 —— 切回去能看到回复', 'ok');
+    wsSend({ type: 'chat', text, session_id: id.sid || undefined });
+    return;
+  }
+
+  wsSend({ type: 'chat', text, session_id: id.sid || undefined });
 }
 
 function stopTurn() {
@@ -1060,8 +1133,10 @@ function renderWorkspacePicker() {
     内核给没归入工作区的会话只在默认沙箱（`<data>/workspace/db-<会话id>`）里活动，
     所以文件面板里看到的项目它一个也够不着（用户实测：面板里有文件，agent 说工作区是空的）。
     桌面界面以前从来没调过这个接口 —— 面板换了根，agent 的 cwd 原地不动。 */
-async function bindSessionWorkspace(folderId) {
-  const sid = state.sessionId;
+async function bindSessionWorkspace(folderId, sessionId) {
+  // sid 优先取调用方给的（发送路径冻结下来的那个），退回"当前选中的会话" ——
+  // 等待期间用户切走时，绑定必须落在当时那个会话上（R09）。
+  const sid = sessionId || state.sessionId;
   if (!sid) return;
   try {
     await api(`/chats/sessions/${encodeURIComponent(sid)}/workspace`, {
