@@ -169,6 +169,26 @@ def test_tighten_skips_off_windows(monkeypatch, tmp_path):
     assert secrets_acl.tighten(target).startswith("skipped:")
 
 
+def test_the_env_pane_prefs_file_is_tightened_too(monkeypatch, tmp_path):
+    """「环境变量」页（技能密钥 / API token）存在 files/minis_prefs.json —— 同样是明文
+    凭据文件，必须和 settings.json 一起收权限，否则这件事只做了一半。"""
+    from desktop import secrets_acl
+
+    (tmp_path / "settings.json").write_text("{}", encoding="utf-8")
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "minis_prefs.json").write_text("{}", encoding="utf-8")
+    seen: list[Path] = []
+    monkeypatch.setattr(secrets_acl, "tighten",
+                        lambda path: (seen.append(Path(path)), "ok")[1])
+
+    notes = secrets_acl.tighten_data_root(data_root=tmp_path)
+
+    assert notes, "一个目标都没处理"
+    assert files / "minis_prefs.json" in seen, f"env 页的凭据文件没被收紧：{seen}"
+    assert tmp_path / "settings.json" in seen
+
+
 # ---------------------------------------------------------------------------
 # 界面/接口不回显明文密钥
 # ---------------------------------------------------------------------------

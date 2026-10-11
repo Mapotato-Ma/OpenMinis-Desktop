@@ -70,8 +70,19 @@ def tighten_data_root(*, data_root: Path | None = None) -> list[str]:
             data_root = _root()
         except Exception:  # pragma: no cover - 目录都解析不出来就别提了
             return ["skipped: 数据目录解析失败"]
-    targets = [Path(data_root), Path(data_root) / "settings.json",
-               Path(data_root) / "settings.json.tmp"]
+    root = Path(data_root)
+    files = root / "files"          # 内核的 filesDir（Kotlin 对齐）
+    targets = [
+        root,
+        root / "settings.json",
+        root / "settings.json.tmp",
+        # 「环境变量」页（技能密钥 / API token 都往这儿填）存在内核的 prefs 里：
+        # `files/minis_prefs.json`。它和 settings.json 一样是**明文**的凭据文件 ——
+        # 漏了它，收紧权限这件事就只做了一半。
+        files,
+        files / "minis_prefs.json",
+        files / "minis_prefs.json.tmp",
+    ]
     for target in targets:
         if target.exists():
             notes.append(tighten(target))
