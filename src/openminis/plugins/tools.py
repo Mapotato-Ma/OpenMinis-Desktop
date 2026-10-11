@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agent.agent_runtime import ToolExecutor
+from ..core.logging import get_logger
 from ..data.model.agent_tool_definition import AgentToolDefinition, AgentToolParam
 from ..tools.tool_execution_result import ToolExecutionResult
 from . import store
@@ -35,6 +36,8 @@ from .manifest import (
     PluginToolSpec,
 )
 from .process import resolve_executable
+
+logger = get_logger(__name__)
 
 
 def tool_full_id(plugin_id: str, tool_id: str) -> str:
@@ -50,6 +53,45 @@ def tool_full_id(plugin_id: str, tool_id: str) -> str:
 
 def _ident(raw: str) -> str:
     return "".join(c if (c.isalnum() or c == "_") else "_" for c in str(raw or ""))
+
+
+def _coordinator_for(session_id: str):  # noqa: ANN202
+    """这个会话的执行协调器（没有会话 id 时为 None —— 没有归属就没人能取消它）。"""
+    if not session_id:
+        return None
+    try:
+        from ..tools.shell_execute_tool import get_coordinator
+
+        return get_coordinator()
+    except Exception:  # pragma: no cover - 拿不到协调器不该拦住插件工具
+        return None
+
+
+def _new_group_kwargs() -> dict[str, Any]:
+    """独立进程组：取消/超时时才能连子孙一起杀（R15）。"""
+    try:
+        from ..sandbox.persistent_shell import new_group_kwargs
+
+        return new_group_kwargs()
+    except Exception:  # pragma: no cover
+        return {}
+
+
+def _kill_plugin(proc: Any) -> None:
+    """收掉插件进程**整棵树**（杀不掉就如实记一笔，不假装成功）。"""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        from ..sandbox.persistent_shell import kill_process_tree
+
+        kill_process_tree(proc.pid, proc)
+        return
+    except Exception:  # pragma: no cover - 退回单进程 kill
+        logger.debug("kill_process_tree failed for plugin tool", exc_info=True)
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):  # pragma: no cover
+        pass
 
 
 def enabled_specs() -> list[tuple[ChannelManifest, PluginToolSpec]]:
@@ -169,6 +211,12 @@ async def run_tool(
         elif not isinstance(value, dict):
             env[f"OM_{key.upper()}"] = str(value)
 
+    # R15：插件进程要能被**会话级停止**收掉，也要在取消/超时时连子孙一起杀。
+    # 改前这里既没登记给协调器，也没有取消分支 —— 按停止只是结束等待，插件进程
+    # 留在后台继续跑（隔离探针：communicate 中取消、kill 调用 = 0）；超时也只
+    # kill 父进程、不 wait 回收、不杀树（插件脚本往往再拉一个子进程干活）。
+    coordinator = _coordinator_for(session_id)
+    registered = False
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -179,23 +227,41 @@ async def run_tool(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_new_group_kwargs(),
         )
-        out, err = await asyncio.wait_for(
-            proc.communicate(payload.encode("utf-8")), timeout=spec.timeout_sec
-        )
-    except asyncio.TimeoutError:
-        if proc is not None and proc.returncode is None:
+        if coordinator is not None:
+            # 登记是**尽力而为**：协调器是鸭子类型（测试里常换成只记调用的假对象），
+            # 少一个方法不该让插件工具本身跑不起来 —— 但登记失败要留痕（那条路就
+            # 失去了"停止时被收掉"的能力）。
             try:
-                proc.kill()
-            except ProcessLookupError:  # pragma: no cover
-                pass
-        return ToolExecutionResult(
-            output=f"工具 {spec.label} 超过 {spec.timeout_sec}s 没返回，已中止。",
-            success=False,
-            timed_out=True,
-        )
+                coordinator.register_fallback(session_id, proc)
+                registered = True
+            except Exception:
+                logger.debug("plugin process registration failed", exc_info=True)
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(payload.encode("utf-8")), timeout=spec.timeout_sec
+            )
+        except asyncio.TimeoutError:
+            _kill_plugin(proc)
+            return ToolExecutionResult(
+                output=f"工具 {spec.label} 超过 {spec.timeout_sec}s 没返回，已中止。",
+                success=False,
+                timed_out=True,
+            )
+        except asyncio.CancelledError:
+            # 用户按了停止（或连接断了）：把整棵进程树收掉再让取消继续传播 ——
+            # "取消"必须等于"进程真的没了"，不能只是不等它了。
+            _kill_plugin(proc)
+            raise
     except OSError as exc:
         return ToolExecutionResult(output=f"启动工具失败：{exc}", success=False)
+    finally:
+        if registered and coordinator is not None and proc is not None:
+            try:
+                coordinator.unregister_fallback(session_id, proc)
+            except Exception:  # pragma: no cover - 注销失败不该盖住真正的结果
+                logger.debug("plugin process unregister failed", exc_info=True)
 
     stdout = out.decode("utf-8", errors="replace").strip()
     stderr = err.decode("utf-8", errors="replace").strip()

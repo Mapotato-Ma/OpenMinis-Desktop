@@ -404,6 +404,8 @@ def _model_for(provider_type: str, model_id: str) -> LLMModel | None:
 #: 连接池与 keep-alive 一起复用。
 _PROVIDER_CACHE: dict[tuple, Any] = {}
 _PROVIDER_CACHE_LIMIT = 8
+#: 被换下/清空、等着在关机时统一关闭的 provider（R14：池子的拥有者是缓存）。
+_PROVIDER_RETIRED: list[Any] = []
 
 
 def _provider_fingerprint(ptype: str, api_key: str, base_url: str,
@@ -417,13 +419,22 @@ def _provider_fingerprint(ptype: str, api_key: str, base_url: str,
 
 
 def reset_provider_cache() -> None:
-    """Drop the provider cache (settings changed / tests / shutdown)."""
+    """设置变了 / 测试 / 关机：把缓存里的 provider 挪去"待关闭"并清空缓存（R14）。
+
+    为什么不是直接 ``clear()``：那只是把引用丢掉，HTTP 连接池还在（等 GC），而
+    调用方（设置保存、测试）多半是**同步**上下文，没法 await ``aclose()``。所以
+    挪进 ``_PROVIDER_RETIRED``，由 :func:`close_provider_cache`（关机路径，异步）统一
+    关掉。缓存是这些池子的**唯一拥有者** —— 回合只借用，不再各自关。
+    """
+    _PROVIDER_RETIRED.extend(_PROVIDER_CACHE.values())
     _PROVIDER_CACHE.clear()
 
 
 async def close_provider_cache() -> None:
-    """Close every cached provider's connection pool."""
-    for provider in list(_PROVIDER_CACHE.values()):
+    """关闭所有 provider 的连接池（当前缓存的 + 被换下来等着关的）。"""
+    pending = list(_PROVIDER_CACHE.values()) + list(_PROVIDER_RETIRED)
+    _PROVIDER_RETIRED.clear()
+    for provider in pending:
         closer = getattr(provider, "aclose", None)
         if closer is None:
             continue
@@ -527,7 +538,8 @@ def build_provider(provider_id: str, conf: dict[str, Any]):  # noqa: ANN201
     provider = _create_provider(engine, api_key, model, base_url, ptype,
                                 cache_ttl=cache_ttl)
     if len(_PROVIDER_CACHE) >= _PROVIDER_CACHE_LIMIT:
-        _PROVIDER_CACHE.pop(next(iter(_PROVIDER_CACHE)))
+        # 淘汰也要走"退休"：直接 pop 等于把连接池丢给 GC（R14 的同一笔账）。
+        _PROVIDER_RETIRED.append(_PROVIDER_CACHE.pop(next(iter(_PROVIDER_CACHE))))
     _PROVIDER_CACHE[fingerprint] = provider
     return provider
 

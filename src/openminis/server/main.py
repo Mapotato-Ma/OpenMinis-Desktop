@@ -1620,12 +1620,12 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
             set_projects(None)
         except Exception:  # pragma: no cover - 清理失败不该影响收尾
             logger.debug("member projects clear failed", exc_info=True)
-        close = getattr(provider, "aclose", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:  # pragma: no cover
-                pass
+        # **这里不关 provider**（R14）。provider 是 ``_PROVIDER_CACHE`` 里的**共享**
+        # 实例（同一个配置指纹复用同一个连接池），回合只是**借用**它：在这里 aclose
+        # 会把池子关掉 —— 同时跑的另一轮（或紧接着的下一轮）拿到的是一个
+        # ``is_closed=True`` 的 client（隔离探针复现过：A 回合 aclose 之后 B 借到的
+        # client 已关），而"顺序回合也重建池"又正好抵消了缓存存在的意义。
+        # 拥有者是缓存：只在设置变更（reset）与进程退出（close_provider_cache）时关。
 
 
 async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:

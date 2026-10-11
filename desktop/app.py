@@ -66,8 +66,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=DEFAULT_PORT,
-        help=f"backend port (default {DEFAULT_PORT}; a busy port falls back to a free one)",
+        default=None,
+        help=(
+            f"backend port. 不给 = 优先 {DEFAULT_PORT}，被占就用一个空闲端口；"
+            "**显式给了** = 就是它，被占用时直接报错（不静默换端口）"
+        ),
     )
     parser.add_argument("--browser", action="store_true", help="open a browser tab instead of a native window")
     parser.add_argument("--no-window", action="store_true", help="start the backend only (headless / server mode)")
@@ -98,16 +101,20 @@ def _reuse_running(host: str, port: int) -> str | None:
     pinned taskbar entry plus a shortcut). Spinning up a second kernel on a
     random port would give the user two windows with two divergent session
     databases, so we point the new window at the existing server instead.
+
+    R07：判据是**握手**，不是 ``/api/health`` 返回 200 —— 任何 HTTP 服务都可能是
+    200，端口恰好被别的程序占着时会被误认成本产品的后端。单宿主之后这条路基本走不到
+    （第二个启动在拿到锁之前就交接掉了），留着是为了"锁还在、但名片指向的宿主刚重启"
+    这类边角。
     """
     if not port_in_use(host, port):
         return None
-    import urllib.request  # noqa: PLC0415
+    from desktop import instance  # noqa: PLC0415
 
-    try:
-        with urllib.request.urlopen(f"http://{host}:{port}/api/health", timeout=1.0) as resp:
-            if resp.status != 200:
-                return None
-    except Exception:
+    record = instance.read_host()
+    if not record or int(record.get("port") or 0) != int(port):
+        return None
+    if not instance.probe_host(record):
         return None
     return f"http://{host}:{port}"
 
@@ -137,6 +144,33 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("child console windows: %s", _no_console_status)
     trace.mark("imports")
 
+    # 单宿主契约（R06）：第一个启动的进程拿锁当宿主；后来者不建 backend、不建窗口，
+    # 只把"再开一个窗口"交给宿主然后自己退出。改前是每个启动都开一个进程、复用第一个
+    # 的 HTTP —— 关掉第一个窗口就把后端带走了。
+    from desktop import instance  # noqa: PLC0415
+
+    host_lock = instance.HostLock()
+    if not host_lock.acquire():
+        record = instance.read_host()
+        if record and instance.probe_host(record):
+            handed = instance.request_window()
+            logger.info(
+                "OpenMinis Desktop 已经在运行（pid %s）—— %s",
+                record.get("pid"),
+                "已请它再开一个窗口" if handed else "但它没有回应开窗请求",
+            )
+            return 0 if handed else 1
+        logger.error(
+            "单实例锁被占用，但对端不是本应用的宿主（端口/握手对不上）——"
+            "先关掉那个进程再启动。"
+        )
+        return 1
+    # 进程退出（正常或异常）都要把锁放掉：留着的话下次启动会被自己挡住。
+    # 操作系统在进程死亡时也会释放，这里只是让"正常退出"这条路更明确。
+    import atexit  # noqa: PLC0415
+
+    atexit.register(host_lock.release)
+
     # 上一次更新的事务收尾：如果上一回是"提交到一半就退出了/没确认成"，就在这里
     # 拿到结论（写成界面能看的那句话），并把**本次事务自己的**残留清掉 —— 现有
     # 安装一个字节都不动。失败不拦启动：它只影响"上次更新成没成"的说明。
@@ -163,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     plan = BootPlan(
         host=args.host,
         port=args.port,
+        # 显式给的端口被占 → 报错；不给 → 优先 8765、被占换空闲（R07 的两种语义）
+        explicit_port=args.port is not None,
         desktop_dir=desktop_dir,
         ui_active=ui_active,
         existing=existing,
@@ -239,6 +275,8 @@ def _present_headless(plan: BootPlan, args: argparse.Namespace) -> int:
                 port=plan.port,
                 desktop_dir=plan.desktop_dir,
                 ui_active=plan.ui_active,
+                explicit_port=plan.explicit_port,
+                announce_host=True,
                 log_level="debug" if plan.debug else "info",
             )
         except Exception as exc:

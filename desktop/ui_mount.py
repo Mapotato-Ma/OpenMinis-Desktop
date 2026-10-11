@@ -64,6 +64,18 @@ def reset_update_transaction() -> None:
     """丢掉进程内那份事务（测试之间互不串味；与内核 ``SettingsStore.reset()`` 同用途）。"""
     _update_txn["txn"] = None
 
+
+def _payload_version() -> str | None:
+    from . import updater  # noqa: PLC0415
+
+    return updater.installed_payload_version()
+
+
+def _shell_version() -> str:
+    from . import updater  # noqa: PLC0415
+
+    return updater.shell_version()
+
 #: 壳注册的"正常退出"回调。有它就走它（顺手收后端、关窗口）；没有就兜底硬退。
 #: 为什么用注册而不是 import：窗口在 launcher 手里，而 api 模块不该反过来依赖它。
 _restart_hook: dict[str, Callable[[], None] | None] = {"fn": None}
@@ -171,6 +183,31 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         from .provider_probe import chat_readiness  # noqa: PLC0415
 
         return JSONResponse(await chat_readiness())
+
+    async def _handshake(request: Any) -> JSONResponse:  # noqa: ARG001
+        """实例握手 [R07]：**证明"这个端口上是本应用的那个宿主"**。
+
+        为什么要它：启动时的"复用已有实例"改前只探 ``/api/health`` 是不是 200 ——
+        任何 HTTP 服务都可能是 200。于是端口恰好被别的程序占着时，界面会把它当成本
+        产品的后端去复用（然后一片 403/404）。现在判据是四项全对上：产品标记、协议
+        版本、宿主 pid、实例 id（后两项来自宿主的落盘名片）。
+        """
+        from . import instance  # noqa: PLC0415
+
+        record = instance.read_host()
+        return JSONResponse(
+            {
+                "desktop": True,
+                "protocol": instance.PROTOCOL,
+                "instanceId": str(record.get("instanceId") or ""),
+                "pid": int(record.get("pid") or os.getpid()),
+                "port": int(record.get("port") or 0),
+                "uiActive": bool(ui_active),
+                "payloadVersion": _payload_version(),
+                "shellVersion": _shell_version(),
+            },
+            headers=_NO_STORE,
+        )
 
     async def _clear_data(request: Any) -> JSONResponse:  # noqa: ARG001
         """一键清空对话数据（会话/消息/分组/压缩标记），保留供应商等一切设置。
@@ -469,6 +506,9 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             # 壳层与界面之间那点小事：界面靠 /api/desktop/info 画窗口 chrome，
             # 而不用从 user agent 去猜。
             Route("/api/desktop/info", _info, methods=["GET"], include_in_schema=False),
+            # /api/desktop/handshake —— "这个端口上是本应用的宿主吗" [R07]。
+            Route("/api/desktop/handshake", _handshake, methods=["GET"],
+                  include_in_schema=False),
             # 应用内更新（对标 CC Switch 那套）：探清单 / 下载安装 / 看进度 / 重启。
             Route("/api/desktop/update", _update_check, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/update", _update_apply, methods=["POST"], include_in_schema=False),

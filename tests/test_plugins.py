@@ -1635,3 +1635,80 @@ async def test_qq_ack_gives_way_to_the_real_result():
     assert sent == []
     logs = "".join(str(row["text"]) for row in adapter.logs())
     assert "留给结果" in logs
+
+
+# ---------------------------------------------------------------------------
+# R15 · 插件进程的生命周期：取消/超时都要把进程收掉
+# ---------------------------------------------------------------------------
+def _install_slow_tool_plugin(data_dir) -> Path:
+    """装一个"跑 4 秒后写个文件"的工具插件 —— 用它看进程有没有被真的杀掉。"""
+    root = store.plugins_dir() / "slow-tool"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "slow.py").write_text(
+        "import json, pathlib, sys, time\n"
+        "json.load(sys.stdin)\n"
+        "time.sleep(4)\n"
+        "pathlib.Path('leaked.txt').write_text('我活下来了', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (root / "plugin.json").write_text(json.dumps({
+        "id": "slow-tool",
+        "name": "慢工具",
+        "runtime": "manual",
+        "category": "tool",
+        "tools": [{
+            "id": "slow",
+            "name": "慢",
+            "description": "睡 4 秒再写个文件",
+            "parameters": {},
+            "command": ["python", "slow.py"],
+            "timeoutSec": 30,
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    store.set_enabled("slow-tool", True)
+    return root / "leaked.txt"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_plugin_tool_kills_its_process(data_dir):
+    """R15：取消**必须**等于"进程真的没了"。
+
+    改前 `run_tool` 里没有取消分支：CancelledError 只是结束等待，插件进程留在后台
+    继续跑（隔离探针：communicate 中取消、kill 调用 = 0）。用户按了停止，工具还在
+    干活 —— 与 shell 那条链同一个毛病。
+    """
+    from openminis.plugins import tools as plugin_tools
+
+    survivor = _install_slow_tool_plugin(data_dir)
+    registry = plugin_tools.build_registry()
+    name = plugin_tools.tool_full_id("slow-tool", "slow")
+    assert name in registry
+
+    task = asyncio.create_task(registry[name].executor("{}", "db-s1"))
+    await asyncio.sleep(1.0)                 # 让进程真的起来并进入 sleep
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(4.5)                 # 比脚本自己的 4 秒还长
+    assert not survivor.exists(), "插件进程没被杀掉 —— 取消之后它把活干完了"
+
+
+@pytest.mark.asyncio
+async def test_plugin_timeout_kills_the_whole_process_tree(data_dir):
+    """超时也要杀树并回收（改前只 kill 父进程、不 wait、不杀子孙）。"""
+    from openminis.plugins import tools as plugin_tools
+
+    survivor = _install_slow_tool_plugin(data_dir)
+    # 把超时压到 1 秒：进程会在写出那个文件之前被收掉
+    manifest = next(m for m in store.list_installed() if m.id == "slow-tool")
+    spec = next(s for s in manifest.tools if s.id == "slow")
+    import dataclasses
+
+    fast = dataclasses.replace(spec, timeout_sec=1)
+
+    result = await plugin_tools.run_tool(manifest, fast, "{}", "db-s1")
+
+    assert result.timed_out is True, result
+    await asyncio.sleep(4.5)
+    assert not survivor.exists(), "超时之后插件进程还在跑（只杀了父进程？）"

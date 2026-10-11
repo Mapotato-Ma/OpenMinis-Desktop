@@ -517,14 +517,11 @@ async def plan_subagent(store, request: str, *, auto_save: bool = False,
             ),
         )
         obj = _extract_json(raw)
-    finally:
-        if owned:
-            close = getattr(provider, "aclose", None)
-            if callable(close):
-                try:
-                    await close()
-                except Exception:  # pragma: no cover
-                    pass
+    except Exception:
+        # 这里**不关** provider（R14）：`build_chat_setup` 返回的是缓存里的共享实例，
+        # "owned" 只说明这次调用是它去要的，不代表它拥有那个连接池。关掉会把主对话
+        # 在用的池一起关。
+        raise
 
     # Fill required keys that the model may have omitted.
     for k, v in DEFAULT_FIELDS.items():
@@ -766,27 +763,24 @@ async def run_subagent(
     # ``subagent_delegate`` 已在上面被剔掉）。
     runtime = AgentRuntime(tools=inner_tools, chunk_sink=inner_sink)
     messages: list[LLMMessage] = [LLMMessage(LLMMessage.Role.USER, task)]
-    try:
-        # 子代理里的 ``read_image`` 与主对话走**同一条路**：识图槽转文字描述。
-        # 不强推 inline —— 网关若没给模型声明图片输入，字节会被 provider 换成
-        # 「图省略」占位，子代理看到的是 177 字符的路径文本、只能反复重读
-        # （实测的死循环）。描述文本足够它推理，产出仍是文字。
-        _, stop_reason = await runtime.run(
-            provider,
-            messages,
-            session_id=f"{session_id}:sub:{subagent_id}",
-            options=AgentRuntimeOptions(
-                system_prompt=persona,
-                max_turns=max(1, min(int(cfg.get("maxRounds", 6)), 12)),
-            ),
-        )
-    finally:
-        close = getattr(provider, "aclose", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:  # pragma: no cover
-                pass
+    # 子代理里的 ``read_image`` 与主对话走**同一条路**：识图槽转文字描述。
+    # 不强推 inline —— 网关若没给模型声明图片输入，字节会被 provider 换成
+    # 「图省略」占位，子代理看到的是 177 字符的路径文本、只能反复重读
+    # （实测的死循环）。描述文本足够它推理，产出仍是文字。
+    #
+    # 这里**不关 provider**（R14）：它是 ``_PROVIDER_CACHE`` 里的共享实例，子代理只是
+    # 借用。原先那个 finally 里的 aclose 会把主对话正在用的连接池一起关掉 —— 主/子回合
+    # 并行（或紧接着）跑时，另一方拿到的是已关闭的 client。拥有者是缓存，见
+    # ``chat_service.reset_provider_cache`` / ``close_provider_cache``。
+    _, stop_reason = await runtime.run(
+        provider,
+        messages,
+        session_id=f"{session_id}:sub:{subagent_id}",
+        options=AgentRuntimeOptions(
+            system_prompt=persona,
+            max_turns=max(1, min(int(cfg.get("maxRounds", 6)), 12)),
+        ),
+    )
 
     parts: list[str] = []
     for msg in messages[1:]:

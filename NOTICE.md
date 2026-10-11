@@ -70,6 +70,8 @@
 | `src/openminis/sandbox/execution_coordinator.py`（`set_session_cwd` / `clear_session_cwd` / 新增 `_drop_shell`）/ `src/openminis/agent/subagents.py`（新增 `bind_subagent_project`，无分配时也撤销） | 换工作目录时**把已有 shell 一起收掉**（`interrupt_now` 连子孙进程），下一次 execute 在新根里重建；同根重复设置不动手；子代理这一轮没分配项目就 `clear_session_cwd` | R16：改前只写 override 而运行中的 shell 保留启动时的目录 —— 同一会话里"文件工具按新项目解析、shell 还在旧项目里跑"。换项目对文件工具生效、对 shell 不生效，读写不是一个项目。护栏：`tests/test_channel_and_cwd.py`（换根收掉、同根不杀、撤销绑定也收、子代理无分配走 clear） |
 | `src/openminis/server/main.py`（`_shell_frame` / `_chat_frame` / `_ROUTED_FRAME_TYPES` + `_safe_send` 漏斗） | 会分流的帧一律带 `channel`：终端那条路盖 `"shell"`，其余在 `_safe_send` 里补 `"chat"` | R08：改前前端拿"现在终端忙不忙"（`state.termBusy`）猜一条 `delta`/`error` 该进聊天还是进终端抽屉 —— 终端在跑命令时，聊天里的一条报错被当成终端错误（聊天那一轮永不结束），旧会话/机器人通道的帧也能糊进当前会话。归属必须由帧自己说。护栏：`tests/test_channel_and_cwd.py::test_routed_frames_always_carry_a_channel` |
 | `tests/test_settings.py`（新增一条 R13 断言） | 新增用例，不改上游既有断言 | 上一条的护栏；`apply_full` 的"拒绝无副作用"是这条流水里最容易回归的一处 |
+| `src/openminis/settings/chat_service.py`（`reset_provider_cache` / `close_provider_cache` / 淘汰路径）/ `src/openminis/server/main.py`（`_run_chat` 的 finally）/ `src/openminis/agent/subagents.py`（`run_subagent` / `plan_subagent`） | **回合结束时不再关 provider**：provider 是 `_PROVIDER_CACHE` 里的共享实例，回合只借用；关池子只发生在设置变更（reset，退休待关）与进程退出（close） | R14：改前"谁拿到谁关" —— 一轮结束会把另一轮在途的连接池关掉（隔离探针：A `aclose` 之后 B 借到的 client 已 `is_closed=True`），顺序回合也各自重建池、缓存白做。护栏：`tests/test_provider_pool.py` |
+| `src/openminis/plugins/tools.py`（`_coordinator_for` / `_new_group_kwargs` / `_kill_plugin` + `run_tool` 的取消与 finally） | 插件子进程登记进执行协调器；取消/超时都**杀整棵进程树**并回收 | R15：改前既没登记也没有取消分支 —— 按停止只是结束等待，插件进程继续在后台干活（隔离探针：communicate 中取消、kill 调用 = 0）；超时也只 kill 父进程、不 wait、不杀子孙。护栏：`tests/test_plugins.py`（取消/超时后"4 秒后才写的文件"不许出现） |
 
 上游修好之后删掉这些改动即可回到「一行未改」——判据是 `curl` 一份上游 `main`
 的对应文件，确认问题已经不在。
@@ -86,6 +88,8 @@ desktop/                        原生窗口外壳（pywebview + 后台 uvicorn 
   server_runner.py              后台线程跑 uvicorn + 健康探测
   ui_mount.py                   把桌面路由挂到内核 FastAPI 应用上
   window.py                     pywebview 窗口与 JS API
+  instance.py                   单实例锁 + 宿主名片 + "再开一个窗口"的交接
+  update_transaction.py         应用内更新的事务（一个 job、一个状态机、单飞）
   assets/icon.ico               应用图标
   assets/icon.png
 
