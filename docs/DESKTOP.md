@@ -488,6 +488,34 @@ CI 的 Windows 上红的地方可以完全不同（见下面的验证记录）�
 
 ---
 
+## 5.5 应用内更新：一次更新就是一个事务
+
+更新分两条路（`desktop/updater.py`）：只换 `payload/`（内核 + 界面，几 MB）与换整包
+（壳变了，几十 MB）。两条路**共用同一个助手脚本与同一个事务**
+（`desktop/update_transaction.py`，见 ADR-0003）：
+
+    idle → checking → downloading → staged → committing → done
+
+- **准备（`POST /api/desktop/update`）**：单飞占住一个 job（已有未终结的任务就返回
+  409 + 它的快照，不再开第二个线程），下载 → 校验 sha256 → 解到 `payload.new-<jobId>`
+  或 `_openminis-update-<jobId>/`，然后落 journal、**到此为止**。
+- **提交（`POST /api/desktop/update/restart`）**：用户点「重启并完成替换」才起助手，
+  并且只起一个。助手等本进程退出 → 让位（`*.old-<stamp>`）→ 就位 → 启动新 exe →
+  **等新版写 `updates/boot-ok.json`** → 才删旧目录。
+- 新版进程在后端健康之后自己写那个标记（`server_runner.start_server` →
+  `updater.mark_boot_ok()`）；等不到就保留旧目录，并在下次启动时由 `recover()` 把结论
+  写成界面能看到的那句话。`updates/txn.json` 是跨进程的权威（第二个窗口看得到同一个
+  任务）。
+
+界面同时显示**正在跑的版本**与**待启用的版本** —— 载荷更新是"退出后再切"，下载完进程里
+跑的还是旧版，混在一起会让人以为更新没成（R05）。
+
+真机演练：`python scripts/update_drill.py`（在临时目录里真跑 `cmd` 助手，两条分支都要过：
+新版正常报告启动、以及新版起不来时要保留旧版本）。单元测试只断言"脚本里写了哪几行"，
+这个脚本负责"它到底做没做对"。
+
+---
+
 ## 6. 验证记录
 
 在 Alpine/aarch64（iSH）上用 Python 3.12 实测通过：

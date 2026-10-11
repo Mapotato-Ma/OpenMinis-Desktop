@@ -137,6 +137,19 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("child console windows: %s", _no_console_status)
     trace.mark("imports")
 
+    # 上一次更新的事务收尾：如果上一回是"提交到一半就退出了/没确认成"，就在这里
+    # 拿到结论（写成界面能看的那句话），并把**本次事务自己的**残留清掉 —— 现有
+    # 安装一个字节都不动。失败不拦启动：它只影响"上次更新成没成"的说明。
+    try:
+        from desktop.ui_mount import update_transaction  # noqa: PLC0415
+
+        recovered = update_transaction().recover()
+        if recovered is not None:
+            logger.info("previous update transaction recovered: %s (%s)",
+                        recovered.id, recovered.phase)
+    except Exception:  # pragma: no cover - 恢复失败只影响说明
+        logger.debug("update transaction recovery failed", exc_info=True)
+
     desktop_dir = paths.desktop_web_dir()
     if desktop_dir is None:
         logger.warning("web/desktop not found — the desktop UI will not be available")

@@ -224,6 +224,15 @@ def start_server(
     handle = DesktopServer(
         host=host, port=chosen, access_token=token, _server=server, _thread=thread
     )
+    # 「我起来了」——只有后端真的健康之后才留这个标记。上一次更新起的助手在等它
+    # 才敢删旧版本（见 updater.mark_boot_ok 的说明：发出 start 不等于新版能用）。
+    # 没有正在切换的更新时它什么都不做、一个文件都不写。
+    try:
+        from .updater import mark_boot_ok  # noqa: PLC0415
+
+        mark_boot_ok()
+    except Exception:  # pragma: no cover - 标记失败不该拦住开窗口
+        logger.debug("boot-ok marker failed", exc_info=True)
     publish_access(handle)
     return handle
 

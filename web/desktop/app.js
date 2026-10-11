@@ -4502,9 +4502,12 @@ async function loadAbout() {
 
 /* ── 应用内更新（对标 CC Switch 那套：拉清单 → 下载 → 换载荷 → 重启）───────── */
 
+// 相位与后端 update_transaction 的状态机一一对应（准备 ≠ 提交：下载解压完只是
+// staged，真正替换发生在用户点「重启并完成替换」那一下 —— 也只有那一下才会去
+// 起助手，改前是"下载完就把助手叫起来等 90 秒"，超时后界面还在说重启即完成）。
 const UPDATE_LABEL = { idle: '还没检查', checking: '正在检查…', downloading: '正在下载…',
-  installing: '正在安装…', ready: '已就绪，重启生效', failed: '失败',
-  done: '已是最新', manual: '需要整包装', restart: '整包已就位，重启即完成替换' };
+  staged: '已下载并校验完成', committing: '正在退出并完成替换…', failed: '失败',
+  done: '已是最新', manual: '需要手动换整包' };
 
 function updateHint(t) {
   const el2 = $('updateStatus');
@@ -4512,6 +4515,12 @@ function updateHint(t) {
   let text = UPDATE_LABEL[t.phase] || t.phase;
   if (t.phase === 'downloading' && t.total) {
     text += ` ${Math.round((t.done / t.total) * 100)}%（${(t.done / 1048576).toFixed(1)} / ${(t.total / 1048576).toFixed(1)} MB）`;
+  }
+  // 「正在跑」与「待启用」是两份（R05）：载荷更新是"退出后再切"，所以下载完
+  // 进程里跑的还是旧版。两个都写出来，免得用户以为更新已经生效了。
+  if (t.phase === 'staged' && t.pendingVersion) {
+    text += `（当前 v${t.runningVersion || '?'} → 待启用 v${t.pendingVersion}）`
+      + '，点「重启并完成替换」生效';
   }
   if (t.error) text += '：' + t.error;
   if (t.note) text += '：' + t.note;
@@ -4598,18 +4607,28 @@ async function applyUpdate() {
   try {
     const r = await api('/desktop/update', { method: 'POST' });
     if (r.ok === false) throw new Error(r.error || '无法开始更新');
-    // 更新在后端后台跑，这里轮询到终态为止。
+  } catch (e) {
+    // 409 = 已经有一个更新在跑（双窗口或连点两次）。**这不是失败** —— 那个 job
+    // 就在后端，接着轮询它的进度就是了，不再开第二个（R03）。
+    if (!/在进行中|already/i.test(String(e.message || ''))) {
+      updateHint({ phase: 'failed', error: e.message });
+      if (btn) btn.removeAttribute('loading');
+      return;
+    }
+  }
+  try {
+    // 更新在后端后台跑，这里轮询到它进入等待重启（staged）或终态为止。
     for (let i = 0; i < 600; i++) {
       await new Promise((done) => setTimeout(done, 500));
       const t = await api('/desktop/update/status');
       updateHint(t);
-      if (t.phase === 'ready' || t.phase === 'restart') {
+      if (t.phase === 'staged') {
         if (btn) btn.hidden = true;
         const restart = $('btnRestartUpdate');
         if (restart) {
           restart.hidden = false;
-          // 整包那条路：重启就是"完成替换"那一步，说清楚点。
-          if (t.phase === 'restart') restart.textContent = '重启并完成替换';
+          // 载荷与整包走的是同一个助手、同一步"退出后切换"，文案统一。
+          restart.textContent = '重启并完成替换';
         }
         return;
       }
@@ -4628,11 +4647,14 @@ async function restartForUpdate() {
   try {
     await api('/desktop/update/restart', { method: 'POST' });
     // 诚实一点：窗口会不会自己回来取决于系统（原版这里只说"会自动回来"，
-    // 助手失败时用户就懵在那儿了 —— 2026-10-08 实测）。所以顺手把退路写清楚。
+    // 助手失败时用户就懵在那儿了 —— 2026-10-08 实测）。所以顺手把退路写清楚，
+    // 并把"新版没起来时旧版会原样留着"这条机制说明白（删旧版要等新版报告启动
+    // 成功，见 desktop/updater.py 的 boot-ok 标记）。
     updateHint({
-      phase: 'installing',
+      phase: 'committing',
       note: '正在重启：窗口会关闭，通常几秒后自己回来。'
-        + '若 10 秒内没回来，直接手动打开一次 —— 新版本已经装好了，手动打开完全等价。',
+        + '若 30 秒内没回来，直接手动打开一次 —— 新版本已经装好了，手动打开完全等价。'
+        + '（新版若起不来，助手会保留旧版本并写进日志，不会把能用的那份删掉。）',
     });
   } catch (e) {
     updateHint({ phase: 'failed', error: e.message });

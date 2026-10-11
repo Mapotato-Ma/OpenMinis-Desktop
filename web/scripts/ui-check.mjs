@@ -597,11 +597,17 @@ test('整包更新：两步确认真的会拦住第一次点击', () => {
   assert.ok(guard < req && arm < req, '确认的判断必须发生在真正开始下载之前');
 });
 
-test('整包更新：终态多了一个 restart（重启即完成替换）', () => {
+test('更新：准备（staged）与提交（committing）是两个相位，别再把它们混成"终态"', () => {
+  // 改前的相位是 ready / restart —— 而后端那时候其实是"下载完就把助手叫起来了"，
+  // 助手等 90 秒自删、界面还说重启即完成替换。现在后端只有 staged（等用户点）与
+  // committing（助手在外面跑）两个相位，界面必须认这两个名字，否则会一直转圈。
   const app = read('app.js');
-  assert.ok(/t\.phase === 'ready' \|\| t\.phase === 'restart'/.test(app),
-    '轮询没认 "restart" 终态 —— 整包装好之后界面会一直转圈');
-  assert.ok(/restart: '整包已就位/.test(app), '没有 restart 阶段的文案');
-  assert.ok(app.includes('restartStage') || app.includes("restart.textContent = '重启并完成替换'"),
-    '整包那条路的重启按钮没有说清"这一步就是完成替换"');
+  assert.ok(/t\.phase === 'staged'/.test(app),
+    '轮询没认 "staged" —— 下载校验完成之后界面会一直转圈');
+  assert.ok(!/'ready'|'restart'/.test(app), '还在认已经不存在的老相位名');
+  assert.ok(/staged: '已下载并校验完成'/.test(app), '没有 staged 阶段的文案');
+  assert.ok(app.includes("restart.textContent = '重启并完成替换'"),
+    '重启按钮没有说清"这一步就是完成替换"');
+  assert.ok(/t\.phase === 'staged' && t\.pendingVersion/.test(app),
+    '没有把"正在跑的版本"和"待启用的版本"分开显示（R05）');
 });
