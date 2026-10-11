@@ -28,6 +28,8 @@ const state = {
   termHistory: [],
   termIdx: -1,
   termBusy: false,
+  /** 发送代次：每一轮发送 +1（R09）。冻结下来的身份用它区分"这是哪一次发送"。 */
+  turnGen: 0,
   currentFile: null,
   changes: [],         // file edits seen this session, for the diff tab
   filter: '',
@@ -68,9 +70,14 @@ function toast(msg, kind) {
 
 /* ── REST helper ─────────────────────────────────────────────────────── */
 async function api(path, opts = {}) {
+  // 头部要**合并**：给了自定义头（如 If-Match）时不能把 Content-Type 挤掉。
+  const headers = {
+    ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(opts.headers || {}),
+  };
   const res = await fetch(API + path, {
-    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
     ...opts,
+    headers: Object.keys(headers).length ? headers : undefined,
   });
   const text = await res.text();
   let data = null;
@@ -459,7 +466,10 @@ async function flushQueue() {
   if (state.streaming || !state.queue.length) { renderQueue(); return; }
   const next = state.queue.shift();
   renderQueue();
-  await sendTurn(next.text, next.typed, next.att);
+  // 排队时捕获的身份一路带下去：出队时用户可能早就切到别的会话了（R09）。
+  await sendTurn(next.text, next.typed, next.att, {
+    sid: next.sid, workspace: next.workspace, gen: next.gen,
+  });
 }
 
 function endTurn() {
@@ -501,6 +511,23 @@ function setStatusTurn(txt) {
 }
 
 /* ── frame dispatch ──────────────────────────────────────────────────── */
+
+/* 帧归属（R08）：谁的消息归谁，只认帧上的字段，不看"当前界面忙不忙"。
+   后端给终端（沙箱抽屉）的帧盖 `channel: "shell"`，其余一律按聊天算；聊天帧另带
+   `sessionId`。改前是 `f.sessionId == null && state.termBusy` 这种猜法 —— 终端在跑
+   命令时聊天里的报错会被当成终端错误，旧会话/别的通道的帧也能糊进当前会话。 */
+function isShellFrame(f) { return !!f && f.channel === 'shell'; }
+/** 这一帧属于**当前正在看的会话**吗（没有 sessionId 的帧算当前 —— 那是本回合自己的）。 */
+function belongsToCurrentSession(f) {
+  if (!f || f.sessionId == null) return true;
+  return !state.sessionId || f.sessionId === state.sessionId;
+}
+/** 只把属于当前会话的正文写进正文区；别的会话的帧直接丢（服务端已落库，切过去会读回来）。 */
+function appendChatDelta(f) {
+  if (!belongsToCurrentSession(f)) return;
+  appendDelta(f.text || '');
+}
+
 function handleFrame(f) {
   switch (f.type) {
     case 'guard_confirm':
@@ -509,15 +536,22 @@ function handleFrame(f) {
       break;
     case 'delta':
       // Chat and shell deltas share a frame type; only chat carries a
-      // sessionId. While a terminal command is in flight, route the
-      // session-less ones to the drawer instead of the transcript.
-      if (f.sessionId == null && state.termBusy) termAppend(f.text || '');
-      else if (f.text) appendDelta(f.text);
+      // sessionId.
+      //
+      // 归属由**帧自己**说（后端给终端帧盖 channel="shell"）：改前这里是
+      // `f.sessionId == null && state.termBusy` —— 拿"现在终端忙不忙"去猜这帧是谁的。
+      // 后果实测过：终端在跑命令时，聊天里的一条 400 会把正文写进终端抽屉；反过来
+      // 旧会话/别的通道（机器人）的 delta 也能糊到当前会话的正文里。收帧那一刻的界面
+      // 状态不是证据，帧上的通道才是。
+      if (isShellFrame(f)) termAppend(f.text || '');
+      else if (f.text) appendChatDelta(f);
       break;
     case 'toolStart':
-      addToolCardToTurn(f.id, f.name, f.input);
+      if (belongsToCurrentSession(f)) addToolCardToTurn(f.id, f.name, f.input);
       break;
     case 'toolEnd': {
+      // toolEnd 帧没有 sessionId（后端只在 toolStart 上带）：它归**当前这一轮**，
+      // 没有正在跑的正文就什么也不画。
       const t = state.turn;
       const card = t && f.id ? t.toolCards.get(f.id) : null;
       settleToolCard(card, f.ok, f.output, f.ms);
@@ -538,6 +572,7 @@ function handleFrame(f) {
       subagentFrame(f);
       break;
     case 'fallback': {
+      if (!belongsToCurrentSession(f)) break;
       // 主模型限流/超时切兜底模型：以前完全静默，用户只会觉得"模型变笨了"
       const note = el('div', 'fallback-note',
         '⚠ 主模型这轮不可用（' + (f.reason || '限流或超时') + '），已改用 '
@@ -547,7 +582,10 @@ function handleFrame(f) {
       break;
     }
     case 'chatSession':
-      if (f.sessionId && f.sessionId !== state.sessionId) {
+      // 只在**这一轮是我们发起的**时候认领新会话 id（新会话首条消息没有 id，id 由
+      // 服务端的 chatSession 帧回给界面）。别的通道（机器人）跑出来的帧也会带
+      // chatSession 广播过来 —— 无条件认领会把用户正看着的会话切走（R08）。
+      if (f.sessionId && f.sessionId !== state.sessionId && state.streaming) {
         state.sessionId = f.sessionId;
         updateSessionHeader();
         // 服务端替我们新建了会话（首条消息没带 session_id）→ 立刻归到面板的工作区。
@@ -559,7 +597,17 @@ function handleFrame(f) {
       renderContextUsage(f);
       break;
     case 'done':
-      if (f.exitCode != null && state.termBusy) {
+      if (isShellFrame(f)) {
+        // 终端帧：按帧自己的通道熄灭抽屉的 busy 灯，不再看"终端忙不忙"这种全局状态。
+        if (state.termBusy) {
+          state.termBusy = false;
+          termBuffer = null;
+          if (f.exitCode != null && f.exitCode !== 0) termLine(`[退出码 ${f.exitCode}]`, 'err');
+        }
+      } else if (!belongsToCurrentSession(f)) {
+        // 别的会话的一轮结束了 —— 不许碰当前会话的流式状态与队列（R08）。
+        break;
+      } else if (f.exitCode != null && state.termBusy) {
         state.termBusy = false;
         termBuffer = null;
         if (f.exitCode !== 0) termLine(`[退出码 ${f.exitCode}]`, 'err');
@@ -574,12 +622,15 @@ function handleFrame(f) {
       }
       break;
     case 'error':
-      if (state.termBusy) {
+      if (isShellFrame(f)) {
+        // 终端错误只熄灭终端那一侧。改前只要 state.termBusy 就按终端错误处理 ——
+        // 终端在跑命令时，聊天里的一条报错会被吞成"终端错了"，聊天这一轮永不结束。
         state.termBusy = false;
         termBuffer = null;
         termLine(f.error || '命令执行失败', 'err');
         break;
       }
+      if (!belongsToCurrentSession(f)) break;   // 别的会话的报错，与当前会话无关
       if (state.turn) {
         appendDelta(`\n\n> ⚠️ ${f.error}`);
         // A model-provider failure is fixed in settings, not by retrying.
@@ -628,7 +679,11 @@ async function send() {
   if (state.streaming) {
     // 生成中再发 = **排队**，内容不丢。
     // 改前这里只 toast 一句「上一条还在处理中」就 return 了 —— 打好的字白打。
-    state.queue.push({ text, typed, att });
+    // 队列元素**带上它归属的会话**（R09）：出队时用户可能已经切到别的会话了。
+    state.queue.push({
+      text, typed, att,
+      sid: state.sessionId, workspace: currentWorkspace, gen: state.turnGen,
+    });
     renderQueue();
     return;
   }
@@ -636,8 +691,20 @@ async function send() {
   await sendTurn(text, typed, att);
 }
 
+/** 这一轮的身份（R09）：进入发送时抓一次，之后绑定与发帧都用它。
+
+    改前是 `await bindSessionWorkspace(...)` 之后再读 `state.sessionId` —— 而绑定是个
+    网络往返：等它回来时用户可能已经点去会话 B 了，于是 **A 的消息被发给了 B**
+    （实测复现过：绑定暂停、切到 B、恢复后 WS 帧里的 session_id 是 B）。身份必须
+    在进入发送那一刻冻结，而不是在等待之后重新读一遍全局状态。 */
+function captureTurnIdentity() {
+  state.turnGen = (state.turnGen || 0) + 1;
+  return { sid: state.sessionId, workspace: currentWorkspace, gen: state.turnGen };
+}
+
 /** 真正把一条消息送出去（手动发送和排队出队都走这里）。 */
-async function sendTurn(text, typed, att) {
+async function sendTurn(text, typed, att, identity) {
+  const id = identity || captureTurnIdentity();
 
   emptyNode().style.display = 'none';
   const node = el('div', 'msg user');
@@ -674,9 +741,20 @@ async function sendTurn(text, typed, att) {
   // 看不到用户的项目（用户实测：面板里明明有文件，agent 说工作区是空的）。
   // 老会话（v0.4.1 之前建的）从来没绑过，这一步正好补上，是幂等的。
   // currentWorkspace 为空时不动 —— 那可能是用户有意让会话待在默认沙箱。
-  if (state.sessionId && currentWorkspace) await bindSessionWorkspace(currentWorkspace);
+  // 绑定与发帧用**同一份**身份：绑定落地的是 id.sid，帧也发往 id.sid。
+  if (id.sid && id.workspace) await bindSessionWorkspace(id.workspace, id.sid);
 
-  wsSend({ type: 'chat', text, session_id: state.sessionId || undefined });
+  if (state.sessionId !== id.sid) {
+    // 等待期间视图切走了。消息**照发**给它原本的会话（服务端会落库），但当前视图
+    // 不认领这一轮 —— 后续帧按帧归属被丢掉（R08），切回去就能看到。比"发给错误的
+    // 会话"好得多：那会让用户把 A 的问题算到 B 头上。
+    endTurn();
+    toast('已把消息发到原来的会话 —— 切回去能看到回复', 'ok');
+    wsSend({ type: 'chat', text, session_id: id.sid || undefined });
+    return;
+  }
+
+  wsSend({ type: 'chat', text, session_id: id.sid || undefined });
 }
 
 function stopTurn() {
@@ -861,6 +939,11 @@ function renderMessages(messages) {
   for (const m of messages) {
     const isUser = m.role === 'user';
     const node = el('div', 'msg ' + (isUser ? 'user' : 'assistant'));
+    // R10：这一轮是被用户中断的 —— 已积累的正文与工具记录都还在（不再"刷新就没了"），
+    // 但必须说清楚它没跑完，否则用户会以为模型话说到一半停了。
+    if (m.interrupted) {
+      node.appendChild(el('div', 'msg-interrupted', '已中断（这一轮没跑完，已积累的内容仍然保留）'));
+    }
     const role = el('div', 'msg-role');
     role.appendChild(isUser ? el('span', 'avatar', '你') : ic('sparkles', 'avatar'));
     role.appendChild(document.createTextNode(isUser ? '你' : 'OpenMinis'));
@@ -1060,8 +1143,10 @@ function renderWorkspacePicker() {
     内核给没归入工作区的会话只在默认沙箱（`<data>/workspace/db-<会话id>`）里活动，
     所以文件面板里看到的项目它一个也够不着（用户实测：面板里有文件，agent 说工作区是空的）。
     桌面界面以前从来没调过这个接口 —— 面板换了根，agent 的 cwd 原地不动。 */
-async function bindSessionWorkspace(folderId) {
-  const sid = state.sessionId;
+async function bindSessionWorkspace(folderId, sessionId) {
+  // sid 优先取调用方给的（发送路径冻结下来的那个），退回"当前选中的会话" ——
+  // 等待期间用户切走时，绑定必须落在当时那个会话上（R09）。
+  const sid = sessionId || state.sessionId;
   if (!sid) return;
   try {
     await api(`/chats/sessions/${encodeURIComponent(sid)}/workspace`, {
@@ -2540,7 +2625,12 @@ async function loadUsage() {
     const g = data.grandTotal || {};
     const total = $('usageTotal');
     total.innerHTML = '';
-    const items = [['输入', g.formattedInput], ['输出', g.formattedOutput], ['缓存读', g.formattedCacheRead], ['缓存写', g.formattedCacheCreation]];
+    // 命中率单独一条：它是「缓存到底有没有生效」唯一能自证的数字（改前界面只给
+    // 缓存读/写两个绝对量，用户只能凭感觉说"命中率不高"）。
+    const hit = (g.cacheHitRate == null) ? '—' : (g.cacheHitRate + '%');
+    const items = [['输入', g.formattedInput], ['输出', g.formattedOutput],
+      ['缓存读', g.formattedCacheRead], ['缓存写', g.formattedCacheCreation],
+      ['缓存命中率', hit]];
     for (const [lab, num] of items) {
       const it = el('div', 'ut-item');
       it.appendChild(el('div', 'ut-num', num || '0'));
@@ -3146,6 +3236,9 @@ const settings = {
   model: null,      // SettingsModel 的状态（草稿 + baseline）。规则都在那个模块里。
   pane: 'models',
   probe: {},        // providerId -> last 测试连接 / 拉取模型列表 outcome
+  rev: '',          // 服务端配置指纹（R11）：保存时带回去，过期就让服务端拒绝
+  gen: 0,           // 草稿代次（R11）：每改一次 +1 —— 保存响应回来时据此判断
+                    // "等待期间用户又改了没有"，不许把新编辑抹掉
 };
 
 /* ── 设置状态怎么走 ────────────────────────────────────────────────────
@@ -3155,6 +3248,9 @@ const settings = {
    记账那套正是「点了某个按钮就莫名亮出未保存」的来源。
    ─────────────────────────────────────────────────────────────────────── */
 function dispatch(action) {
+  // 任何一次动作都算"草稿又动了"（R11）。保存的 await 期间用户改了东西时，我们靠
+  // 这个代次判断"响应里的服务端快照不能拿来覆盖当前草稿"。
+  settings.gen += 1;
   settings.model = SettingsModel.reduce(settings.model, action);
 }
 
@@ -3637,8 +3733,31 @@ async function loadSettings() {
   try {
     const data = await api('/settings');
     settings.data = data;
+    settings.rev = data.revision || '';
     // prev = 上一次的草稿：重新载入不该把用户没保存的编辑抹掉
     settings.model = SettingsModel.load(data, settings.model);
+    settings.loaded = true;
+    settings.probe = {};
+    renderSettings();
+    fillDataRoot();
+  } catch (e) {
+    toast('设置加载失败: ' + e.message, 'err');
+  }
+}
+
+/** 丢弃草稿：回到服务端那一份，**包括清掉还没保存的密钥**（R12）。
+
+    改前"丢弃"和"普通重新加载"共用同一个 `loadSettings(prev)` —— 而它刻意保留草稿，
+    于是用户点确定之后什么都没丢：agent/槽位那些改动还在，只有 providers 被重建了，
+    于是又留下"槽位指向一个不存在的 provider"这种悬空状态。两个动作必须是两件事：
+    * 重新加载（loadSettings）：保留草稿，只换基线 —— 别处改过/切窗口时用；
+    * 丢弃（这里）：草稿整份丢掉、密钥也清掉 —— 用户明确说"不要这些改动"。 */
+async function discardSettingsDraft() {
+  try {
+    const data = await api('/settings');
+    settings.data = data;
+    settings.rev = data.revision || '';
+    settings.model = SettingsModel.load(data, null);
     settings.loaded = true;
     settings.probe = {};
     renderSettings();
@@ -4069,6 +4188,17 @@ function renderProviders() {
     row2.appendChild(selectField('类型', p.type,
       ((settings.data && settings.data.providerTypes) || []).map((t) => [t.type, t.label + (t.engine ? '' : '（引擎未移植）')]),
       (val) => { patch({ type: val }); renderProviders(); renderModelsHealth(); }));
+    // 提示缓存的 TTL：只对 Anthropic 有意义（改前这个开关硬编码为关、界面里根本没有）。
+    // 1 小时：手机端「隔一会儿再问」的节奏下明显更省；代价是缓存**写入**按 2× 计费
+    // （5 分钟那档是 1.25×），所以五分钟内高频追问的场景切 5 分钟更划算。
+    if (meta.engine === 'anthropic') {
+      const ttl = selectField('提示缓存', p.promptCacheTtl || '1h',
+        [['1h', '1 小时（推荐）'], ['5m', '5 分钟']],
+        (val) => patch({ promptCacheTtl: val }));
+      ttl.title = '缓存写入按 2× 计费（5 分钟那档 1.25×）：1 小时适合隔一会儿再问，'
+        + '5 分钟适合五分钟内连着追问。';
+      row2.appendChild(ttl);
+    }
     const keyField = passwordField(
       p.hasKey && !pendingKeys.has(p.id) ? 'API Key（已保存，留空则不变）' : 'API Key',
       (val) => {
@@ -4269,6 +4399,9 @@ async function saveSettings({ silent } = {}) {
   // 载荷由模块组装 —— 「密钥留空=不变」「槽位要么完整要么 null」「只发真的改过
   // 的身份」这些规则都在那边，并有 node 测试盯着。
   const { body } = SettingsModel.toPayload(settings.model);
+  // R11：进入保存时冻结"代次"与"服务端指纹"。
+  const gen = settings.gen;
+  const rev = settings.rev;
 
   // 人格走的是另一条路（/system/soul），但它和别的设置共用这一个「保存」按钮 ——
   // 用户不会知道有两套。所以在这里一并提交，否则改完人格点保存会静默丢失。
@@ -4276,16 +4409,36 @@ async function saveSettings({ silent } = {}) {
   if (soulDirty()) ok = await saveSoul({ silent: true });
 
   try {
-    const data = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
+    const data = await api('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      // 过期就让服务端拒绝（409）—— 两个窗口各拿一份全量快照先后保存时，
+      // 后写的会把前写的整段抹掉（A 加了 provider、B 一保存它就没了）。
+      headers: rev ? { 'If-Match': rev } : undefined,
+    });
     settings.data = data;
-    // 服务端已接受：草稿即新的 baseline。密钥框因此清空 —— 与服务端「不把密钥
-    // 发回来」的约定一致，客户端从不需要搬运密文。
-    settings.model = SettingsModel.load(data, null);
+    settings.rev = data.revision || '';
+    if (settings.gen === gen) {
+      // 等待期间没再编辑：草稿即新的 baseline。密钥框因此清空 —— 与服务端
+      // 「不把密钥发回来」的约定一致，客户端从不需要搬运密文。
+      settings.model = SettingsModel.load(data, null);
+    } else {
+      // 等待期间用户又改了 —— **那次编辑必须留下**。只把基线换成服务端这一份
+      // （prev=当前草稿 = 保留未保存的编辑），绝不整份覆盖（R11 的那个 bug：
+      // 保存响应回来把等待期间敲进去的东西抹回旧值）。
+      settings.model = SettingsModel.load(data, settings.model);
+      toast('保存成功；等待期间的新改动还没保存');
+    }
     renderSettings();
     if (!silent && ok) toast('已保存');
     return ok;
   } catch (e) {
-    toast('保存失败: ' + e.message, 'err');
+    if (/改过|409/.test(String(e.message || ''))) {
+      // 别处改过：不能假装保存成功，也不能自动覆盖 —— 让用户决定
+      toast('设置已在别处改过：请点「重新加载」看最新值，再决定怎么保存', 'err');
+    } else {
+      toast('保存失败: ' + e.message, 'err');
+    }
     return false;
   }
 }
@@ -4311,7 +4464,8 @@ function renderAgentForm() {
 
 async function confirmCloseSettings() {
   if (sdirty().any && !(await confirmDialog('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）'))) return;
-  if (sdirty().any) loadSettings();   // 丢掉草稿，回到服务端那份
+  // R12：这里是**丢弃**，不是"重新加载" —— 必须真的把草稿（含未保存的密钥）丢掉。
+  if (sdirty().any) await discardSettingsDraft();
   closeSettings();
 }
 
@@ -4502,9 +4656,12 @@ async function loadAbout() {
 
 /* ── 应用内更新（对标 CC Switch 那套：拉清单 → 下载 → 换载荷 → 重启）───────── */
 
+// 相位与后端 update_transaction 的状态机一一对应（准备 ≠ 提交：下载解压完只是
+// staged，真正替换发生在用户点「重启并完成替换」那一下 —— 也只有那一下才会去
+// 起助手，改前是"下载完就把助手叫起来等 90 秒"，超时后界面还在说重启即完成）。
 const UPDATE_LABEL = { idle: '还没检查', checking: '正在检查…', downloading: '正在下载…',
-  installing: '正在安装…', ready: '已就绪，重启生效', failed: '失败',
-  done: '已是最新', manual: '需要整包装', restart: '整包已就位，重启即完成替换' };
+  staged: '已下载并校验完成', committing: '正在退出并完成替换…', failed: '失败',
+  done: '已是最新', manual: '需要手动换整包' };
 
 function updateHint(t) {
   const el2 = $('updateStatus');
@@ -4512,6 +4669,12 @@ function updateHint(t) {
   let text = UPDATE_LABEL[t.phase] || t.phase;
   if (t.phase === 'downloading' && t.total) {
     text += ` ${Math.round((t.done / t.total) * 100)}%（${(t.done / 1048576).toFixed(1)} / ${(t.total / 1048576).toFixed(1)} MB）`;
+  }
+  // 「正在跑」与「待启用」是两份（R05）：载荷更新是"退出后再切"，所以下载完
+  // 进程里跑的还是旧版。两个都写出来，免得用户以为更新已经生效了。
+  if (t.phase === 'staged' && t.pendingVersion) {
+    text += `（当前 v${t.runningVersion || '?'} → 待启用 v${t.pendingVersion}）`
+      + '，点「重启并完成替换」生效';
   }
   if (t.error) text += '：' + t.error;
   if (t.note) text += '：' + t.note;
@@ -4598,18 +4761,28 @@ async function applyUpdate() {
   try {
     const r = await api('/desktop/update', { method: 'POST' });
     if (r.ok === false) throw new Error(r.error || '无法开始更新');
-    // 更新在后端后台跑，这里轮询到终态为止。
+  } catch (e) {
+    // 409 = 已经有一个更新在跑（双窗口或连点两次）。**这不是失败** —— 那个 job
+    // 就在后端，接着轮询它的进度就是了，不再开第二个（R03）。
+    if (!/在进行中|already/i.test(String(e.message || ''))) {
+      updateHint({ phase: 'failed', error: e.message });
+      if (btn) btn.removeAttribute('loading');
+      return;
+    }
+  }
+  try {
+    // 更新在后端后台跑，这里轮询到它进入等待重启（staged）或终态为止。
     for (let i = 0; i < 600; i++) {
       await new Promise((done) => setTimeout(done, 500));
       const t = await api('/desktop/update/status');
       updateHint(t);
-      if (t.phase === 'ready' || t.phase === 'restart') {
+      if (t.phase === 'staged') {
         if (btn) btn.hidden = true;
         const restart = $('btnRestartUpdate');
         if (restart) {
           restart.hidden = false;
-          // 整包那条路：重启就是"完成替换"那一步，说清楚点。
-          if (t.phase === 'restart') restart.textContent = '重启并完成替换';
+          // 载荷与整包走的是同一个助手、同一步"退出后切换"，文案统一。
+          restart.textContent = '重启并完成替换';
         }
         return;
       }
@@ -4628,11 +4801,14 @@ async function restartForUpdate() {
   try {
     await api('/desktop/update/restart', { method: 'POST' });
     // 诚实一点：窗口会不会自己回来取决于系统（原版这里只说"会自动回来"，
-    // 助手失败时用户就懵在那儿了 —— 2026-10-08 实测）。所以顺手把退路写清楚。
+    // 助手失败时用户就懵在那儿了 —— 2026-10-08 实测）。所以顺手把退路写清楚，
+    // 并把"新版没起来时旧版会原样留着"这条机制说明白（删旧版要等新版报告启动
+    // 成功，见 desktop/updater.py 的 boot-ok 标记）。
     updateHint({
-      phase: 'installing',
+      phase: 'committing',
       note: '正在重启：窗口会关闭，通常几秒后自己回来。'
-        + '若 10 秒内没回来，直接手动打开一次 —— 新版本已经装好了，手动打开完全等价。',
+        + '若 30 秒内没回来，直接手动打开一次 —— 新版本已经装好了，手动打开完全等价。'
+        + '（新版若起不来，助手会保留旧版本并写进日志，不会把能用的那份删掉。）',
     });
   } catch (e) {
     updateHint({ phase: 'failed', error: e.message });

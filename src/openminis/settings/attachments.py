@@ -197,17 +197,29 @@ def _attached_files_xml(refs: list[AttachmentRef]) -> str:
     只给元数据：模型知道「有这些文件、在哪」，要看内容自己调工具。这是
     path-only 的落地方式，也是避免上下文被图片字节吃满的关键。
     """
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     lines = ["<user-attached-files>"]
     for r in refs:
         if r.host_path is None:
             continue
         lines.append(
             f'  <file name="{r.alt}" path="{r.src}" size="{r.size}" '
-            f'modified="{stamp}" />'
+            f'modified="{_file_mtime(r.host_path)}" />'
         )
     lines.append("</user-attached-files>")
     return "\n".join(lines)
+
+
+def _file_mtime(path: Path) -> str:
+    """附件的 ``modified``：**文件自己的**修改时间。
+
+    改前写的是"组装这段 XML 的时刻"（``strftime(now)``）——语义不对（说"这个文件是
+    现在改的"），而且同一条消息在不同时刻重建会得到不同的字节。取不到就留空，
+    不拿"现在"去凑。
+    """
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(Path(path).stat().st_mtime))
+    except OSError:  # 文件已经不在了 —— 如实留空
+        return ""
 
 
 #: 图片轮次的「以图为准」规则。

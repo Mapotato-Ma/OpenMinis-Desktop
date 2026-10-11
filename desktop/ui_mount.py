@@ -30,7 +30,6 @@ import logging
 import os
 import re
 import threading
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,8 +43,38 @@ logger = logging.getLogger(__name__)
 
 DESKTOP_MOUNT_PATH = "/_desktop"
 
-#: 应用内更新的进度/结果（单实例，全局一份够了 —— 一次只跑一个更新）。
-_update_state: dict[str, Any] = {"phase": "idle", "done": 0, "total": 0, "error": None}
+_update_txn: dict[str, Any] = {"txn": None}
+
+
+def update_transaction() -> Any:
+    """进程内唯一的更新事务（`desktop/update_transaction.py`）。
+
+    懒建：测试里换掉 ``updater`` 的路径函数之后再造就行，import 期不做任何 IO。
+    """
+    txn = _update_txn["txn"]
+    if txn is None:
+        from .update_transaction import UpdateTransaction  # noqa: PLC0415
+
+        txn = UpdateTransaction()
+        _update_txn["txn"] = txn
+    return txn
+
+
+def reset_update_transaction() -> None:
+    """丢掉进程内那份事务（测试之间互不串味；与内核 ``SettingsStore.reset()`` 同用途）。"""
+    _update_txn["txn"] = None
+
+
+def _payload_version() -> str | None:
+    from . import updater  # noqa: PLC0415
+
+    return updater.installed_payload_version()
+
+
+def _shell_version() -> str:
+    from . import updater  # noqa: PLC0415
+
+    return updater.shell_version()
 
 #: 壳注册的"正常退出"回调。有它就走它（顺手收后端、关窗口）；没有就兜底硬退。
 #: 为什么用注册而不是 import：窗口在 launcher 手里，而 api 模块不该反过来依赖它。
@@ -155,6 +184,31 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
 
         return JSONResponse(await chat_readiness())
 
+    async def _handshake(request: Any) -> JSONResponse:  # noqa: ARG001
+        """实例握手 [R07]：**证明"这个端口上是本应用的那个宿主"**。
+
+        为什么要它：启动时的"复用已有实例"改前只探 ``/api/health`` 是不是 200 ——
+        任何 HTTP 服务都可能是 200。于是端口恰好被别的程序占着时，界面会把它当成本
+        产品的后端去复用（然后一片 403/404）。现在判据是四项全对上：产品标记、协议
+        版本、宿主 pid、实例 id（后两项来自宿主的落盘名片）。
+        """
+        from . import instance  # noqa: PLC0415
+
+        record = instance.read_host()
+        return JSONResponse(
+            {
+                "desktop": True,
+                "protocol": instance.PROTOCOL,
+                "instanceId": str(record.get("instanceId") or ""),
+                "pid": int(record.get("pid") or os.getpid()),
+                "port": int(record.get("port") or 0),
+                "uiActive": bool(ui_active),
+                "payloadVersion": _payload_version(),
+                "shellVersion": _shell_version(),
+            },
+            headers=_NO_STORE,
+        )
+
     async def _clear_data(request: Any) -> JSONResponse:  # noqa: ARG001
         """一键清空对话数据（会话/消息/分组/压缩标记），保留供应商等一切设置。
 
@@ -215,7 +269,13 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
                         continue
                     seen.add(arc)
                     try:
-                        zf.write(p, arcname=arc)
+                        # 导出前再过一遍脱敏（R18）：过滤器只管"以后"写下的日志，
+                        # 而用户目录里可能躺着更早那份（那时还没装过滤器）。诊断包是
+                        # 要发给别人的，凭据绝不能跟着出门。
+                        from .redact import redact_text  # noqa: PLC0415
+
+                        raw = p.read_bytes().decode("utf-8", errors="replace")
+                        zf.writestr(arc, redact_text(raw))
                         added += 1
                     except OSError:
                         continue
@@ -359,12 +419,17 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
                 headers=_NO_STORE,
             )
         info = result.info
+        txn = update_transaction()
         return JSONResponse(
             {
                 "ok": True,
                 "current": current,
                 "shellVersion": updater.shell_version(),
                 "payloadVersion": updater.installed_payload_version(),
+                # 「正在跑」与「待启用」是两份，别混（R05）：载荷更新是"退出后再切"，
+                # 所以点了下载并安装之后，进程里跑的仍是旧版，新版在暂存目录里等着。
+                "runningVersion": txn.running_version(),
+                "pendingVersion": txn.snapshot().pending_version,
                 "available": result.kind != "none",
                 "kind": result.kind,
                 "reason": result.reason,
@@ -377,38 +442,60 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
         )
 
     async def _update_apply(request: Any) -> JSONResponse:  # noqa: ARG001
-        """下载并安装（后台跑，界面轮询 `update/status` 看进度）。"""
-        state = _update_state
-        if state.get("phase") == "running":
-            return JSONResponse({"ok": False, "error": "已经在更新了"}, headers=_NO_STORE)
-        state.clear()
-        state.update({"phase": "checking", "done": 0, "total": 0, "error": None})
-        threading.Thread(target=_run_update, name="openminis-update", daemon=True).start()
-        return JSONResponse({"ok": True, "phase": "checking"}, headers=_NO_STORE)
+        """准备这次更新：占住 job → 后台下载解压校验（**不装、不重启**）。
+
+        界面随后轮询 ``update/status`` 看进度；真正替换只发生在用户点
+        ``update/restart`` 那一下（R02：准备阶段就把助手叫起来，是改前那个
+        "等 90 秒然后自删、界面还说重启即完成"的来源）。
+        """
+        from .update_transaction import UpdateBusy  # noqa: PLC0415
+
+        txn = update_transaction()
+        try:
+            job = txn.begin()
+        except UpdateBusy as exc:
+            # 双窗口 / 连点两次：**不**再开一个线程，回报现有那个 job 就好（R03）。
+            # `detail` 是 FastAPI 的错误约定（界面直接把这句话显示出来），
+            # `job` 附上快照，界面据此继续画那个正在进行中的任务。
+            return JSONResponse(
+                {"ok": False, "detail": str(exc), "error": str(exc),
+                 "job": exc.job.to_dict()},
+                status_code=409,
+                headers=_NO_STORE,
+            )
+        threading.Thread(target=txn.run, name=f"openminis-update-{job.id}",
+                         daemon=True).start()
+        return JSONResponse({"ok": True, "job": job.to_dict()}, headers=_NO_STORE)
 
     async def _update_status(request: Any) -> JSONResponse:  # noqa: ARG001
         from . import updater  # noqa: PLC0415
 
-        state = dict(_update_state)
-        if not state:
+        job = update_transaction().snapshot()
+        state: dict[str, Any] = job.to_dict()
+        if not job.busy and job.phase == "idle":
             # 进程内的状态一重启就空 —— 用户点完重启再打开只看到"还没检查"，
             # 没人知道刚才到底成没成。这里把上次落盘的结果当**说明**带出来。
             last = updater.load_state()
             note = str(last.get("summary") or "")
             if note:
-                state = {"phase": "idle", "lastResult": note}
+                state["lastResult"] = note
         return JSONResponse(state, headers=_NO_STORE)
 
     async def _update_restart(request: Any) -> JSONResponse:  # noqa: ARG001
-        """重启以让新载荷生效。
+        """提交：起唯一助手 → 请宿主退出 → 助手在退出后完成替换并拉起新版。
 
-        正在跑的进程没法换掉自己的代码（``.pyc`` 已进内存），所以只能"我先退出，
-        让助手把我拉起来"。非 Windows 上不写助手脚本 —— 那里不是发布目标。
+        正在跑的进程没法换掉自己的代码（``.pyc`` 已进内存），也没法换掉自己的
+        exe（Windows 锁定文件），所以只能"我先退出，你来"。非 Windows 上不写助手
+        脚本 —— 那里不是发布目标。
         """
         from . import updater  # noqa: PLC0415
 
         hook = _restart_hook["fn"]
-        script = updater.schedule_relaunch()
+        try:
+            job = update_transaction().commit()
+        except updater.UpdateError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409,
+                                headers=_NO_STORE)
         if hook is not None:
             # 有壳注册的正常退出路径就走它（会顺手收掉后端、关掉窗口）。
             threading.Timer(0.4, hook).start()
@@ -417,113 +504,17 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
             threading.Timer(0.6, lambda: os._exit(0)).start()
 
         return JSONResponse(
-            {"ok": True, "relaunch": str(script) if script else None}, headers=_NO_STORE
+            {"ok": True, "job": job.to_dict(), "helper": job.helper}, headers=_NO_STORE
         )
-
-    def _run_full_update(result: Any, state: dict[str, Any]) -> None:
-        """换壳的整包更新：下载 → 解开到旁边 → 安排助手在**退出后**替换安装目录。
-
-        以前这条只给直链（诚实但没用）。现在能自己做，代价是**必须退出一次**：
-        正在跑的 exe 是锁定文件，换不掉自己所在的目录 —— 所以真正的替换交给
-        独立进程（``updater.schedule_swap``），它会等本进程退出再动手。
-        """
-        from . import updater  # noqa: PLC0415
-
-        install_dir = updater.install_root()
-        if install_dir is None:
-            state.update({"phase": "manual",
-                          "note": "这是源码运行、不是安装版，只能手动换整包"})
-            return
-        if result.asset is None:
-            state.update({"phase": "manual", "note": result.reason})
-            return
-        state.update({"phase": "downloading", "full": True,
-                      "version": result.info.version,
-                      "total": result.asset.bytes, "done": 0})
-        archive = updater.download(
-            result.asset,
-            updater.updates_dir(),
-            on_progress=lambda done, total: state.update(
-                {"done": done, "total": total or result.asset.bytes}
-            ),
-        )
-        state.update({"phase": "installing"})
-        script = updater.install_full_package(archive, install_dir=install_dir)
-        updater.save_state({
-            "summary": f"整包 {result.info.version} 已准备好，重启即完成替换",
-            "version": result.info.version,
-            "at": int(time.time() * 1000),
-        })
-        state.update({"phase": "restart", "version": result.info.version,
-                      "helper": str(script), "installDir": str(install_dir)})
-
-    def _run_update() -> None:
-        """后台更新流程：探清单 → 下载 → 校验 → 换载荷。"""
-        from . import updater  # noqa: PLC0415
-        from .paths import payload_root  # noqa: PLC0415
-
-        state = _update_state
-        try:
-            # **基线必须和 `_update_check` 一模一样**（`updater.own_version()` =
-            # 已装载荷的版本）。上一版只改了检查段、安装段还留着壳版本：壳比载荷新时
-            # （用户换了新壳、载荷还是上一版）检查说"有载荷可更新"，用户点「下载并安装」
-            # 却在这里比出 none/"已是最新" —— **静默什么都不做**，看着像按钮坏了。
-            result = updater.plan(
-                current_version=updater.own_version(),
-                current_shell=updater.own_shell_id(),
-                url=updater.MANIFEST_URL,
-            )
-            if result.kind == "none" or result.asset is None:
-                state.update({"phase": "done", "note": result.reason})
-                return
-            if result.kind == "full":
-                _run_full_update(result, state)
-                return
-            if result.kind != "payload":
-                state.update({"phase": "manual", "note": result.reason})
-                return
-
-            state.update(
-                {"phase": "downloading", "version": result.info.version,
-                 "total": result.asset.bytes, "done": 0}
-            )
-            archive = updater.download(
-                result.asset,
-                updater.updates_dir(),
-                on_progress=lambda done, total: state.update(
-                    {"done": done, "total": total or result.asset.bytes}
-                ),
-            )
-            state.update({"phase": "installing"})
-            target = payload_root()
-            if target is None:
-                state.update({"phase": "manual", "note": "这个安装没有载荷目录，需要整包装"})
-                return
-            updater.install_payload(
-                archive, target, expect_shell=result.info.shell_id or updater.own_shell_id()
-            )
-            updater.cleanup_old_downloads(keep=archive)
-            state.update({"phase": "ready", "version": result.info.version})
-            updater.save_state({
-                "summary": f"已安装 {result.info.version} 载荷，等待重启生效",
-                "version": result.info.version,
-                "at": int(time.time() * 1000),
-            })
-        except updater.UpdateError as exc:
-            state.update({"phase": "failed", "error": str(exc)})
-            updater.save_state({"summary": f"上次更新失败：{exc}",
-                                "at": int(time.time() * 1000)})
-        except Exception as exc:  # noqa: BLE001 - 任何意外都要让界面看得见
-            logger.exception("update failed")
-            state.update({"phase": "failed", "error": f"{type(exc).__name__}: {exc}"})
-            updater.save_state({"summary": f"上次更新失败：{exc}",
-                                "at": int(time.time() * 1000)})
 
     routes.extend(
         [
             # 壳层与界面之间那点小事：界面靠 /api/desktop/info 画窗口 chrome，
             # 而不用从 user agent 去猜。
             Route("/api/desktop/info", _info, methods=["GET"], include_in_schema=False),
+            # /api/desktop/handshake —— "这个端口上是本应用的宿主吗" [R07]。
+            Route("/api/desktop/handshake", _handshake, methods=["GET"],
+                  include_in_schema=False),
             # 应用内更新（对标 CC Switch 那套）：探清单 / 下载安装 / 看进度 / 重启。
             Route("/api/desktop/update", _update_check, methods=["GET"], include_in_schema=False),
             Route("/api/desktop/update", _update_apply, methods=["POST"], include_in_schema=False),

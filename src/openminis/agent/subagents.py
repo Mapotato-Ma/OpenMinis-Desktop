@@ -517,14 +517,11 @@ async def plan_subagent(store, request: str, *, auto_save: bool = False,
             ),
         )
         obj = _extract_json(raw)
-    finally:
-        if owned:
-            close = getattr(provider, "aclose", None)
-            if callable(close):
-                try:
-                    await close()
-                except Exception:  # pragma: no cover
-                    pass
+    except Exception:
+        # 这里**不关** provider（R14）：`build_chat_setup` 返回的是缓存里的共享实例，
+        # "owned" 只说明这次调用是它去要的，不代表它拥有那个连接池。关掉会把主对话
+        # 在用的池一起关。
+        raise
 
     # Fill required keys that the model may have omitted.
     for k, v in DEFAULT_FIELDS.items():
@@ -608,6 +605,33 @@ def group_block(store, ids: list[str], humans: list[str] | None = None) -> str:
 # ---------------------------------------------------------------------------
 # 运行子代理 —— 主 agent 的 subagent_delegate 工具与后端「识图」都走这里。
 # ---------------------------------------------------------------------------
+def bind_subagent_project(session_id: str, subagent_id: str) -> None:
+    """把这个成员本轮的「项目分配」落到执行协调器上（R16）。
+
+    有分配 → ``set_session_cwd``；**没有分配 → ``clear_session_cwd``**（撤销上一次的
+    绑定）。改前只在有分配时写 override，于是"A 项目 → 无分配"这个序列里，文件工具
+    回到了默认根、而这个成员的 shell 还停在 A 目录继续跑命令 —— 读到的文件和写下的
+    文件不是一个项目。
+
+    抽成函数是为了让这条接线本身可测（不必真的跑一轮委派）。
+    """
+    try:
+        from pathlib import Path
+
+        from .subagent_events import project_for
+        from ..tools.shell_execute_tool import get_coordinator
+
+        key = f"{session_id}:sub:{subagent_id}"
+        project_dir = project_for(subagent_id)
+        coordinator = get_coordinator()
+        if project_dir:
+            coordinator.set_session_cwd(key, Path(project_dir))
+        else:
+            coordinator.clear_session_cwd(key)
+    except Exception:  # pragma: no cover - 分配失败不该打断委派
+        logger.debug("subagent project cwd failed", exc_info=True)
+
+
 async def run_subagent(
     store, subagent_id: str, task: str, session_id: str
 ) -> str:
@@ -680,18 +704,11 @@ async def run_subagent(
 
     # 「分配项目」：这个成员被指定了项目 → 它的 shell root 到那个目录，
     # 而不是会话默认的工作空间 —— 群聊里每个成员可以各写各的项目目录。
-    project_dir = project_for(subagent_id)
-    if project_dir:
-        try:
-            from pathlib import Path
-
-            from ..tools.shell_execute_tool import get_coordinator
-
-            get_coordinator().set_session_cwd(
-                f"{session_id}:sub:{subagent_id}", Path(project_dir)
-            )
-        except Exception:  # pragma: no cover - 分配失败不该打断委派
-            logger.debug("subagent project cwd failed", exc_info=True)
+    #
+    # R16：**没有分配时也要撤销上一次的绑定**。改前只在有分配时写 override，
+    # 于是"A 项目 → 无分配"这个序列里，文件工具回到了默认根、而这个成员的 shell
+    # 还停在 A 目录继续跑命令 —— 读到的文件和写下的文件不是一个项目。
+    bind_subagent_project(session_id, subagent_id)
 
     speaker = {
         "id": room,
@@ -699,7 +716,7 @@ async def run_subagent(
         "name": cfg.get("name") or subagent_id,
         "emoji": cfg.get("emoji") or "🤖",
         "model": conf.get("model", ""),
-        "project": project_dir or "",
+        "project": project_for(subagent_id) or "",
     }
 
     inner_sink = None
@@ -746,27 +763,24 @@ async def run_subagent(
     # ``subagent_delegate`` 已在上面被剔掉）。
     runtime = AgentRuntime(tools=inner_tools, chunk_sink=inner_sink)
     messages: list[LLMMessage] = [LLMMessage(LLMMessage.Role.USER, task)]
-    try:
-        # 子代理里的 ``read_image`` 与主对话走**同一条路**：识图槽转文字描述。
-        # 不强推 inline —— 网关若没给模型声明图片输入，字节会被 provider 换成
-        # 「图省略」占位，子代理看到的是 177 字符的路径文本、只能反复重读
-        # （实测的死循环）。描述文本足够它推理，产出仍是文字。
-        _, stop_reason = await runtime.run(
-            provider,
-            messages,
-            session_id=f"{session_id}:sub:{subagent_id}",
-            options=AgentRuntimeOptions(
-                system_prompt=persona,
-                max_turns=max(1, min(int(cfg.get("maxRounds", 6)), 12)),
-            ),
-        )
-    finally:
-        close = getattr(provider, "aclose", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:  # pragma: no cover
-                pass
+    # 子代理里的 ``read_image`` 与主对话走**同一条路**：识图槽转文字描述。
+    # 不强推 inline —— 网关若没给模型声明图片输入，字节会被 provider 换成
+    # 「图省略」占位，子代理看到的是 177 字符的路径文本、只能反复重读
+    # （实测的死循环）。描述文本足够它推理，产出仍是文字。
+    #
+    # 这里**不关 provider**（R14）：它是 ``_PROVIDER_CACHE`` 里的共享实例，子代理只是
+    # 借用。原先那个 finally 里的 aclose 会把主对话正在用的连接池一起关掉 —— 主/子回合
+    # 并行（或紧接着）跑时，另一方拿到的是已关闭的 client。拥有者是缓存，见
+    # ``chat_service.reset_provider_cache`` / ``close_provider_cache``。
+    _, stop_reason = await runtime.run(
+        provider,
+        messages,
+        session_id=f"{session_id}:sub:{subagent_id}",
+        options=AgentRuntimeOptions(
+            system_prompt=persona,
+            max_turns=max(1, min(int(cfg.get("maxRounds", 6)), 12)),
+        ),
+    )
 
     parts: list[str] = []
     for msg in messages[1:]:

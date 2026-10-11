@@ -65,6 +65,8 @@
       label: p.label || '',
       baseUrl: p.baseUrl || '',
       model: p.model || '',
+      // 提示缓存 TTL（只有 Anthropic 引擎用得上）：默认 1 小时。
+      promptCacheTtl: p.promptCacheTtl || '1h',
       hasKey: !!p.hasKey,
       engine: p.engine,
     }));
@@ -253,6 +255,8 @@
       const out = {
         id: p.id, type: p.type, label: p.label || '',
         baseUrl: p.baseUrl || '', model: p.model || '',
+        // 提示缓存的 TTL：显式带上（服务端"没传=保留旧值"，界面总该说清当前选的是哪个）
+        promptCacheTtl: p.promptCacheTtl || '1h',
       };
       // 规则 2：只在用户真的敲了密钥时带上它；留空表示「保持已存密文」
       if (state.keys[p.id]) out.apiKey = state.keys[p.id];
@@ -304,7 +308,9 @@
     return a.every((p, i) => {
       const q = b[i];
       return q && p.id === q.id && p.type === q.type && (p.label || '') === (q.label || '')
-        && (p.baseUrl || '') === (q.baseUrl || '') && (p.model || '') === (q.model || '');
+        && (p.baseUrl || '') === (q.baseUrl || '') && (p.model || '') === (q.model || '')
+        // 提示缓存 TTL 也是「未保存的改动」：漏了它，改完开关保存按钮不亮。
+        && (p.promptCacheTtl || '1h') === (q.promptCacheTtl || '1h');
     });
   }
 

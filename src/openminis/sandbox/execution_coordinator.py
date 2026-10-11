@@ -77,15 +77,45 @@ class ExecutionCoordinator:
         return dict(self._extra_env)
 
     def set_session_cwd(self, session_id: str, path: Path) -> None:
-        """Root the session's shell inside ``path`` (created on first boot).
+        """Root the session's shell inside ``path``.
 
-        Only shells that don't exist yet honour the override — a running shell
-        keeps the directory it was spawned in, mirroring how ``cd`` persists.
+        R16：换根**必须把已有的 shell 一起换掉**。改前这里只写 override，而运行中的
+        shell 保留它启动时那个目录（"mirroring how ``cd`` persists"）—— 于是同一个
+        会话里出现分裂：文件类工具按**新**项目解析路径，shell 却还在**旧**目录里跑。
+        现场症状就是子代理换了项目之后，读到的文件和写下的文件不是一个项目。
+
+        现在的语义：绑定变了 → 把旧 shell 同步收掉（``interrupt_now`` 连子孙进程一起
+        杀），下一次 ``execute`` 在新根里重建。绑定**没变**时什么都不做 —— 否则每一轮
+        开头那次 ``set_session_cwd`` 都会把预热好的 shell 杀掉（白等 1 秒重建）。
         """
+        previous = self._cwd_overrides.get(session_id)
         self._cwd_overrides[session_id] = path
+        if (previous is None or Path(previous) != Path(path)) and session_id in self._shells:
+            self._drop_shell(session_id, why="换工作目录")
 
     def clear_session_cwd(self, session_id: str) -> None:
-        self._cwd_overrides.pop(session_id, None)
+        """撤销绑定。同上：shell 也得收掉，否则它继续待在旧项目目录里。"""
+        if self._cwd_overrides.pop(session_id, None) is not None:
+            self._drop_shell(session_id, why="撤销工作目录绑定")
+
+    def _drop_shell(self, session_id: str, *, why: str) -> None:
+        """把会话的 shell 摘掉并**同步**收掉它的进程树。
+
+        同步而不是 ``await shell.stop()``：调用点（绑定链路）是同步函数。``interrupt_now``
+        已经做全了这件事 —— 杀掉整棵树、标记 shell 已死、把杀不掉的 pid 记下来下次重试
+        （见 persistent_shell），下一次 ``execute`` 会重建。
+        """
+        shell = self._shells.pop(session_id, None)
+        self._last_injected_env.pop(session_id, None)
+        self._last_injected_keys.pop(session_id, None)
+        if shell is None:
+            return
+        try:
+            note = shell.interrupt_now()
+            logger.info("ExecutionCoordinator[%s]: %s —— 旧 shell 已收掉（%s）",
+                        session_id, why, note or "ok")
+        except Exception:  # pragma: no cover - 收不掉不该打断绑定
+            logger.debug("drop shell failed for %s", session_id, exc_info=True)
 
     def sandbox_root_for(self, session_id: str) -> Optional[Path]:
         """The workspace directory this session is filed under, if any.

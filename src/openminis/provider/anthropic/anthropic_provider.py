@@ -77,6 +77,7 @@ class AnthropicProvider(LLMProvider):
         base_path: str = DEFAULT_BASE_PATH,
         is_oauth: bool = False,
         custom_user_agent: Optional[str] = None,
+        prompt_cache_ttl: str = "1h",
     ) -> None:
         self.api_key = api_key
         self.model = model or LLMModel.claude_haiku45
@@ -85,8 +86,13 @@ class AnthropicProvider(LLMProvider):
         self.custom_user_agent = custom_user_agent
 
         self.name = "Anthropic"
-        # [T-android-enhanced-cache] 1-hour prompt-cache TTL. Off by default.
-        self.enhanced_cache = False
+        # [T-android-enhanced-cache] 提示缓存的 TTL。
+        #
+        # **这里是接通的**（改前硬编码 False，没有任何入口 —— 于是这道开关形同不存在，
+        # TTL 永远是默认 5 分钟：用户慢慢打字超过 5 分钟，前缀缓存就过期了）。默认
+        # 1 小时：手机端"隔一会儿再问"的节奏下明显更省；代价是写入按 2× 计费（5 分钟
+        # 那档是 1.25×），所以 5 分钟内高频追问更省的场景允许在设置里切回 "5m"。
+        self.enhanced_cache = str(prompt_cache_ttl or "").strip().lower() == "1h"
 
         # Use Bearer auth for custom (non-Anthropic) base URLs or OAuth.
         self.is_custom_endpoint = self.base_path != DEFAULT_BASE_PATH

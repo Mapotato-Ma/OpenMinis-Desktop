@@ -33,12 +33,13 @@ __all__ = [
     "attribution_snapshot",
     "build_chat_setup",
     "close_provider_cache",
-    "current_time_block",
+    "current_date_block",
     "identity_system_prompt",
     "image_context_discipline",
     "reset_provider_cache",
     "reset_session_guards",
     "session_guards",
+    "turn_note_block",
 ]
 
 
@@ -173,21 +174,61 @@ RETRIEVAL_DISCIPLINE = (
 )
 
 
-def current_time_block() -> str:
-    """把「现在是什么时候」写进系统提示。
+def _weekday_cn(moment: Any) -> str:
+    return "周一周二周三周四周五周六周日"[moment.weekday() * 2: moment.weekday() * 2 + 2]
 
-    模型没有时钟：不告诉它今天几号，它就无法判断检索结果是不是「今天的」，
-    会把昨天的新闻当成今日最新报给用户（用户实测踩过）。
+
+def current_date_block() -> str:
+    """把「今天是几号」写进系统提示 —— **只到天**，不带时分。
+
+    模型没有时钟：不告诉它今天几号，它就无法判断检索结果是不是「今天的」，会把昨天的
+    新闻当成今日最新报给用户（用户实测踩过）。所以这个信息必须有。
+
+    但**不能带时分**：系统提示是缓存前缀的头部，写进分钟级的时间等于每 60 秒换一次
+    前缀 —— Anthropic 的 ``cache_control`` 断点与它后面的消息断点一起失效、每轮全量
+    重写（还按 1.25× 计费）；OpenAI 兼容服务商的最长公共前缀也在 ``system`` 处断掉，
+    整段历史按未命中计费。精确到分钟的那个时间走 :func:`turn_note_block`（每轮尾部）。
+
+    代价：跨过午夜时这份提示会变一次（一天一次，可接受）。
     """
     from datetime import datetime
 
     now = datetime.now()
-    weekday = "周一周二周三周四周五周六周日"[now.weekday() * 2: now.weekday() * 2 + 2]
     return (
-        f"\n\n【当前时间】现在是 {now.strftime('%Y-%m-%d %H:%M')}（{weekday}，"
-        "北京时间）。判断「今天/最新」时以这个时间为准；"
-        "检索结果里日期早于今天的，都不是今天的新消息。"
+        f"\n\n【当前日期】今天 {now.strftime('%Y-%m-%d')}（{_weekday_cn(now)}，北京时间）。"
+        "判断「今天/最新」时以这个日期为准；检索结果里日期早于今天的，都不是今天的新消息。"
     )
+
+
+def turn_note_block(*, group: str = "", now: Any = None) -> str:
+    """每轮注记：**精确时间** + （可选）群成员。拼在本轮用户消息的**尾部**。
+
+    为什么在尾部而不是系统提示里：它是每轮都变的内容，而系统提示是缓存前缀的头部
+    （见 :func:`current_date_block`）。放在用户消息尾部，它就是"新内容" —— 前面前缀
+    该命中的照样命中。
+
+    调用方必须把它同时拼给「发给模型的那份」与「落库的那份」：下一轮重建历史时用
+    落库的文本，只有两份逐字节一致，缓存才真的能命中（见 ``chat_store.TURN_NOTE_MARK``）。
+    """
+    from datetime import datetime
+
+    moment = now or datetime.now()
+    mark = "【本轮注记】"
+    try:
+        from ..server.chat_store import TURN_NOTE_MARK  # noqa: PLC0415
+
+        mark = TURN_NOTE_MARK
+    except Exception:  # pragma: no cover - 理论上不会发生（同仓模块）
+        pass
+    block = (
+        f"\n\n{mark}\n"
+        f"【当前时间】{moment.strftime('%Y-%m-%d %H:%M')}（{_weekday_cn(moment)}，北京时间）。"
+        "判断「今天/最新」以这个时间为准。"
+    )
+    note = (group or "").strip()
+    if note:
+        block += "\n" + note
+    return block
 
 
 #: 生图纪律。两个实测故障各占一半：
@@ -249,7 +290,7 @@ def identity_system_prompt(store: SettingsStore, identity=None) -> str:  # noqa:
         subagent_on = True
     return (
         identity.persona
-        + current_time_block()
+        + current_date_block()
         + RETRIEVAL_DISCIPLINE
         + image_context_discipline(store)
         + (SUBAGENT_PLAN_DISCIPLINE if subagent_on else "")
@@ -363,24 +404,37 @@ def _model_for(provider_type: str, model_id: str) -> LLMModel | None:
 #: 连接池与 keep-alive 一起复用。
 _PROVIDER_CACHE: dict[tuple, Any] = {}
 _PROVIDER_CACHE_LIMIT = 8
+#: 被换下/清空、等着在关机时统一关闭的 provider（R14：池子的拥有者是缓存）。
+_PROVIDER_RETIRED: list[Any] = []
 
 
 def _provider_fingerprint(ptype: str, api_key: str, base_url: str,
-                          model_id: str) -> tuple:
+                          model_id: str, cache_ttl: str = "") -> tuple:
     import hashlib
 
     key_hash = hashlib.sha1(api_key.encode("utf-8")).hexdigest()[:12]
-    return (ptype, base_url.rstrip("/"), key_hash, model_id)
+    # cache_ttl 进指纹：改了 TTL 就该换一个 provider 实例，否则缓存池里那个
+    # 旧 TTL 的实例会被继续复用（设置里改了没反应）。
+    return (ptype, base_url.rstrip("/"), key_hash, model_id, cache_ttl)
 
 
 def reset_provider_cache() -> None:
-    """Drop the provider cache (settings changed / tests / shutdown)."""
+    """设置变了 / 测试 / 关机：把缓存里的 provider 挪去"待关闭"并清空缓存（R14）。
+
+    为什么不是直接 ``clear()``：那只是把引用丢掉，HTTP 连接池还在（等 GC），而
+    调用方（设置保存、测试）多半是**同步**上下文，没法 await ``aclose()``。所以
+    挪进 ``_PROVIDER_RETIRED``，由 :func:`close_provider_cache`（关机路径，异步）统一
+    关掉。缓存是这些池子的**唯一拥有者** —— 回合只借用，不再各自关。
+    """
+    _PROVIDER_RETIRED.extend(_PROVIDER_CACHE.values())
     _PROVIDER_CACHE.clear()
 
 
 async def close_provider_cache() -> None:
-    """Close every cached provider's connection pool."""
-    for provider in list(_PROVIDER_CACHE.values()):
+    """关闭所有 provider 的连接池（当前缓存的 + 被换下来等着关的）。"""
+    pending = list(_PROVIDER_CACHE.values()) + list(_PROVIDER_RETIRED)
+    _PROVIDER_RETIRED.clear()
+    for provider in pending:
         closer = getattr(provider, "aclose", None)
         if closer is None:
             continue
@@ -475,19 +529,29 @@ def build_provider(provider_id: str, conf: dict[str, Any]):  # noqa: ANN201
     model = _model_for(ptype, (conf.get("model") or "").strip())
     base_url = (conf.get("baseUrl") or "").strip()
     model_id = (model.id if model is not None else "") or ""
-    fingerprint = _provider_fingerprint(engine, api_key, base_url, model_id)
+    # 提示缓存 TTL（只有 Anthropic 引擎用得上）：默认 1 小时，可在设置里切回 5 分钟。
+    cache_ttl = _normalise_cache_ttl(conf.get("promptCacheTtl"))
+    fingerprint = _provider_fingerprint(engine, api_key, base_url, model_id, cache_ttl)
     cached = _PROVIDER_CACHE.get(fingerprint)
     if cached is not None:
         return cached
-    provider = _create_provider(engine, api_key, model, base_url, ptype)
+    provider = _create_provider(engine, api_key, model, base_url, ptype,
+                                cache_ttl=cache_ttl)
     if len(_PROVIDER_CACHE) >= _PROVIDER_CACHE_LIMIT:
-        _PROVIDER_CACHE.pop(next(iter(_PROVIDER_CACHE)))
+        # 淘汰也要走"退休"：直接 pop 等于把连接池丢给 GC（R14 的同一笔账）。
+        _PROVIDER_RETIRED.append(_PROVIDER_CACHE.pop(next(iter(_PROVIDER_CACHE))))
     _PROVIDER_CACHE[fingerprint] = provider
     return provider
 
 
+def _normalise_cache_ttl(raw: Any) -> str:
+    """提示缓存的 TTL：只认 ``5m`` / ``1h``，默认 ``1h``（见 anthropic_provider 的说明）。"""
+    value = str(raw or "").strip().lower()
+    return value if value in ("5m", "1h") else "1h"
+
+
 def _create_provider(engine: str, api_key: str, model: Any, base_url: str,
-                     ptype: str):  # noqa: ANN202
+                     ptype: str, *, cache_ttl: str = "1h"):  # noqa: ANN202
     if engine == "anthropic":
         # DEFAULT_BASE_PATH is a module-level constant on the provider module,
         # not a class attribute — reference it through the module.
@@ -497,6 +561,7 @@ def _create_provider(engine: str, api_key: str, model: Any, base_url: str,
             api_key=api_key,
             model=model,
             base_path=base_url or _anthropic_mod.DEFAULT_BASE_PATH,
+            prompt_cache_ttl=cache_ttl,
         )
     if engine == "openai":
         return OpenAIProvider(

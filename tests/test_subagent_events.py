@@ -360,6 +360,7 @@ def _stub_run_chat(monkeypatch, captured: dict):
     class _Runtime:
         async def run(self, provider, messages, session_id, options=None, **kw):
             captured["system_prompt"] = options.system_prompt or ""
+            captured["messages"] = [m.content for m in messages]
             captured["session_id"] = session_id
             captured["project"] = project_for("writer")
             messages.append(LLMMessage(LLMMessage.Role.ASSISTANT, "ok"))
@@ -420,11 +421,18 @@ async def test_run_chat_injects_group_block_and_member_project(env, store, monke
         "memberProjects": {"writer": ws.id},
     })
 
-    # 群成员进了系统提示（真实 id 在、编造的丢弃）
+    # 群成员**不进系统提示**（PORT-FIX(prompt-prefix)：系统提示是缓存前缀的头部，
+    # 而这份成员表由客户端每轮现传 —— 放进去等于每轮都让前缀失效）。真实 id 在、
+    # 编造的丢弃，都发生在**本轮用户消息尾部的那段注记**里。
     assert "BASE" in captured["system_prompt"]
-    assert "群聊成员" in captured["system_prompt"]
-    assert "`writer`" in captured["system_prompt"]
-    assert "ghost" not in captured["system_prompt"]
+    assert "群聊成员" not in captured["system_prompt"], "群成员又回到系统提示里了"
+    # 注记拼在本轮用户消息上（这一条测试里的 bundle 是桩：文本固定为 "hi"）
+    with_note = [text for text in captured["messages"] if "【本轮注记】" in text]
+    assert with_note, captured["messages"]
+    user_turn = with_note[-1]
+    assert "【本轮注记】" in user_turn and "【当前时间】" in user_turn
+    assert "`writer`" in user_turn
+    assert "ghost" not in user_turn
     # 成员项目解析成了真实目录
     assert captured["project"] == str(proj)
     # 子代理会话 key 挂在主会话下面

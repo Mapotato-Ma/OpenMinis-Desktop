@@ -212,7 +212,9 @@ def test_download_reports_progress(tmp_path, server):
 # ---------------------------------------------------------------------------
 def _payload_zip(path: Path, *, version: str, shell: str, extra: dict | None = None) -> bytes:
     with zipfile.ZipFile(path, "w") as zf:
-        zf.writestr("payload.json", json.dumps({"format": 1, "shellId": shell}))
+        zf.writestr("payload.json", json.dumps(
+            {"format": 1, "shellId": shell, "appVersion": version}
+        ))
         zf.writestr("openminis/__init__.py", f'__version__ = "{version}"\n')
         for name, data in (extra or {}).items():
             zf.writestr(name, data)
@@ -227,7 +229,7 @@ def test_safe_extract_refuses_zip_slip(tmp_path):
         updater._safe_extract(evil, tmp_path / "out")  # noqa: SLF001
 
 
-def test_install_payload_rejects_a_package_for_another_shell(tmp_path):
+def test_stage_payload_rejects_a_package_for_another_shell(tmp_path):
     """壳对不上就该拒绝 —— 装进去只会得到一个起不来的应用。"""
     zip_path = tmp_path / "p.zip"
     _payload_zip(zip_path, version="9.9.9", shell="shell-new")
@@ -236,33 +238,44 @@ def test_install_payload_rejects_a_package_for_another_shell(tmp_path):
     (target / "openminis" / "__init__.py").write_text('__version__ = "0.1.0"\n')
 
     with pytest.raises(updater.UpdateError, match="换了壳"):
-        updater.install_payload(zip_path, target, expect_shell="shell-current")
+        updater.stage_payload(zip_path, target, expect_shell="shell-current", job_id="1")
     # 原来的载荷**一点没动**（拒绝要发生在动旧的之前）
     assert '__version__ = "0.1.0"' in (target / "openminis" / "__init__.py").read_text()
+    # 拒绝之后不许留下自己的暂存目录
+    assert not list(tmp_path.glob("payload.new-*"))
 
 
-def test_install_payload_replaces_atomically(tmp_path):
+def test_stage_payload_leaves_the_live_payload_alone(tmp_path):
+    """R05：活进程里**不换**载荷 —— 只解到 ``payload.new-<job>``，等退出后再切。
+
+    改前是就地原子替换：正在跑的进程已经把旧模块 import 进内存了，替换之后新的
+    lazy import / 资源读取会来自新目录 —— 同一个进程里新旧代码混着跑。
+    """
     zip_path = tmp_path / "p.zip"
     _payload_zip(zip_path, version="0.4.6", shell="shell-current")
     target = tmp_path / "payload"
     (target / "openminis").mkdir(parents=True)
     (target / "openminis" / "__init__.py").write_text('__version__ = "0.4.5"\n')
 
-    updater.install_payload(zip_path, target, expect_shell="shell-current")
+    staged = updater.stage_payload(zip_path, target, expect_shell="shell-current",
+                                   job_id="7-1")
 
-    assert '__version__ = "0.4.6"' in (target / "openminis" / "__init__.py").read_text()
-    # 中间目录不能留下（.new / .old 都是实现细节）
-    assert not target.with_name("payload.new").exists()
-    assert not target.with_name("payload.old").exists()
+    assert staged.name == "payload.new-7-1", staged
+    assert '__version__ = "0.4.6"' in (staged / "openminis" / "__init__.py").read_text()
+    # 正在用的那份还是旧的
+    assert '__version__ = "0.4.5"' in (target / "openminis" / "__init__.py").read_text()
+    assert updater.staged_payload_version(staged) == "0.4.6"
 
 
-def test_install_payload_creates_it_when_missing(tmp_path):
-    """老安装包没有 payload/ —— 第一次更新要能凭空建出来。"""
+def test_stage_payload_works_when_the_payload_dir_is_missing(tmp_path):
+    """老安装包没有 payload/ —— 第一次更新也要能先把新的解出来。"""
     zip_path = tmp_path / "p.zip"
     _payload_zip(zip_path, version="0.4.6", shell="shell-current")
     target = tmp_path / "payload"
-    updater.install_payload(zip_path, target, expect_shell="shell-current")
-    assert (target / "openminis" / "__init__.py").is_file()
+    staged = updater.stage_payload(zip_path, target, expect_shell="shell-current",
+                                   job_id="1")
+    assert (staged / "openminis" / "__init__.py").is_file()
+    assert not target.exists(), "还没提交，目标目录不该出现"
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +298,12 @@ _PROBE = textwrap.dedent(
 
 
 def test_end_to_end_payload_update(server, tmp_path):
-    """走完整条链路，然后在**子进程**里确认新内核生效。"""
+    """走完整条链路（下载 → 校验 → 暂存 → 退出后切换），再在**子进程**里确认生效。
+
+    最后那一步 ``staged.rename(payload)`` 就是助手脚本在真实更新里做的动作
+    （等旧进程退出 → 让位 → 就位）。真跑 ``cmd`` 的版本在
+    ``scripts/update_drill.py``，这里锁的是"换完之后新内核真的会被加载"。
+    """
     repo = Path(__file__).resolve().parent.parent.parent
     app = tmp_path / "OpenMinisDesktop"
     internal = app / "_internal"
@@ -313,7 +331,11 @@ def test_end_to_end_payload_update(server, tmp_path):
     asset = _asset(server, "/OpenMinisDesktop-update.zip", body)
 
     archive = updater.download(asset, tmp_path / "downloads")
-    updater.install_payload(archive, payload, expect_shell="shell-current")
+    staged = updater.stage_payload(archive, payload, expect_shell="shell-current",
+                                   job_id="1")
+    # 助手做的事：旧的就位目录让位 → 新的那份挪进来（原子的一步）
+    payload.rename(payload.with_name("payload.old-20261011-120000"))
+    staged.rename(payload)
 
     assert installed() == "0.4.6", "更新装完了，新进程里还是旧版本"
     assert server.requests, "下载根本没发生"
@@ -332,6 +354,30 @@ def test_pinned_shell_id_matches_the_shell_sources():
     assert compute() == SHELL_ID, "改了壳就跑 python scripts/shell_id.py --write"
 
 
+def _fake_shell_repo(tmp_path) -> Path:
+    """把**壳指纹会读到的那一份**原样复制出来（照 ``SHELL_INPUTS`` 走）。
+
+    手写"复哪些文件"会在下次往 SHELL_INPUTS 里加东西时静默腐坏 —— R19 加了
+    ``pyproject.toml`` / ``uv.lock`` 之后，这两条测试就是这么红的（复制出来的假仓库
+    少两个文件，指纹自然不一样）。现在让它自己照着清单复制。
+    """
+    import shutil
+
+    from scripts import shell_id
+
+    fake = tmp_path / "repo"
+    for entry in shell_id.SHELL_INPUTS:
+        src = shell_id.REPO / entry
+        dst = fake / entry
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        elif src.is_dir():
+            shutil.copytree(src, dst,
+                            ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
+    return fake
+
+
 def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
     """同一个提交，Linux(LF) 与 Windows(CRLF) 必须算出**同一个**壳指纹。
 
@@ -343,17 +389,9 @@ def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
     assert normalise(b"a\r\nb") == normalise(b"a\nb") == b"a\nb"
 
     # 把整个壳源码复制一份、全部转成 CRLF，指纹必须不变
-    import shutil
-
     from scripts import shell_id
 
-    fake = tmp_path / "repo"
-    shutil.copytree(shell_id.REPO / "desktop", fake / "desktop",
-                    ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
-    shutil.copy2(shell_id.REPO / "desktop_main.py", fake / "desktop_main.py")
-    (fake / "packaging").mkdir()
-    shutil.copy2(shell_id.REPO / "packaging" / "OpenMinisDesktop.spec",
-                 fake / "packaging" / "OpenMinisDesktop.spec")
+    fake = _fake_shell_repo(tmp_path)
     before = shell_id.compute()
     for path in fake.rglob("*"):
         if path.is_file():
@@ -542,17 +580,10 @@ def test_a_version_bump_alone_does_not_change_the_shell_id(tmp_path, monkeypatch
     这三行，指纹却变了，于是整包那条路被走了十几遍）。
     """
     import re
-    import shutil
 
     from scripts import shell_id
 
-    fake = tmp_path / "repo"
-    shutil.copytree(shell_id.REPO / "desktop", fake / "desktop",
-                    ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
-    shutil.copy2(shell_id.REPO / "desktop_main.py", fake / "desktop_main.py")
-    (fake / "packaging").mkdir()
-    shutil.copy2(shell_id.REPO / "packaging" / "OpenMinisDesktop.spec",
-                 fake / "packaging" / "OpenMinisDesktop.spec")
+    fake = _fake_shell_repo(tmp_path)
 
     before = shell_id.compute()
     for rel in ("desktop/__init__.py", "desktop/ui_mount.py"):
@@ -654,30 +685,30 @@ def test_update_check_compares_against_the_payload_version(monkeypatch, tmp_path
     del assets
 
 
-def test_relaunch_script_can_be_rendered_anywhere(tmp_path):
-    """重启助手脚本：等进程有上限、先 cd 回安装目录、每步写日志。
+def test_swap_script_can_be_rendered_anywhere(tmp_path):
+    """切换助手脚本：等进程有上限、先 cd 回安装目录、每步写日志、等新版报告启动。
 
     这三条都是 2026-10-08 那次"窗口没了也拉不起来"的教训（原版死等 + 不记日志，
     失败之后无据可查）。再加一条更硬的要求：脚本必须**纯 ASCII** —— cmd 是按控制台
     码页读 .cmd 的，而安装路径常常带中文（`F:\\桌面\\07-代码\\...`）。真机演练：
     内嵌中文路径时 `move` 连试 15 次全失败，改走环境变量后一次成功。
     """
-    text = updater.relaunch_script_text()
+    text = updater.swap_script_text()
     assert all(ord(ch) < 128 for ch in text), "脚本里混进了非 ASCII —— 中文路径会被读花"
     assert "\\\\" not in text, "多了个反斜杠会让启动路径变成 C:\\a\\\\b\\exe"
     assert "OM_UPD_APPROOT" in text and "OM_UPD_EXE" in text, "路径没走环境变量"
     assert 'cd /d "%APP%"' in text, "启动前没回安装目录"
     assert "GEQ %OM_UPD_WAITMAX%" in text, "没有等待上限 —— 旧进程不退会永久卡住助手"
-    assert "openminis-relaunch.log" in text, "没有日志 —— 失败后无据可查"
+    assert "openminis-swap.log" in text, "没有日志 —— 失败后无据可查"
     assert 'start "" "%APP%\\%EXE%"' in text
-    assert text.index(":wait") < text.index(":start"), "必须先等旧进程退出再启动"
+    assert text.index(":wait") < text.index(":movenew"), "必须先等旧进程退出再换目录"
 
 
 def test_helper_env_carries_paths_verbatim(tmp_path):
     """路径经环境变量传进 cmd —— 中文、空格、方括号都不该被改动。"""
     weird = tmp_path / "桌面 区[07]-代码" / "OpenMinisDesktop"
-    env = updater.helper_env(**{updater._ENV_INSTALL: weird, updater._ENV_EXE: None})
-    assert env[updater._ENV_INSTALL] == str(weird)
+    env = updater.helper_env(**{updater._ENV_TARGET: weird, updater._ENV_EXE: None})
+    assert env[updater._ENV_TARGET] == str(weird)
     assert updater._ENV_EXE not in env, "None 不该变成字符串写进环境"
     assert "PATH" in env or "SYSTEMROOT" in env, "没继承原环境 —— cmd 会找不到 tasklist"
 
@@ -707,10 +738,15 @@ def _update_app(tmp_path, monkeypatch, *, installed: str, latest: str, shell: st
     monkeypatch.setattr(updater, "fetch_manifest", lambda url, **kw: updater.parse_manifest(raw))
     # 安装段用的是**它自己 import 的那个** ``paths.payload_root``，一并指到假载荷
     monkeypatch.setattr(paths, "payload_root", lambda: payload)
+    # 事务的 journal / 下载 / 摘要都落在"用户数据目录"下 —— 测试里指到 tmp，
+    # 否则每跑一条用例都会往真用户的 openminis/updates 里写东西。
+    monkeypatch.setattr(updater, "updates_dir", lambda: tmp_path / "updates")
 
     desktop_dir = Path(__file__).resolve().parent.parent / ".." / "web" / "desktop"
     app = FastAPI()
     ui_mount.attach(app, desktop_dir=(desktop_dir if desktop_dir.is_dir() else None))
+    # 进程内那个事务是单例：上一个用例的 job 会串到这一个（单飞会误判）。
+    ui_mount.reset_update_transaction()
     return app, ui_mount
 
 
@@ -720,11 +756,13 @@ def _wait_for_update(ui_mount, timeout: float = 20.0) -> dict:
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        state = dict(ui_mount._update_state)  # noqa: SLF001 - 断言要钉的就是它
-        if state.get("phase") in {"ready", "done", "failed", "manual"}:
-            return state
+        job = ui_mount.update_transaction().snapshot()
+        if job.phase in {"staged", "done", "failed", "manual"}:
+            return job.to_dict()
         time.sleep(0.02)
-    raise AssertionError(f"{timeout}s 内更新线程没有结束：{dict(ui_mount._update_state)}")
+    raise AssertionError(
+        f"{timeout}s 内更新线程没有结束：{ui_mount.update_transaction().snapshot()}"
+    )
 
 
 def test_apply_and_check_use_the_very_same_current_version(tmp_path, monkeypatch):
@@ -780,8 +818,9 @@ def test_apply_really_installs_when_the_shell_is_newer_than_the_payload(tmp_path
         lambda asset, dest, on_progress=None: (steps.append(("download", asset.url)), archive)[1],
     )
     monkeypatch.setattr(
-        updater, "install_payload",
-        lambda zip_path, payload_dir, *, expect_shell: steps.append(("install", str(zip_path))),
+        updater, "stage_payload",
+        lambda zip_path, payload_dir, *, expect_shell, job_id: steps.append(
+            ("install", str(zip_path))) or (payload_dir.with_name(f"payload.new-{job_id}")),
     )
     monkeypatch.setattr(updater, "cleanup_old_downloads", lambda keep=None, **kw: None)
     monkeypatch.setattr(updater, "save_state", lambda state: None)
@@ -793,7 +832,52 @@ def test_apply_really_installs_when_the_shell_is_newer_than_the_payload(tmp_path
         c.post("/api/desktop/update")
         final = _wait_for_update(ui_mount)
 
-    assert final["phase"] == "ready", final         # 不是 done / "已是最新"
+    assert final["phase"] == "staged", final        # 不是 done / "已是最新"
     assert "已是最新" not in str(final.get("note") or ""), final
     assert final.get("version") == "0.4.20", final
+    assert final.get("pending_version") == "0.4.20", final
+    assert final.get("running_version") == "0.4.19", final   # 进程里还是旧版
     assert [s[0] for s in steps] == ["download", "install"], steps
+
+
+def test_second_apply_is_refused_and_returns_the_running_job(tmp_path, monkeypatch):
+    """R03：连点两次 / 双窗口 —— 第二次拿到 409 + **正在跑的那个 job**。
+
+    改前 apply 只拒绝 ``phase == "running"``，而流程里从来没赋过 running ——
+    两个线程会同时改同一批文件（下载名、payload.new/old、按 PID 的暂存目录全复用，
+    后一个还会把前一个的暂存清掉）。这里钉的是 HTTP 那一层的契约：不新开任务、
+    也不假装成功。
+    """
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    app, ui_mount = _update_app(
+        tmp_path, monkeypatch, installed="0.4.19", latest="0.4.20", shell="0.4.20"
+    )
+    gate = threading.Event()
+
+    def _slow_download(asset, dest, on_progress=None):  # noqa: ANN001, ANN202
+        gate.wait(timeout=15)          # 卡在下载里，第二次请求必定撞上"在跑"
+        raise updater.UpdateError("测试中止")
+
+    monkeypatch.setattr(updater, "download", _slow_download)
+    monkeypatch.setattr(updater, "save_state", lambda state: None)
+    try:
+        with TestClient(app) as c:
+            first = c.post("/api/desktop/update")
+            assert first.status_code == 200, first.text
+            job_id = first.json()["job"]["id"]
+
+            second = c.post("/api/desktop/update")
+            assert second.status_code == 409, second.text
+            body = second.json()
+            assert body["ok"] is False and body["job"]["id"] == job_id, body
+            assert "在进行中" in body["error"], body
+
+            # 状态端点看的是同一个 job（界面据此继续画进度）
+            status = c.get("/api/desktop/update/status").json()
+            assert status["id"] == job_id and status["phase"] == "downloading", status
+    finally:
+        gate.set()
+        _wait_for_update(ui_mount)

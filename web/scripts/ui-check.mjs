@@ -597,11 +597,56 @@ test('整包更新：两步确认真的会拦住第一次点击', () => {
   assert.ok(guard < req && arm < req, '确认的判断必须发生在真正开始下载之前');
 });
 
-test('整包更新：终态多了一个 restart（重启即完成替换）', () => {
+test('更新：准备（staged）与提交（committing）是两个相位，别再把它们混成"终态"', () => {
+  // 改前的相位是 ready / restart —— 而后端那时候其实是"下载完就把助手叫起来了"，
+  // 助手等 90 秒自删、界面还说重启即完成替换。现在后端只有 staged（等用户点）与
+  // committing（助手在外面跑）两个相位，界面必须认这两个名字，否则会一直转圈。
   const app = read('app.js');
-  assert.ok(/t\.phase === 'ready' \|\| t\.phase === 'restart'/.test(app),
-    '轮询没认 "restart" 终态 —— 整包装好之后界面会一直转圈');
-  assert.ok(/restart: '整包已就位/.test(app), '没有 restart 阶段的文案');
-  assert.ok(app.includes('restartStage') || app.includes("restart.textContent = '重启并完成替换'"),
-    '整包那条路的重启按钮没有说清"这一步就是完成替换"');
+  assert.ok(/t\.phase === 'staged'/.test(app),
+    '轮询没认 "staged" —— 下载校验完成之后界面会一直转圈');
+  assert.ok(!/'ready'|'restart'/.test(app), '还在认已经不存在的老相位名');
+  assert.ok(/staged: '已下载并校验完成'/.test(app), '没有 staged 阶段的文案');
+  assert.ok(app.includes("restart.textContent = '重启并完成替换'"),
+    '重启按钮没有说清"这一步就是完成替换"');
+  assert.ok(/t\.phase === 'staged' && t\.pendingVersion/.test(app),
+    '没有把"正在跑的版本"和"待启用的版本"分开显示（R05）');
+});
+
+test('缓存命中率看得见、Anthropic 的提示缓存 TTL 有入口', () => {
+  // 「缓存命中率不高」这件事以前只能靠感觉：用量面板只给缓存读/写的绝对量。
+  // 接上 /usage 已经算好的 cacheHitRate，改完能不能变好才有据可查。
+  const app = read('app.js');
+  assert.ok(app.includes('cacheHitRate'), '用量面板没有显示缓存命中率');
+  assert.ok(app.includes('缓存命中率'), '没有那一条的中文标签');
+
+  // Anthropic 的 enhanced_cache 改前硬编码为关、没有任何界面入口（TTL 恒为 5 分钟）。
+  assert.ok(/promptCacheTtl/.test(app), '服务商卡片里没有提示缓存这个开关');
+  assert.ok(/meta\.engine === 'anthropic'/.test(app), '开关没有按引擎区分（别的引擎没有这回事）');
+  const model = read('settings-model.js');
+  assert.ok(/promptCacheTtl/.test(model), 'setting-model 没带上这个字段（保存会丢）');
+});
+
+test('帧归属按帧上的通道判定，不再拿"终端忙不忙"去猜（R08）', () => {
+  const app = read('app.js');
+  // 负向断言只看**代码**：注释里会引用老写法（那正是解释为什么要改它），
+  // 直接扫全文会把解释当成违规。
+  const code = app.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(/function isShellFrame/.test(app) && /function belongsToCurrentSession/.test(app),
+    '没有归属判定函数');
+  assert.ok(/f\.channel === 'shell'/.test(app), '没按 channel 认终端帧');
+  // 老写法必须消失：那就是"终端在跑命令时，聊天报错被吞成终端错误"的来源
+  assert.ok(!/f\.sessionId == null && state\.termBusy/.test(code), '还在用 termBusy 猜帧归属');
+  assert.ok(!/if \(state\.termBusy\) \{\s*\n\s*state\.termBusy = false;\s*\n\s*termBuffer = null;\s*\n\s*termLine\(f\.error/.test(code),
+    'error 帧还在按"终端忙不忙"分派');
+  assert.ok(/case 'done':\s*\n\s*if \(isShellFrame\(f\)\)/.test(app), 'done 帧没按通道分派');
+});
+
+test('发送身份在进入发送时冻结（R09）', () => {
+  const app = read('app.js');
+  assert.ok(/function captureTurnIdentity/.test(app), '没有冻结发送身份');
+  assert.ok(/sendTurn\(text, typed, att, identity\)/.test(app), 'sendTurn 没有接身份参数');
+  assert.ok(/bindSessionWorkspace\(id\.workspace, id\.sid\)/.test(app),
+    '绑定没有用冻结下来的 sid —— 等待期间切会话会把消息发给别人');
+  // 出队时也要带上原来的会话（排队期间用户可能已经切走）
+  assert.ok(/sid: next\.sid, workspace: next\.workspace/.test(app), '队列没带会话归属');
 });

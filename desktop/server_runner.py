@@ -115,6 +115,8 @@ class DesktopServer:
     _thread: threading.Thread = field(repr=False)
     #: 本次运行的访问令牌。窗口地址要用它换 cookie（见 access_gate 模块）。
     access_token: str = ""
+    #: 宿主实例 id（``instance.host.json`` 里那个）。握手与"再开一个窗口"都用它。
+    instance_id: str = ""
 
     @property
     def url(self) -> str:
@@ -129,6 +131,15 @@ class DesktopServer:
         self._thread.join(timeout=timeout)
         if self._thread.is_alive():  # pragma: no cover - daemon thread, so fine
             logger.warning("uvicorn thread did not exit within %.1fs", timeout)
+        # 后端没了就别再挂着"宿主名片"（R06）：留着的话下一个启动会以为还有宿主编
+        # 在主，握手又失败 —— 那是一条"点两次图标没反应"的死路。
+        if self.instance_id:
+            try:
+                from . import instance  # noqa: PLC0415
+
+                instance.clear_host(instance_id=self.instance_id)
+            except Exception:  # pragma: no cover
+                logger.debug("host record cleanup failed", exc_info=True)
 
 
 def build_app(
@@ -177,18 +188,37 @@ def start_server(
     log_level: str = "info",
     should_stop: Callable[[], bool] | None = None,
     access_token: str | None = None,
+    announce_host: bool = False,
+    explicit_port: bool = False,
 ) -> DesktopServer:
     """Start uvicorn in a daemon thread and block until it is healthy.
 
     ``access_token`` 不给就**现场生成一个** —— 正式路径上不该存在"忘了传令牌"这种
     状态，那等于把闸门关了。
+
+    ``announce_host`` 为真时落一张"宿主名片"（``data_root()/instance/host.json``）：
+    后来的启动靠它找到宿主、把手里的"再开一个窗口"请求交过去（R06）。默认关 ——
+    测试与冒烟不该往真实用户目录里写东西。
     """
     import uvicorn  # noqa: PLC0415
 
     from .access_gate import new_token  # noqa: PLC0415
 
     token = access_token or new_token()
-    chosen = find_free_port(host) if port in (None, 0) else port
+    # R07：两种端口语义分开。不给端口 = 优先 8765、被占就换一个空闲的；**显式给了**
+    # 就只能是它 —— 改前一律"被占就换"，用户以为自己在 9000 上，实际跑在别的端口，
+    # 而他按 9000 去连别的工具时会连到别人身上。
+    if port in (None, 0):
+        chosen = find_free_port(host)
+    elif explicit_port:
+        if port_in_use(host, port):
+            raise RuntimeError(
+                f"端口 {port} 已被占用 —— 这是显式指定的 --port，不会自动换；"
+                "换一个端口或先释放它。"
+            )
+        chosen = int(port)
+    else:
+        chosen = find_free_port(host, preferred=int(port))
     app = build_app(
         desktop_dir=desktop_dir,
         ui_active=ui_active,
@@ -224,6 +254,23 @@ def start_server(
     handle = DesktopServer(
         host=host, port=chosen, access_token=token, _server=server, _thread=thread
     )
+    if announce_host:
+        try:
+            from . import instance  # noqa: PLC0415
+
+            record = instance.write_host(port=chosen, token=token, ui_active=ui_active)
+            handle.instance_id = str(record.get("instanceId") or "")
+        except Exception:  # pragma: no cover - 名片写不了不该拦住开窗口
+            logger.debug("host record publish failed", exc_info=True)
+    # 「我起来了」——只有后端真的健康之后才留这个标记。上一次更新起的助手在等它
+    # 才敢删旧版本（见 updater.mark_boot_ok 的说明：发出 start 不等于新版能用）。
+    # 没有正在切换的更新时它什么都不做、一个文件都不写。
+    try:
+        from .updater import mark_boot_ok  # noqa: PLC0415
+
+        mark_boot_ok()
+    except Exception:  # pragma: no cover - 标记失败不该拦住开窗口
+        logger.debug("boot-ok marker failed", exc_info=True)
     publish_access(handle)
     return handle
 

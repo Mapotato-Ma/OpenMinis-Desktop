@@ -115,11 +115,13 @@ class BootPlan:
     """boot 需要知道的一切（不含 UI 状态）。"""
 
     host: str
-    port: int
+    #: None = "优先 8765，被占就换空闲"；给了具体端口 = 显式语义（被占要报错，R07）。
+    port: int | None
     desktop_dir: Path | None
     ui_active: bool
     existing: str | None
     debug: bool = False
+    explicit_port: bool = False
 
     def url_for(self, base: str, token: str | None = None) -> str:
         """窗口要加载的地址。
@@ -163,6 +165,9 @@ class BootState:
         self._server: DesktopServer | None = None
         self.error: BaseException | None = None
         self.closing = False
+        #: 界面就绪之后要加载的地址（带访问令牌）。宿主给"后来者要的窗口"复用它 ——
+        #: 令牌只在宿主进程里有，所以窗口必须由宿主开（R06）。
+        self.ui_url = ""
         #: splash 加载完成 —— 这时 ``evaluate_js`` / ``load_url`` 才是安全的。
         self.ready = threading.Event()
         self.done = threading.Event()
@@ -229,6 +234,8 @@ def _boot_once(state: BootState, plan: BootPlan, window: Any) -> None:
                 port=plan.port,
                 desktop_dir=plan.desktop_dir,
                 ui_active=plan.ui_active,
+                explicit_port=plan.explicit_port,
+                announce_host=True,
                 log_level="debug" if plan.debug else "info",
                 should_stop=state.is_closing,
             )
@@ -236,6 +243,7 @@ def _boot_once(state: BootState, plan: BootPlan, window: Any) -> None:
             if state.is_closing():
                 return
             url = plan.url_for(server.url, server.access_token)
+            state.ui_url = url
 
         _status(window, state, "正在载入界面…")
         if not state.ready.wait(READY_TIMEOUT):
@@ -281,6 +289,34 @@ def run_window_first(
 
     register_restart_hook(window)
     state = BootState()
+
+    # 单宿主：别的进程想要新窗口时，由**本进程**开（后端与窗口同属一个进程，
+    # 关掉哪个窗口都不会把后端带走）。R06。
+    def _open_extra(payload: dict[str, Any]) -> None:
+        url = state.ui_url
+        if not url:
+            logger.info("another launch asked for a window before the UI was ready — ignored")
+            return
+        if "--browser" in list(payload.get("argv") or []):
+            # 后来者是 `--browser` 起的：给它开个标签页，别硬塞一个窗口。
+            import webbrowser  # noqa: PLC0415
+
+            webbrowser.open(url)
+            logger.info("opened a browser tab for a second launch")
+            return
+        from .window import create_extra_window  # noqa: PLC0415
+
+        create_extra_window(
+            url, width=getattr(args, "width", 1440),
+            height=getattr(args, "height", 900), app_root=app_root,
+        )
+        trace.mark("extra-window")
+        logger.info("opened an extra window for a second launch")
+
+    from . import instance  # noqa: PLC0415
+
+    watcher = instance.WindowRequestWatcher(_open_extra)
+    watcher.start()
     seen = {"loaded": 0}
 
     def _on_loaded(*_args: Any, **_kwargs: Any) -> None:
@@ -327,6 +363,7 @@ def run_window_first(
         )
         exit_code = 1
     finally:
+        watcher.stop()
         state.mark_closing()
         if boot.is_alive():
             logger.info("waiting for the boot thread to unwind")
@@ -365,6 +402,8 @@ def run_serial_window(
         port=plan.port,
         desktop_dir=plan.desktop_dir,
         ui_active=plan.ui_active,
+        explicit_port=plan.explicit_port,
+        announce_host=True,
         log_level="debug" if plan.debug else "info",
     )
     try:

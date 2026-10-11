@@ -126,17 +126,24 @@ for route in reversed(routes):            # 倒着插 → 清单顺序即匹配�
 
 | 帧 | 字段 | 前端行为 |
 |---|---|---|
-| `delta` | `text`, `sessionId?` | 追加到当前文本块 |
-| `toolStart` | `id`, `name`, `input` | 插一张折叠工具卡 |
+| `delta` | `channel`, `text`, `sessionId?` | 追加到当前文本块（终端帧进抽屉） |
+| `toolStart` | `id`, `name`, `input`, `sessionId` | 插一张折叠工具卡 |
 | `toolEnd` | `id`, `ok`, `output`, `ms` | 结算卡片状态与输出 |
 | `chatSession` | `sessionId`, `title` | 首次对话后回填会话 id |
-| `done` | `sessionId` 或 `exitCode` | 结束本轮 / 结束终端命令 |
+| `done` | `channel`, `sessionId` 或 `exitCode` | 结束本轮 / 结束终端命令 |
 | `usage` | `totalTokens` | 更新状态栏 |
-| `error` | `error`, `locked?` | 报错；`locked` 时提示去解锁 |
+| `error` | `channel`, `error`, `locked?` | 报错；`locked` 时提示去解锁 |
 
-**一个坑**：`delta` 帧被对话和终端共用，唯一的区别是对话帧带 `sessionId`、
-终端帧不带。前端靠 `state.termBusy && f.sessionId == null` 分流。
-改协议时别把终端帧加上 `sessionId`。
+**帧归属由帧自己说**（R08）：会分流的那几种帧一律带 `channel` —— 终端（沙箱抽屉）
+那条路是 `"shell"`，其余在 `_safe_send` 这个漏斗里补 `"chat"`。改前 `delta` 是对话与
+终端共用的，前端只能靠 `state.termBusy && f.sessionId == null` **猜**这帧是谁的：
+终端跑命令时，聊天里的一条报错会被当成终端错误（聊天那一轮永不结束）；旧会话或机器人
+通道的帧也能糊进当前会话的正文。现在归属判定只认帧上的字段。
+
+同理，前端**发送**那条路也冻结身份（R09）：进入发送时抓一次 `{sid, workspace, gen}`，
+绑定与发帧都用它。改前是 `await bindSessionWorkspace(...)` 之后才读 `state.sessionId`
+—— 绑定是个网络往返，等它回来时用户可能已经切到别的会话，于是 A 的消息发给了 B。
+排队待发的消息也带着它归属的会话一起排队。
 
 ### REST
 
@@ -152,6 +159,34 @@ for route in reversed(routes):            # 倒着插 → 清单顺序即匹配�
 
 历史消息里的 `runs` 字段是这一轮的工具调用记录（`{name,input,ok,output,ms}`），
 刷新页面后工具卡片就是靠它画回来的 —— 不参与模型上下文。
+
+### 设置的保存：乐观并发 + 两个不同的"重新加载"
+
+`GET /api/settings` 会带一个 `revision`（当前配置内容的指纹），保存时用 `If-Match`
+带回去；对不上就 **409**（"设置已在别处改过"）。没有它，两个窗口各拿一份全量快照先后
+保存时，后写的会把前写的整段抹掉 —— 典型现场：A 窗口加了个 provider，B 窗口用旧列表
+一保存，那个 provider 就没了。界面侧还有两条纪律（`web/desktop/app.js`）：
+
+* **保存的响应不许覆盖等待期间的新编辑**：进入保存时冻结草稿代次（`settings.gen`），
+  响应回来时代次变了就只换基线、不整份覆盖草稿；
+* **"重新加载"与"丢弃"是两件事**：前者保留草稿（别处改过/切窗口时用），后者草稿整份
+  丢掉、未保存的密钥也清掉（用户明确说不要这些改动时用）。改前它们共用同一个入口，
+  于是"丢弃"其实什么都没丢。
+
+### 凭据：明文但有边界
+
+**API Key 明文存在 `settings.json`**（内核的存储层如此，本项目的口径是把它说清楚而不是
+假装加密）。围绕它有四条约束：
+
+* `settings.json` 与数据目录的权限在启动时收到**只有当前用户**（`desktop/secrets_acl.py`，
+  用系统自带的 `icacls`；失败会如实记一笔，不谎报"已加密"）；
+* 界面/接口**不回显明文**：只给 `hasKey`（有没有配），保存时留空表示"保持已存密文"；
+* **访问令牌不进日志**：日志 handler 上装了脱敏过滤器（`desktop/redact.py`），
+  导出诊断包时再过一遍（连过滤器装上之前写下的那份日志也兜住）；
+* 密钥不进仓库、不进对话 —— 这条是仓库纪律，不是这里的实现。
+
+要真正"不落盘明文"需要换存储（Windows DPAPI / Credential Manager）并做迁移与降级，
+那是独立的一步，不在本轮。
 
 ---
 
@@ -485,6 +520,73 @@ python desktop_main.py --upstream-ui   # 用上游移动端界面
 
 `--fast` 跳过冒烟测试。换平台之后这份基线必须重跑 —— 同一套测试在本地 POSIX 与
 CI 的 Windows 上红的地方可以完全不同（见下面的验证记录）。
+
+### 发布门禁（R19）
+
+- **打包前必须过 verify**：`build-windows.yml` 里 `portable` 依赖一个 `verify` job，
+  它 `uses: ./.github/workflows/verify.yml`（就是 `scripts/check.py` 那条命令）。
+  改前两者互不相干，tag 一推就打包发版，"两边都绿"靠人记着看。
+- **依赖按 `uv.lock` 装**（`uv sync --frozen`），不用浮动的 `>=`（改前那样装，"当时
+  最新"就进包）。
+- **壳指纹把依赖也算进去**（`scripts/shell_id.py` 的输入含 `pyproject.toml` 与
+  `uv.lock`）：依赖一变，指纹就变，更新自动走整包 —— 否则会出现"壳没源码变化、
+  载荷却带着不兼容的依赖发下去，装完起不来"。
+- **窗口探针的崩溃会拦住发布**：那一步把结论写进 `dist\windowed-probe.json`，由紧接着
+  的判定步骤决定红绿 —— 只有"这台 runner 测不出来"（unsupported）允许放行，
+  "窗口模式崩了"（crash）直接失败。改前是 `continue-on-error` + `exit 0`：
+  日志里喊了崩，流水线照绿、release 照发。
+- 打包时顺带写一份 `payload/runtime.json`（`scripts/make_runtime_manifest.py`）：
+  记录当时实际装到的依赖版本与 `web/dist` 指纹，排障时不用猜。
+
+---
+
+## 5.5 应用内更新：一次更新就是一个事务
+
+更新分两条路（`desktop/updater.py`）：只换 `payload/`（内核 + 界面，几 MB）与换整包
+（壳变了，几十 MB）。两条路**共用同一个助手脚本与同一个事务**
+（`desktop/update_transaction.py`，见 ADR-0003）：
+
+    idle → checking → downloading → staged → committing → done
+
+- **准备（`POST /api/desktop/update`）**：单飞占住一个 job（已有未终结的任务就返回
+  409 + 它的快照，不再开第二个线程），下载 → 校验 sha256 → 解到 `payload.new-<jobId>`
+  或 `_openminis-update-<jobId>/`，然后落 journal、**到此为止**。
+- **提交（`POST /api/desktop/update/restart`）**：用户点「重启并完成替换」才起助手，
+  并且只起一个。助手等本进程退出 → 让位（`*.old-<stamp>`）→ 就位 → 启动新 exe →
+  **等新版写 `updates/boot-ok.json`** → 才删旧目录。
+- 新版进程在后端健康之后自己写那个标记（`server_runner.start_server` →
+  `updater.mark_boot_ok()`）；等不到就保留旧目录，并在下次启动时由 `recover()` 把结论
+  写成界面能看到的那句话。`updates/txn.json` 是跨进程的权威（第二个窗口看得到同一个
+  任务）。
+
+界面同时显示**正在跑的版本**与**待启用的版本** —— 载荷更新是"退出后再切"，下载完进程里
+跑的还是旧版，混在一起会让人以为更新没成（R05）。
+
+真机演练：`python scripts/update_drill.py`（在临时目录里真跑 `cmd` 助手，两条分支都要过：
+新版正常报告启动、以及新版起不来时要保留旧版本）。单元测试只断言"脚本里写了哪几行"，
+这个脚本负责"它到底做没做对"。
+
+---
+
+## 5.6 提示前缀稳定：每轮会变的东西不进系统提示
+
+提示缓存（Anthropic 的 `cache_control`、OpenAI/DeepSeek 的自动前缀缓存）只认**最长公共
+前缀**，而系统提示 + 工具 schema + 历史恰好就是那个前缀。所以有一条硬约定：
+
+> **系统提示只由设置决定**；每轮都会变的东西（精确时间、群成员）拼在本轮**用户消息的
+> 尾部**，并随消息落库（`chat_store.TURN_NOTE_MARK`），展示层再剥掉。
+
+原因是用户报过的那件事：系统提示里写着「现在是 2026-10-11 21:30」，于是**每 60 秒前缀
+就变一次** —— Anthropic 侧 system 断点与其后的消息断点一起失效（每轮全量重写、按 1.25×
+计费），OpenAI 兼容服务商侧公共前缀在 `system` 处断掉、整段历史按未命中计费。表现就是
+"缓存命中率不高，但也不是零"（同一分钟内的往返仍命中）。
+
+落库是必须的：下一轮重建历史走的是库里的文本，只有它和当初发出去的**逐字节相同**，
+缓存才真的能命中（`tests/test_prompt_stability.py` 钉着这条）。
+
+命中率看得见：`/api/usage` 的 `grandTotal.cacheHitRate` 显示在设置的「用量」页。
+Anthropic 的提示缓存 TTL 在服务商卡片里可切（默认 1 小时；5 分钟档写入更便宜）。
+设计决定见 ADR-0004。
 
 ---
 

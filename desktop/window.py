@@ -145,6 +145,28 @@ def pywebview_available() -> bool:
     return True
 
 
+def create_extra_window(
+    url: str, *, title: str = "OpenMinis", width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT, app_root: Path | None = None,
+) -> Any:
+    """在**宿主进程**里再开一个窗口（单宿主契约，R06）。
+
+    改前"再开一个窗口"是另起一个进程、复用第一个的 HTTP —— 于是关掉第一个窗口就把
+    后端带走，第二个窗口还开着却断网。现在窗口都开在宿主里，后端活到**宿主**退出。
+
+    GUI 循环已经在跑时 ``create_window`` 会把这个窗口排进同一个循环（pywebview 的
+    正常用法）；``show()`` 是给"启动之后才创建"的后端留的保险，失败不影响窗口本身。
+    """
+    window, _api = create_window(
+        title=title, url=url, width=width, height=height, app_root=app_root
+    )
+    try:
+        window.show()
+    except Exception:  # pragma: no cover - 后端差异
+        logger.debug("extra window show() unsupported", exc_info=True)
+    return window
+
+
 def create_window(
     *,
     title: str = "OpenMinis",

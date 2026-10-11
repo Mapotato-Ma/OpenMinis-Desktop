@@ -48,7 +48,12 @@ from ..settings.model_capability import (
     label_map,
     pick_slot_model,
 )
-from ..settings.chat_service import ChatSetupError, attribution_snapshot, build_chat_setup
+from ..settings.chat_service import (
+    ChatSetupError,
+    attribution_snapshot,
+    build_chat_setup,
+    turn_note_block,
+)
 from ..settings.attachments import build_attachment_context
 from ..settings.remote_models import (
     ModelsFetchError,
@@ -524,6 +529,9 @@ def _settings_view(store: SettingsStore | None = None) -> dict[str, Any]:
                 "baseUrl": conf.get("baseUrl", ""),
                 "model": current or (meta.default_model if meta else ""),
                 "defaultModel": meta.default_model if meta else "",
+                # 提示缓存的 TTL（只有 Anthropic 引擎用得上）。默认 1h：改前这个开关
+                # 在 provider 里硬编码为关，没有任何入口，TTL 永远是 5 分钟。
+                "promptCacheTtl": str(conf.get("promptCacheTtl") or "1h"),
                 "models": models,
                 "modelTypes": store.model_types(str(conf.get("id") or "")),
                 "modelCapabilities": current_caps if current else [],
@@ -577,20 +585,37 @@ def _settings_view(store: SettingsStore | None = None) -> dict[str, Any]:
 @app.get("/api/settings")
 async def settings_get() -> dict[str, Any]:
     try:
-        return _settings_view()
+        view = _settings_view()
+        # R11：把当前配置的指纹一起给出去。界面保存时带回来（If-Match），服务端据此
+        # 拒绝"基于过期快照的全量 PUT"。
+        view["revision"] = SettingsStore.get().revision()
+        return view
     except Exception as e:  # pragma: no cover - defensive
         logger.exception("settings read failed")
         raise HTTPException(status_code=500, detail=str(e)) from None
 
 
 @app.put("/api/settings")
-async def settings_put(payload: dict[str, Any]) -> dict[str, Any]:
+async def settings_put(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     store = SettingsStore.get()
+    # R11：乐观并发。`If-Match` 头（或 body 里的 expectedRevision）与实际不符 →
+    # 409 + 当前指纹，界面提示"别处改过，请重新加载"。没带就当旧客户端，放行。
+    expected = (request.headers.get("if-match") or "").strip().strip('"')
+    if not expected:
+        expected = str(payload.get("expectedRevision") or "").strip()
+    current = store.revision()
+    if expected and expected != current:
+        raise HTTPException(
+            status_code=409,
+            detail="设置已经在别处改过了（另一个窗口/设备）—— 请先重新加载再保存。",
+        )
     try:
         store.apply_full(payload)
     except SettingsError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
-    return _settings_view(store)
+    view = _settings_view(store)
+    view["revision"] = store.revision()
+    return view
 
 
 @app.post("/api/settings/fetch-models")
@@ -699,6 +724,33 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+#: 帧的**通道归属** [R08]。改前前端是拿"现在终端忙不忙"（``state.termBusy``）去猜
+#: 一条 ``delta`` / ``error`` 该进聊天还是进终端抽屉 —— 终端在跑命令时，聊天里的一条
+#: 报错会被当成终端错误（聊天这一轮永远不结束），反过来旧会话的帧也能糊到当前会话上。
+#: 归属必须是帧自己说的，不是收帧那一刻的界面状态。
+SHELL_CHANNEL = "shell"
+CHAT_CHANNEL = "chat"
+
+
+def _shell_frame(payload: dict[str, Any]) -> dict[str, Any]:
+    """给终端（沙箱抽屉）的帧盖通道标记。"""
+    return {**payload, "channel": SHELL_CHANNEL}
+
+
+def _chat_frame(payload: dict[str, Any]) -> dict[str, Any]:
+    """给聊天回合的帧盖通道标记（聊天帧一律另带 sessionId）。"""
+    return {**payload, "channel": CHAT_CHANNEL}
+
+
+#: 会被前端**分流**的那几种帧。没标通道的一律按聊天算 —— 唯一会自己标的是终端那条路
+#: （``_shell_frame``）。放在这一个漏斗里补，比在十几个 emit 点各写一遍可靠。
+_ROUTED_FRAME_TYPES = frozenset({
+    "delta", "done", "error", "usage", "chatSession", "toolStart", "toolEnd",
+    "fallback", "subagentStart", "subagentDelta", "subagentToolStart",
+    "subagentToolEnd", "subagentEnd",
+})
+
+
 async def _safe_send(client_id: str, payload: dict[str, Any]) -> None:
     """send_json that swallows WebSocketDisconnect so chat runs survive a
     mid-stream client drop (e.g. user closes the browser tab).
@@ -715,6 +767,8 @@ async def _safe_send(client_id: str, payload: dict[str, Any]) -> None:
                 payload[key] = sanitize_outbound(value, where="frontend")
     except Exception:  # pragma: no cover - 脱敏失败不该丢帧
         logger.debug("frontend secret scan failed", exc_info=True)
+    if payload.get("type") in _ROUTED_FRAME_TYPES and "channel" not in payload:
+        payload = {**payload, "channel": CHAT_CHANNEL}
     try:
         await manager.send_json(client_id, payload)
     except WebSocketDisconnect:
@@ -1225,13 +1279,17 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
         await _safe_send(client_id, {"type": "error", "error": str(e)})
         return
 
-    # 「拉进群」的成员：前端把成员对象（``{id, kind, name}``）随消息带上来，这里
-    # 把它们写进系统提示，主代理才知道群里有这些同事、可以委派给谁（否则拉了群
-    # 也是摆设）。``kind == "human"`` 的只是真人席位 —— 标注清楚「是人、别委派」。
-    # 兼容老格式（纯 id 字符串数组，那时进群的都是子代理）。
+    # 「拉进群」的成员：前端把成员对象（``{id, kind, name}``）随消息带上来，主代理才
+    # 知道群里有这些同事、可以委派给谁（否则拉了群也是摆设）。``kind == "human"``
+    # 的只是真人席位 —— 标注清楚「是人、别委派」。兼容老格式（纯 id 字符串数组）。
+    #
+    # 这一段**不再拼进系统提示**：它是每轮由客户端现传的，一旦成员列表在某几轮缺字段
+    # 或顺序变化，系统提示（缓存前缀的头部）就跟着变，整段历史和工具 schema 的缓存
+    # 一起失效。它跟精确时间走同一条路：拼在本轮用户消息的尾部（见下面 note）。
     raw_parts = msg.get("participants") or []
     sub_ids: list[str] = []
     human_names: list[str] = []
+    group_text = ""
     for raw in raw_parts:
         if isinstance(raw, str):
             pid = raw.strip()
@@ -1251,7 +1309,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
 
             block = group_block(store, sub_ids, human_names)
             if block:
-                options.system_prompt = (options.system_prompt or "") + block
+                group_text = block
         except Exception:  # pragma: no cover - 群成员只影响提示，不该打断对话
             logger.debug("group block build failed", exc_info=True)
 
@@ -1338,6 +1396,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                 "name": chunk.name,
                 "input": chunk.args or {},
                 "sessionId": sid,
+                "channel": CHAT_CHANNEL,
             })
         elif isinstance(chunk, LLMStreamChunk.ToolResult):
             # Final state of that tool call: success / error + truncated body.
@@ -1384,7 +1443,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                     for path in images:
                         if path not in generated_images:
                             generated_images.append(path)
-            await _safe_send(client_id, frame)
+            await _safe_send(client_id, {**frame, "channel": CHAT_CHANNEL})
         elif isinstance(chunk, LLMStreamChunk.Usage):
             # Token usage of a finished assistant turn — surfaced to the
             # Web client so the chat can display per-step counts, and summed
@@ -1429,11 +1488,20 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
     # 识图槽；inline 模式才会把字节附上。顺带剥掉历史遗留的内联 base64 —— 它
     # 既会拖死前端输入框排版，也会按图片体积烧 token。
     bundle = await build_attachment_context(store, text)
+    # 每轮注记（精确时间 + 群成员）拼在本轮用户消息的**尾部**：
+    #   * 精确到分钟的时间放进系统提示，会让缓存前缀每 60 秒变一次 —— Anthropic 的
+    #     cache_control 断点与它后面的消息断点全部失效、每轮全量重写（1.25× 计费），
+    #     OpenAI/DeepSeek 那类自动前缀缓存则在 system 处断掉、整段历史按未命中计费；
+    #   * 放在尾部它就是"新内容"，前面前缀该命中的照样命中。
+    # **发给模型的那份与落库的那份必须是同一串字节**（下一轮重建历史时用落库的那份，
+    # 差一个字节缓存就全废）—— 所以两份都加，展示层再按标记剥掉（chat_store）。
+    note = turn_note_block(group=group_text)
     messages.append(
-        LLMMessage(LLMMessage.Role.USER, bundle.prompt, image_parts=bundle.image_parts or None)
+        LLMMessage(LLMMessage.Role.USER, bundle.prompt + note,
+                   image_parts=bundle.image_parts or None)
     )
     # persist the user turn before streaming so a crash never loses it
-    await chat_store.append_turn(sid, "user", bundle.text, model_label=model_label)
+    await chat_store.append_turn(sid, "user", bundle.text + note, model_label=model_label)
 
     # Root this session's shell inside its workspace sandbox (filed sessions
     # only; ungrouped sessions keep the global default directory).
@@ -1481,6 +1549,8 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
         from ..tools import send_tool
 
         send_tool.begin_turn(f"db-{sid}")
+        #: 这一轮被中断过吗（R10）。取消时要在收尾把已经积累的东西落库。
+        interrupted = False
         try:
             await runtime.run(
                 provider,
@@ -1488,42 +1558,31 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
                 session_id=f"db-{sid}",
                 options=options,
             )
+        except asyncio.CancelledError:
+            # 用户按了停止（或连接断了）。**不能就这么走掉**：已积累的正文与工具记录
+            # 只在内存里，改前取消会让它们整段消失 —— 用户在屏幕上看到了回答，刷新之后
+            # 那段历史没了（实时与历史不一致）。这里标一个中断标记再落库，然后把取消
+            # 继续往外传（停止链路要照常收尾）。
+            interrupted = True
+            await _persist_assistant_turn(
+                sid, messages, model_label=model_label, snapshot=snapshot,
+                usage_meter=usage_meter, tool_runs=tool_runs,
+                turn_timeline=turn_timeline, generated_images=generated_images,
+                interrupted=True,
+            )
+            raise
         finally:
             send_tool.end_turn(f"db-{sid}")
             reset_emitter(emitter_token)
             await _persist_sub_turns(sid, sub_turns)
         # persist the final assistant text (intermediate tool rounds live only
         # in the in-process transcript cache)
-        tail = messages[-1] if messages else None
-        if tail is not None and tail.role == LLMMessage.Role.ASSISTANT:
-            final_text = "".join(
-                p.text for p in (tail.content_parts or []) if isinstance(p, Text)
-            )
-            # 生图自动交付：模型忘了写 `![](路径)` 时补上，保证刷新/切换会话后
-            # 图片依然能渲染（即时那份由前端 toolEnd 帧的自动预览负责）。
-            _before_refs = final_text
-            final_text = append_image_refs(final_text, generated_images)
-            # [T-turn-timeline-order] 补进去的图片引用**也必须进时间线**：界面在
-            # 有 timeline 时不再渲染 ``m.text``，漏掉这段的话生图回合（它必然带
-            # 工具调用 → 必然有 timeline）重放时图片就消失了 —— 那正好废掉
-            # ``append_image_refs`` 存在的唯一理由（见上一条注释）。
-            timeline_with_image_refs(turn_timeline, _before_refs, final_text)
-            runs = list(tool_runs.values())
-            # 没有正文但有工具调用（模型只调工具就收工）也要落库：否则那一回合
-            # 连同它的一堆工具卡一起消失，用户回头无从回看。空正文的行在重建
-            # 上下文时被跳过（``load_runtime_history`` 只收有文字的），所以这
-            # 不会往模型上下文里塞空气。
-            if final_text.strip() or runs:
-                await chat_store.append_turn(
-                    sid, "assistant", final_text,
-                    runs=runs or None,
-                    timeline=turn_timeline or None,
-                    model_label=model_label,
-                    token_usage=(
-                        json.dumps(usage_meter) if any(usage_meter.values()) else None
-                    ),
-                    **snapshot,
-                )
+        await _persist_assistant_turn(
+            sid, messages, model_label=model_label, snapshot=snapshot,
+            usage_meter=usage_meter, tool_runs=tool_runs,
+            turn_timeline=turn_timeline, generated_images=generated_images,
+            interrupted=interrupted,
+        )
         # 到达轮次(默认 30)或接近上下文预算(默认 511998 tokens)时压缩:
         # 顺带把值得长期保留的事实写进记忆日志。压缩失败不影响本轮回答,
         # 所以 maybe_compact 内部吞掉异常。
@@ -1569,12 +1628,66 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
             set_projects(None)
         except Exception:  # pragma: no cover - 清理失败不该影响收尾
             logger.debug("member projects clear failed", exc_info=True)
-        close = getattr(provider, "aclose", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:  # pragma: no cover
-                pass
+        # **这里不关 provider**（R14）。provider 是 ``_PROVIDER_CACHE`` 里的**共享**
+        # 实例（同一个配置指纹复用同一个连接池），回合只是**借用**它：在这里 aclose
+        # 会把池子关掉 —— 同时跑的另一轮（或紧接着的下一轮）拿到的是一个
+        # ``is_closed=True`` 的 client（隔离探针复现过：A 回合 aclose 之后 B 借到的
+        # client 已关），而"顺序回合也重建池"又正好抵消了缓存存在的意义。
+        # 拥有者是缓存：只在设置变更（reset）与进程退出（close_provider_cache）时关。
+
+
+async def _persist_assistant_turn(
+    sid: str,
+    messages: list[Any],
+    *,
+    model_label: str | None,
+    snapshot: dict[str, Any],
+    usage_meter: dict[str, int],
+    tool_runs: dict[str, Any],
+    turn_timeline: list[dict[str, Any]],
+    generated_images: list[str],
+    interrupted: bool = False,
+) -> None:
+    """把这一回合的正文 + 工具卡 + 时间线落库（正常收尾与**被中断**收尾共用）。
+
+    抽出来是为了 R10：取消路径也要走同一套落库。改前取消时这段在一个 if 之后，
+    CancelledError 直接把它跳过去了 —— 用户屏幕上看得见的那段回答，刷新就没了。
+    """
+    tail = messages[-1] if messages else None
+    if tail is None or tail.role != LLMMessage.Role.ASSISTANT:
+        return
+    final_text = "".join(
+        p.text for p in (tail.content_parts or []) if isinstance(p, Text)
+    )
+    if not final_text:
+        # 兜底：有的路径把正文放在 ``content`` 而不是 ``content_parts`` 里
+        # （被中断的那一轮尤其容易停在半截状态）。宁可多读一处，也别落一行空正文 ——
+        # 那正是 R10 要修的症状：屏幕上有、库里没有。
+        final_text = str(getattr(tail, "content", "") or "")
+    # 生图自动交付：模型忘了写 `![](路径)` 时补上，保证刷新/切换会话后图片依然能渲染
+    # （即时那份由前端 toolEnd 帧的自动预览负责）。
+    before_refs = final_text
+    final_text = append_image_refs(final_text, generated_images)
+    # [T-turn-timeline-order] 补进去的图片引用**也必须进时间线**：界面在有 timeline 时
+    # 不再渲染 ``m.text``，漏掉这段的话生图回合（必然带工具调用 → 必然有 timeline）
+    # 重放时图片就消失了 —— 那正好废掉 ``append_image_refs`` 存在的唯一理由。
+    timeline_with_image_refs(turn_timeline, before_refs, final_text)
+    runs = list(tool_runs.values())
+    # 没有正文但有工具调用（模型只调工具就收工）也要落库：否则那一回合连同它的一堆
+    # 工具卡一起消失，用户回头无从回看。空正文的行在重建上下文时被跳过
+    # （``load_runtime_history`` 只收有文字的），所以这不会往模型上下文里塞空气。
+    # 被中断的回合**即使什么都没有也要落一行**：界面要能显示"这一轮被中断了"。
+    if not (final_text.strip() or runs or interrupted):
+        return
+    await chat_store.append_turn(
+        sid, "assistant", final_text,
+        runs=runs or None,
+        timeline=turn_timeline or None,
+        interrupted=interrupted,
+        model_label=model_label,
+        token_usage=(json.dumps(usage_meter) if any(usage_meter.values()) else None),
+        **snapshot,
+    )
 
 
 async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
@@ -1587,18 +1700,19 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
     """
     command = str(msg.get("command", ""))
     if not command:
-        await _safe_send(client_id, {"type": "error", "error": "empty command"})
+        await _safe_send(client_id, _shell_frame(
+            {"type": "error", "error": "empty command"}))
         return
 
     try:
         from ..sandbox.console_auth import console_auth
 
         if console_auth.has_password() and not console_auth.is_unlocked():
-            await _safe_send(client_id, {
+            await _safe_send(client_id, _shell_frame({
                 "type": "error",
                 "error": "控制台已锁定：请先在沙箱页输入控制台密码解锁",
                 "locked": True,
-            })
+            }))
             return
     except Exception:  # pragma: no cover - 闸门故障时按放行处理（与旧行为一致）
         logger.debug("console auth check failed", exc_info=True)
@@ -1621,7 +1735,7 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
                 **new_group_kwargs(),
             )
         except Exception as e:
-            await _safe_send(client_id, {"type": "error", "error": str(e)})
+            await _safe_send(client_id, _shell_frame({"type": "error", "error": str(e)}))
             return
 
         assert proc.stdout is not None
@@ -1629,13 +1743,14 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
             if not line:
                 break
-            await _safe_send(client_id, {"type": "delta", "text": line.decode(errors="replace")}
-            )
+            await _safe_send(client_id, _shell_frame(
+                {"type": "delta", "text": line.decode(errors="replace")}
+            ))
         code = await proc.wait()
     except TimeoutError:
         if proc is not None:
             _kill_shell(client_id, proc)
-        await _safe_send(client_id, {"type": "error", "error": "timeout"})
+        await _safe_send(client_id, _shell_frame({"type": "error", "error": "timeout"}))
         return
     except asyncio.CancelledError:
         # 停止帧 / 连接断开：光取消 await 只是不再读输出，命令还得真收掉。
@@ -1649,7 +1764,7 @@ async def _handle_shell(client_id: str, msg: dict[str, Any]) -> None:
             _notify_shell_stopped(client_id)
         raise
 
-    await _safe_send(client_id, {"type": "done", "exitCode": code})
+    await _safe_send(client_id, _shell_frame({"type": "done", "exitCode": code}))
 
 
 def _kill_shell(client_id: str, proc: Any, *, notify: bool = False) -> None:
@@ -1691,7 +1806,8 @@ def _notify_shell_stopped(client_id: str) -> None:
 
     async def _run() -> None:
         try:
-            await _safe_send(client_id, {"type": "error", "error": _STOPPED_NOTE})
+            await _safe_send(client_id, _shell_frame(
+                {"type": "error", "error": _STOPPED_NOTE}))
         except Exception:  # pragma: no cover
             logger.debug("terminal stop notice failed", exc_info=True)
 
@@ -1710,7 +1826,8 @@ async def _dispatch_shell(client_id: str, msg: dict[str, Any]) -> None:
         # 同一条连接上已有命令在跑 → 拒绝新的一条（前端 termBusy 也是这么说的：
         # 「上一条命令还在执行」）。放两条并行跑的话，输出 delta 和 done 帧会互相
         # 踩（前一条的 done 会把抽屉的 busy 灯熄掉，后一条还在跑）。
-        await _safe_send(client_id, {"type": "error", "error": "上一条命令还在执行"})
+        await _safe_send(client_id, _shell_frame(
+            {"type": "error", "error": "上一条命令还在执行"}))
         return
     _register_shell(client_id, asyncio.create_task(_handle_shell(client_id, msg)))
 

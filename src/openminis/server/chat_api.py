@@ -92,6 +92,9 @@ async def session_messages(session_id: str) -> dict[str, Any]:
                 # [T-subagent-log-persist] 子代理过程的身份与正文（有才是子代理
                 # 消息）。正文不在 text 里，同样不进模型上下文。
                 "sub": m.sub,
+                # R10：这一轮被用户中断过（已积累的正文/工具记录仍然落库，
+                # 界面在气泡上标一句「已中断」）。不进模型上下文。
+                "interrupted": bool(m.interrupted),
             }
             for m in rows
         ]

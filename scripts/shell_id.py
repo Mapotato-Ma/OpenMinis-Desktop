@@ -36,7 +36,14 @@ REPO = Path(__file__).resolve().parent.parent
 
 #: 参与哈希的文件/目录。**不含** build_id.py 自己（它装着结果，会自我循环），
 #: 也不含测试（改测试不该让用户的更新变大）。
-SHELL_INPUTS = ("desktop", "desktop_main.py", "packaging/OpenMinisDesktop.spec")
+#:
+#: R19：**依赖也要算进壳**。改前这里只有壳源码 + Python 版本 —— 于是"依赖升级了、
+#: 壳源码一个字没动"会被判成"壳没变、可以只换载荷"，装完应用起不来（缺包/版本不兼容）。
+#: ``pyproject.toml`` 与 ``uv.lock`` 一变，指纹就变，更新自动走整包。
+SHELL_INPUTS = (
+    "desktop", "desktop_main.py", "packaging/OpenMinisDesktop.spec",
+    "pyproject.toml", "uv.lock",
+)
 SKIP_NAMES = {"build_id.py"}
 SKIP_DIRS = {"__pycache__", "tests", "assets"}
 

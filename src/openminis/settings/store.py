@@ -245,6 +245,10 @@ class SettingsStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (app_context().data_dir / _FILE_NAME)
         self._io_lock = threading.Lock()
+        #: 一次"读 → 改 → 校验 → 落盘 → 发布"期间持有的锁（R13）。
+        #: ``_io_lock`` 只保护单次读/写，管不了这整条链 —— 两个并发 PUT 会在
+        #: 各自的副本上做校验，最后一个赢，中间那个的改动静默消失。
+        self._mutation_lock = threading.RLock()
         self._data: dict[str, Any] | None = None
 
     # -- construction ------------------------------------------------------
@@ -294,13 +298,44 @@ class SettingsStore:
                            encoding="utf-8")
             tmp.replace(self.path)
 
+    def revision(self) -> str:
+        """当前配置的指纹（R11）。
+
+        用来做"乐观并发"：界面保存时带上它读到的那一版，服务端发现对不上就拒绝 ——
+        两个窗口各自握着一份**全量**快照先后保存，后写的会把前写的改动整段抹掉
+        （典型现场：A 窗口加了 provider、B 窗口用旧列表一保存，那个 provider 就没了）。
+        锁只能让请求串行，发现不了"你的快照已经过期"。
+        """
+        import hashlib  # noqa: PLC0415
+
+        try:
+            payload = json.dumps(self.load(), ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):  # pragma: no cover - 存进去的一定是 JSON
+            payload = repr(self.load())
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
     # -- public mutations (all validated) ----------------------------------
     def apply_full(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate + apply the full settings payload from the REST API.
 
         Returns the resulting stored snapshot.
         """
-        data = self.load()
+        # R13：整条链在一把锁里 —— 而且**改的是一份深拷贝**。
+        #
+        # 改前是 ``data = self.load()`` 然后就地改：``load()`` 返回的是那个共享的
+        # ``self._data``，于是校验还没跑完，内存里那份配置**已经被改了**。一个非法请求
+        # 被拒绝（400）之后内存里少了一个 provider、磁盘上还在 —— 用户当场失去配置
+        # （聊天下一条就报"厂商配置不存在"），重启又"自己好了"。
+        #
+        # 现在：复制 → 校验候选 → 原子落盘 → 才发布。拒绝 = 一个字节都不动，
+        # 内存与磁盘都保持原样（护栏断言两边都相等，而不只是看 400）。
+        with self._mutation_lock:
+            return self._apply_full_locked(payload)
+
+    def _apply_full_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        import copy
+
+        data = copy.deepcopy(self.load())
         errors: list[str] = []
 
         # 自定义模型类型 —— 先处理,好让 providers 里的 modelTypes 覆盖能识别
@@ -363,6 +398,16 @@ class SettingsStore:
                 entry["baseUrl"] = (base_url if isinstance(base_url, str) else "").strip()
                 model = conf.get("model")
                 entry["model"] = (model if isinstance(model, str) else "").strip()
+                # 提示缓存的 TTL（只有 Anthropic 引擎用得上，ANTHROPIC 侧的
+                # enhanced_cache 就是它）。**没传 = 保留旧值**（跟 modelHints 一个道理：
+                # 老客户端/别的界面保存一次不该把这个开关抹回默认）；传了非法值按默认
+                # 处理 —— 它是性能开关，不该拦住用户保存设置。
+                ttl = conf.get("promptCacheTtl")
+                if isinstance(ttl, str) and ttl.strip():
+                    cleaned = ttl.strip().lower()
+                    entry["promptCacheTtl"] = cleaned if cleaned in ("5m", "1h") else "1h"
+                elif cid in existing and existing[cid].get("promptCacheTtl"):
+                    entry["promptCacheTtl"] = existing[cid]["promptCacheTtl"]
                 # remote model hints are owned by fetch-models; a plain save
                 # must not wipe them
                 if cid in existing:

@@ -38,10 +38,18 @@ permissions:
   contents: write
 
 jobs:
+  # 发布门禁（R19）：打包/发版**必须**先过 verify（就是 scripts/check.py 那条命令）。
+  # 复用的是独立 workflow 里那份定义 —— 不在两个文件里各写一遍，免得漂移。
+  # 改前 Verify 与 Build 是两个互不相干的 workflow：tag 一推就打包发版，"两边都绿"
+  # 靠的是人记着看，不是流水线保证的。
+  verify:
+    uses: ./.github/workflows/verify.yml
+
   # 只发便携版（onedir）。onefile 那版已经删掉了 —— 它每次启动都要把载荷解到
   # %TEMP%（办公电脑上还要过一遍杀软实时扫描），而两个形态并存只会让人不知道该下
   # 哪个。启动速度的对比数据留在 v0.3.x 的 release 里，需要时去翻。
   portable:
+    needs: verify
     runs-on: windows-latest
     timeout-minutes: 40
 
@@ -55,21 +63,25 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
+        # uv.lock 是权威（R19）：改前这里是 `pip install -e .` + 两条浮动的
+        # `>=` 安装 —— 依赖"当时最新"就打进包里，而壳指纹只看壳源码，于是
+        # "壳没变、依赖变了"会被判成"可以只换载荷"，用户拿到一个装不起来的组合。
+        # 现在按锁文件装（--frozen 不动锁），并把工具链也走同一个 venv。
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-          pip install "pywebview>=5.0" "playwright>=1.63" "pyinstaller>=6.6"
+          pip install uv
+          uv sync --frozen --extra build
 
       - name: Generate icon
         shell: pwsh
-        run: python scripts/make_icon.py
+        run: uv run python scripts/make_icon.py
 
       - name: Build portable (onedir) app
         shell: pwsh
         env:
           OPENMINIS_ONEFILE: '0'
           OPENMINIS_CONSOLE: '0'
-        run: python -m PyInstaller --noconfirm --clean packaging/OpenMinisDesktop.spec
+        run: uv run python -m PyInstaller --noconfirm --clean packaging/OpenMinisDesktop.spec
 
       - name: Report startup timeline (portable)
         shell: pwsh
@@ -81,7 +93,11 @@ jobs:
         # 它排在 sys.path 最前面，所以盖过 exe 里冻住的那一份 —— 已经装好的实例
         # 更新时只需要换这一个目录（实测 2.3MB），不用重发 37.9MB 的整包。
         run: |
-          python scripts/make_payload.py --out dist\OpenMinisDesktop\payload --zip dist\OpenMinisDesktop-update.zip
+          # 可复现的运行时清单（R19）：壳指纹管"依赖变没变"，这份清单记录
+          # "打包当时实际装到了什么版本"—— 出问题时不用猜。**必须先写清单再打 zip**，
+          # 否则更新包里没有它。
+          uv run python scripts/make_runtime_manifest.py --out dist\OpenMinisDesktop\payload\runtime.json
+          uv run python scripts/make_payload.py --out dist\OpenMinisDesktop\payload --zip dist\OpenMinisDesktop-update.zip
           if ($LASTEXITCODE -ne 0) { Write-Error "payload build failed"; exit 1 }
 
       - name: Verify the payload actually shadows the bundled kernel
@@ -155,11 +171,15 @@ jobs:
         shell: pwsh
         # 上面那些探活都是 --no-window 起的：进程里根本没有窗口，所以
         # /api/desktop/zoom 只会回答"没有控件"，**证明不了窗口模式能用**。
-        # 这一步带窗口再起一次，并把进程退出码与 startup.log 打出来 ——
-        # 崩了和"runner 没桌面"必须能分开看。仍然 continue-on-error：
-        # runner 上桌面会话未必可用，降级不该染红流水线。
+        # 这一步带窗口再起一次，并把进程退出码与 startup.log 打出来。
+        #
+        # R19：结果写进 `dist\windowed-probe.json`，由**下一步**判定 ——
+        # 改前这里 `continue-on-error: true` + `exit 0`：日志里喊"窗口模式崩了"，
+        # 流水线照样绿、照样发版。现在"崩了"（crash）与"runner 没桌面"（unsupported）
+        # 是两个不同的结论，只有后者允许放行。
         continue-on-error: true
         run: |
+          $result = @{ status = 'unsupported'; detail = 'unknown' }
           $p = Start-Process -FilePath dist\OpenMinisDesktop\OpenMinisDesktop.exe -ArgumentList "--port","8803" -PassThru
           $zoom = $null
           # 令牌按端口过滤：上一步那个实例的令牌还留在文件里。
@@ -195,11 +215,29 @@ jobs:
             Write-Host "::error::windowed exe exited early (exit code $($p.ExitCode)) — 窗口模式崩了，别当成 runner 没桌面"
             $log = Join-Path $env:USERPROFILE 'openminis\logs\startup.log'
             if (Test-Path $log) { Write-Host "--- startup.log tail"; Get-Content $log -Tail 25 }
+            $result = @{ status = 'crash'; detail = "exit code $($p.ExitCode)" }
           } else {
             Write-Host "::warning::windowed exe is alive but never served HTTP within 50s"
+            $result = @{ status = 'unsupported'; detail = 'no HTTP within 50s' }
           }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if ($zoom) { $result = @{ status = 'ok'; detail = "$zoom" } }
+          $result | ConvertTo-Json | Set-Content dist\windowed-probe.json
           exit 0
+
+      - name: "Gate: windowed probe must not have crashed"
+        shell: pwsh
+        # 只有"环境不支持"能放行（比如 runner 上没有可用的桌面会话）；
+        # "窗口模式崩了"必须红 —— 那是真 bug，不能让 release 带着它出门。
+        run: |
+          $probe = Get-Content dist\windowed-probe.json -Raw | ConvertFrom-Json
+          Write-Host "windowed probe: $($probe.status) — $($probe.detail)"
+          if ($probe.status -eq 'crash') {
+            Write-Error "窗口模式崩溃了（$($probe.detail)）—— 不许发版"
+            exit 1
+          }
+          if ($probe.status -eq 'ok') { Write-Host "窗口模式可用：$($probe.detail)"; exit 0 }
+          Write-Host "::warning::这台 runner 测不出窗口模式（$($probe.detail)）—— 记为未验证，不当作通过"
 
       - name: Package the folder
         shell: pwsh
@@ -291,7 +329,7 @@ jobs:
         # （固定地址，不吃 GitHub API 限流）。壳指纹在这里进清单。
         run: |
           $tag = "${{ github.ref_name }}"
-          python scripts/make_latest.py --dist dist --tag $tag --notes "见 release 说明"
+          uv run python scripts/make_latest.py --dist dist --tag $tag --notes "见 release 说明"
           if ($LASTEXITCODE -ne 0) { Write-Error "latest.json build failed"; exit 1 }
           Get-Content dist\latest.json
 
