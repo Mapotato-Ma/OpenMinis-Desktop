@@ -45,8 +45,35 @@ __all__ = [
     "parts_to_runs",
     "parts_to_timeline",
     "parts_to_sub",
+    "TURN_NOTE_MARK",
+    "strip_turn_notes",
     "TITLE_DEFAULT",
 ]
+
+
+#: 「每轮注记」的起始标记 [T-prompt-prefix-stability]。
+#:
+#: 精确时间与群成员这类**每轮都会变**的东西不能进系统提示：系统提示是缓存前缀的头部，
+#: 它一分钟一变就等于所有服务商的前缀缓存（Anthropic 的 cache_control 断点、
+#: OpenAI/DeepSeek 的自动前缀缓存）每轮全部失效。于是它们拼在本轮**用户消息的尾部**，
+#: 并且**落库** —— 落库才能保证下一轮重建历史时逐字节一致，那才是命中的前提。
+#:
+#: 展示层用 :func:`strip_turn_notes` 把这个尾巴剥掉：用户看到的就是他自己打的那句话。
+TURN_NOTE_MARK = "【本轮注记】"
+
+
+def strip_turn_notes(text: str) -> str:
+    """剥掉一条用户消息尾部的每轮注记（界面 / 标题 / 导出用）。
+
+    **模型上下文不能剥**：``load_runtime_history`` 要的是原样的字节，否则每轮请求的
+    前缀都会和上一轮差一截，缓存又白算了。取**最后一个**标记，避免用户自己打的那句话
+    里恰好出现同样的字样时把正文一起切掉。
+    """
+    raw = str(text or "")
+    idx = raw.rfind(TURN_NOTE_MARK)
+    if idx < 0:
+        return raw
+    return raw[:idx].rstrip()
 
 TITLE_DEFAULT = "新会话"
 _TITLE_LEN = 30
@@ -620,7 +647,9 @@ async def load_messages(session_id: str) -> list[ChatMessageInfo]:
             ChatMessageInfo(
                 id=r.id,
                 role=r.role,
-                text=parts_to_text(r.parts_json),
+                # 界面看到的是用户自己打的那句话：尾部的每轮注记（时间/群成员）
+                # 剥掉。库里的原样保留着（模型上下文要靠它逐字节稳定）。
+                text=strip_turn_notes(parts_to_text(r.parts_json)),
                 createdAt=r.created_at,
                 runs=parts_to_runs(r.parts_json) or None,
                 timeline=parts_to_timeline(r.parts_json) or None,
@@ -732,8 +761,11 @@ async def append_turn(
         if role == "user":
             title = session.title
             if not title or title == TITLE_DEFAULT:
+                # 标题必须来自用户自己打的话 —— 带着尾部的每轮注记（时间/群成员）
+                # 会变成"【当前时间】2026-10-11 21:30（周六…"这种标题。
                 await dao.update_session_title(
-                    session_id, _one_line(text)[:_TITLE_LEN] or TITLE_DEFAULT, now
+                    session_id, _one_line(strip_turn_notes(text))[:_TITLE_LEN] or TITLE_DEFAULT,
+                    now,
                 )
         elif role == "assistant":
             await dao.update_last_message(

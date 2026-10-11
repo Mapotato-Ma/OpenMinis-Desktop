@@ -289,13 +289,28 @@ def test_skill_list_cache_invalidated_on_new_skill(home):
 # 时效：系统提示必须带当前时间
 # --------------------------------------------------------------------------
 
-def test_system_prompt_carries_current_time(home):
+def test_system_prompt_carries_the_date_but_never_the_clock(home):
+    """时效信息要有，但**系统提示里只到「天」**；分钟级时间走每轮尾部注记。
+
+    PORT-FIX(prompt-prefix)：改前系统提示写的是「现在是 2026-10-11 21:30」，于是
+    缓存前缀每 60 秒变一次 —— Anthropic 的 ``cache_control`` 断点与它后面的消息断点
+    一起失效（每轮全量重写、按 1.25× 计费），OpenAI/DeepSeek 那类自动前缀缓存则在
+    ``system`` 处断掉、整段历史按未命中计费。用户看到的「缓存命中率不高」就是它。
+    """
+    import re
     from datetime import datetime
 
-    from openminis.settings.chat_service import current_time_block
+    from openminis.settings.chat_service import current_date_block, turn_note_block
 
-    block = current_time_block()
-    assert datetime.now().strftime("%Y-%m-%d") in block
+    date_block = current_date_block()
+    assert datetime.now().strftime("%Y-%m-%d") in date_block
+    assert not re.search(r"\d{1,2}:\d{2}", date_block), "系统提示里不许出现时分"
+
+    # 精确时间在每轮注记里（拼在用户消息尾部，不是系统提示）
+    note = turn_note_block()
+    assert re.search(r"\d{1,2}:\d{2}", note)
+    assert "【本轮注记】" in note
+
     # 检索时效纪律必须写明「不传 time_range 默认不限时间」
     from openminis.settings.chat_service import RETRIEVAL_DISCIPLINE
 

@@ -48,7 +48,12 @@ from ..settings.model_capability import (
     label_map,
     pick_slot_model,
 )
-from ..settings.chat_service import ChatSetupError, attribution_snapshot, build_chat_setup
+from ..settings.chat_service import (
+    ChatSetupError,
+    attribution_snapshot,
+    build_chat_setup,
+    turn_note_block,
+)
 from ..settings.attachments import build_attachment_context
 from ..settings.remote_models import (
     ModelsFetchError,
@@ -524,6 +529,9 @@ def _settings_view(store: SettingsStore | None = None) -> dict[str, Any]:
                 "baseUrl": conf.get("baseUrl", ""),
                 "model": current or (meta.default_model if meta else ""),
                 "defaultModel": meta.default_model if meta else "",
+                # 提示缓存的 TTL（只有 Anthropic 引擎用得上）。默认 1h：改前这个开关
+                # 在 provider 里硬编码为关，没有任何入口，TTL 永远是 5 分钟。
+                "promptCacheTtl": str(conf.get("promptCacheTtl") or "1h"),
                 "models": models,
                 "modelTypes": store.model_types(str(conf.get("id") or "")),
                 "modelCapabilities": current_caps if current else [],
@@ -1225,13 +1233,17 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
         await _safe_send(client_id, {"type": "error", "error": str(e)})
         return
 
-    # 「拉进群」的成员：前端把成员对象（``{id, kind, name}``）随消息带上来，这里
-    # 把它们写进系统提示，主代理才知道群里有这些同事、可以委派给谁（否则拉了群
-    # 也是摆设）。``kind == "human"`` 的只是真人席位 —— 标注清楚「是人、别委派」。
-    # 兼容老格式（纯 id 字符串数组，那时进群的都是子代理）。
+    # 「拉进群」的成员：前端把成员对象（``{id, kind, name}``）随消息带上来，主代理才
+    # 知道群里有这些同事、可以委派给谁（否则拉了群也是摆设）。``kind == "human"``
+    # 的只是真人席位 —— 标注清楚「是人、别委派」。兼容老格式（纯 id 字符串数组）。
+    #
+    # 这一段**不再拼进系统提示**：它是每轮由客户端现传的，一旦成员列表在某几轮缺字段
+    # 或顺序变化，系统提示（缓存前缀的头部）就跟着变，整段历史和工具 schema 的缓存
+    # 一起失效。它跟精确时间走同一条路：拼在本轮用户消息的尾部（见下面 note）。
     raw_parts = msg.get("participants") or []
     sub_ids: list[str] = []
     human_names: list[str] = []
+    group_text = ""
     for raw in raw_parts:
         if isinstance(raw, str):
             pid = raw.strip()
@@ -1251,7 +1263,7 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
 
             block = group_block(store, sub_ids, human_names)
             if block:
-                options.system_prompt = (options.system_prompt or "") + block
+                group_text = block
         except Exception:  # pragma: no cover - 群成员只影响提示，不该打断对话
             logger.debug("group block build failed", exc_info=True)
 
@@ -1429,11 +1441,20 @@ async def _run_chat(client_id: str, msg: dict[str, Any]) -> None:
     # 识图槽；inline 模式才会把字节附上。顺带剥掉历史遗留的内联 base64 —— 它
     # 既会拖死前端输入框排版，也会按图片体积烧 token。
     bundle = await build_attachment_context(store, text)
+    # 每轮注记（精确时间 + 群成员）拼在本轮用户消息的**尾部**：
+    #   * 精确到分钟的时间放进系统提示，会让缓存前缀每 60 秒变一次 —— Anthropic 的
+    #     cache_control 断点与它后面的消息断点全部失效、每轮全量重写（1.25× 计费），
+    #     OpenAI/DeepSeek 那类自动前缀缓存则在 system 处断掉、整段历史按未命中计费；
+    #   * 放在尾部它就是"新内容"，前面前缀该命中的照样命中。
+    # **发给模型的那份与落库的那份必须是同一串字节**（下一轮重建历史时用落库的那份，
+    # 差一个字节缓存就全废）—— 所以两份都加，展示层再按标记剥掉（chat_store）。
+    note = turn_note_block(group=group_text)
     messages.append(
-        LLMMessage(LLMMessage.Role.USER, bundle.prompt, image_parts=bundle.image_parts or None)
+        LLMMessage(LLMMessage.Role.USER, bundle.prompt + note,
+                   image_parts=bundle.image_parts or None)
     )
     # persist the user turn before streaming so a crash never loses it
-    await chat_store.append_turn(sid, "user", bundle.text, model_label=model_label)
+    await chat_store.append_turn(sid, "user", bundle.text + note, model_label=model_label)
 
     # Root this session's shell inside its workspace sandbox (filed sessions
     # only; ungrouped sessions keep the global default directory).

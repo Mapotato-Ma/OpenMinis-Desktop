@@ -363,6 +363,16 @@ class SettingsStore:
                 entry["baseUrl"] = (base_url if isinstance(base_url, str) else "").strip()
                 model = conf.get("model")
                 entry["model"] = (model if isinstance(model, str) else "").strip()
+                # 提示缓存的 TTL（只有 Anthropic 引擎用得上，ANTHROPIC 侧的
+                # enhanced_cache 就是它）。**没传 = 保留旧值**（跟 modelHints 一个道理：
+                # 老客户端/别的界面保存一次不该把这个开关抹回默认）；传了非法值按默认
+                # 处理 —— 它是性能开关，不该拦住用户保存设置。
+                ttl = conf.get("promptCacheTtl")
+                if isinstance(ttl, str) and ttl.strip():
+                    cleaned = ttl.strip().lower()
+                    entry["promptCacheTtl"] = cleaned if cleaned in ("5m", "1h") else "1h"
+                elif cid in existing and existing[cid].get("promptCacheTtl"):
+                    entry["promptCacheTtl"] = existing[cid]["promptCacheTtl"]
                 # remote model hints are owned by fetch-models; a plain save
                 # must not wipe them
                 if cid in existing:

@@ -295,3 +295,18 @@ test('只敲密钥、别的都没动 → 保存按钮必须出现（否则关面
   // 保存过一次之后（load 重建状态）就干净了 —— 密钥不在服务端回包里，靠重建来清
   assert.equal(M.toPayload(M.load(serverPayload(), null)).dirty.any, false);
 });
+
+test('提示缓存 TTL 走完整条链路：读回来、发出去、改了算未保存', () => {
+  // 服务端没给这个字段时按默认 1 小时（改前 Anthropic 侧这个开关硬编码为关）
+  const state = M.load(serverPayload(), null);
+  assert.equal(state.providers[1].promptCacheTtl, '1h');
+  assert.equal(M.toPayload(state).body.providers[1].promptCacheTtl, '1h');
+
+  // 改成 5 分钟：必须带上、而且必须点亮「未保存」
+  const patched = M.reduce(state, {
+    type: 'provider/patch', id: 'p2', patch: { promptCacheTtl: '5m' },
+  });
+  const { body, dirty } = M.toPayload(patched);
+  assert.equal(body.providers[1].promptCacheTtl, '5m');
+  assert.equal(dirty.models, true, '改了 TTL 却不亮保存按钮 —— 会静默丢掉这次修改');
+});

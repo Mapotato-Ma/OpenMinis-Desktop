@@ -611,3 +611,17 @@ test('更新：准备（staged）与提交（committing）是两个相位，别�
   assert.ok(/t\.phase === 'staged' && t\.pendingVersion/.test(app),
     '没有把"正在跑的版本"和"待启用的版本"分开显示（R05）');
 });
+
+test('缓存命中率看得见、Anthropic 的提示缓存 TTL 有入口', () => {
+  // 「缓存命中率不高」这件事以前只能靠感觉：用量面板只给缓存读/写的绝对量。
+  // 接上 /usage 已经算好的 cacheHitRate，改完能不能变好才有据可查。
+  const app = read('app.js');
+  assert.ok(app.includes('cacheHitRate'), '用量面板没有显示缓存命中率');
+  assert.ok(app.includes('缓存命中率'), '没有那一条的中文标签');
+
+  // Anthropic 的 enhanced_cache 改前硬编码为关、没有任何界面入口（TTL 恒为 5 分钟）。
+  assert.ok(/promptCacheTtl/.test(app), '服务商卡片里没有提示缓存这个开关');
+  assert.ok(/meta\.engine === 'anthropic'/.test(app), '开关没有按引擎区分（别的引擎没有这回事）');
+  const model = read('settings-model.js');
+  assert.ok(/promptCacheTtl/.test(model), 'setting-model 没带上这个字段（保存会丢）');
+});

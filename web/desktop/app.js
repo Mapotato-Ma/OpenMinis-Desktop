@@ -2540,7 +2540,12 @@ async function loadUsage() {
     const g = data.grandTotal || {};
     const total = $('usageTotal');
     total.innerHTML = '';
-    const items = [['输入', g.formattedInput], ['输出', g.formattedOutput], ['缓存读', g.formattedCacheRead], ['缓存写', g.formattedCacheCreation]];
+    // 命中率单独一条：它是「缓存到底有没有生效」唯一能自证的数字（改前界面只给
+    // 缓存读/写两个绝对量，用户只能凭感觉说"命中率不高"）。
+    const hit = (g.cacheHitRate == null) ? '—' : (g.cacheHitRate + '%');
+    const items = [['输入', g.formattedInput], ['输出', g.formattedOutput],
+      ['缓存读', g.formattedCacheRead], ['缓存写', g.formattedCacheCreation],
+      ['缓存命中率', hit]];
     for (const [lab, num] of items) {
       const it = el('div', 'ut-item');
       it.appendChild(el('div', 'ut-num', num || '0'));
@@ -4069,6 +4074,17 @@ function renderProviders() {
     row2.appendChild(selectField('类型', p.type,
       ((settings.data && settings.data.providerTypes) || []).map((t) => [t.type, t.label + (t.engine ? '' : '（引擎未移植）')]),
       (val) => { patch({ type: val }); renderProviders(); renderModelsHealth(); }));
+    // 提示缓存的 TTL：只对 Anthropic 有意义（改前这个开关硬编码为关、界面里根本没有）。
+    // 1 小时：手机端「隔一会儿再问」的节奏下明显更省；代价是缓存**写入**按 2× 计费
+    // （5 分钟那档是 1.25×），所以五分钟内高频追问的场景切 5 分钟更划算。
+    if (meta.engine === 'anthropic') {
+      const ttl = selectField('提示缓存', p.promptCacheTtl || '1h',
+        [['1h', '1 小时（推荐）'], ['5m', '5 分钟']],
+        (val) => patch({ promptCacheTtl: val }));
+      ttl.title = '缓存写入按 2× 计费（5 分钟那档 1.25×）：1 小时适合隔一会儿再问，'
+        + '5 分钟适合五分钟内连着追问。';
+      row2.appendChild(ttl);
+    }
     const keyField = passwordField(
       p.hasKey && !pendingKeys.has(p.id) ? 'API Key（已保存，留空则不变）' : 'API Key',
       (val) => {
