@@ -746,3 +746,36 @@ def test_build_chat_setup_passes_image_mode(store):
     store.apply_full({"agent": {"imageContextMode": "path"}})
     _, _, options2, _, _ = build_chat_setup(store)
     assert options2.image_context_mode == "path"
+
+
+def test_a_stale_full_save_is_rejected_with_409(store):
+    """R11：拿着**过期快照**的全量 PUT 要被拒。
+
+    两个窗口各握着一份全量快照先后保存时，后写的会把前写的整段抹掉（典型现场：
+    A 窗口加了 provider，B 窗口用旧列表一保存，那个 provider 就没了）。串行化请求
+    解决不了这个 —— 必须发现"你的快照已经过期"。
+    """
+    gw_a = {"id": "gw-a", "type": "openAI", "apiKey": "1", "model": "", "baseUrl": ""}
+    gw_b = {"id": "gw-b", "type": "openAI", "apiKey": "2", "model": "", "baseUrl": ""}
+    with TestClient(app) as c:
+        first = _put(c, providers=[gw_a])
+        stale = first.get("revision")
+        assert stale, "GET/PUT 都没给出配置指纹"
+
+        # 另一个窗口在这之后改了（服务端的指纹变了）
+        fresh = _put(c, providers=[gw_a, gw_b])
+        assert fresh.get("revision") and fresh["revision"] != stale
+
+        # 拿旧指纹保存 → 409，而且**磁盘上仍是别人那一份**
+        r = c.put("/api/settings", json={"providers": [gw_a]},
+                  headers={"If-Match": stale})
+        assert r.status_code == 409, r.text
+        assert list(store.load()["providers"]) == ["gw-a", "gw-b"], "过期保存把别人的改动抹了"
+
+        # 用当前指纹保存 → 通过
+        ok = c.put("/api/settings", json={"providers": [gw_a, gw_b]},
+                   headers={"If-Match": fresh["revision"]})
+        assert ok.status_code == 200, ok.text
+
+        # 没带指纹的老客户端照旧放行（向后兼容：升级期间两个版本并存）
+        assert c.put("/api/settings", json={"providers": [gw_a]}).status_code == 200

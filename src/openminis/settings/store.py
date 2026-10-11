@@ -298,6 +298,22 @@ class SettingsStore:
                            encoding="utf-8")
             tmp.replace(self.path)
 
+    def revision(self) -> str:
+        """当前配置的指纹（R11）。
+
+        用来做"乐观并发"：界面保存时带上它读到的那一版，服务端发现对不上就拒绝 ——
+        两个窗口各自握着一份**全量**快照先后保存，后写的会把前写的改动整段抹掉
+        （典型现场：A 窗口加了 provider、B 窗口用旧列表一保存，那个 provider 就没了）。
+        锁只能让请求串行，发现不了"你的快照已经过期"。
+        """
+        import hashlib  # noqa: PLC0415
+
+        try:
+            payload = json.dumps(self.load(), ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):  # pragma: no cover - 存进去的一定是 JSON
+            payload = repr(self.load())
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
     # -- public mutations (all validated) ----------------------------------
     def apply_full(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate + apply the full settings payload from the REST API.

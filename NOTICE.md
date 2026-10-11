@@ -72,6 +72,8 @@
 | `tests/test_settings.py`（新增一条 R13 断言） | 新增用例，不改上游既有断言 | 上一条的护栏；`apply_full` 的"拒绝无副作用"是这条流水里最容易回归的一处 |
 | `src/openminis/settings/chat_service.py`（`reset_provider_cache` / `close_provider_cache` / 淘汰路径）/ `src/openminis/server/main.py`（`_run_chat` 的 finally）/ `src/openminis/agent/subagents.py`（`run_subagent` / `plan_subagent`） | **回合结束时不再关 provider**：provider 是 `_PROVIDER_CACHE` 里的共享实例，回合只借用；关池子只发生在设置变更（reset，退休待关）与进程退出（close） | R14：改前"谁拿到谁关" —— 一轮结束会把另一轮在途的连接池关掉（隔离探针：A `aclose` 之后 B 借到的 client 已 `is_closed=True`），顺序回合也各自重建池、缓存白做。护栏：`tests/test_provider_pool.py` |
 | `src/openminis/plugins/tools.py`（`_coordinator_for` / `_new_group_kwargs` / `_kill_plugin` + `run_tool` 的取消与 finally） | 插件子进程登记进执行协调器；取消/超时都**杀整棵进程树**并回收 | R15：改前既没登记也没有取消分支 —— 按停止只是结束等待，插件进程继续在后台干活（隔离探针：communicate 中取消、kill 调用 = 0）；超时也只 kill 父进程、不 wait、不杀子孙。护栏：`tests/test_plugins.py`（取消/超时后"4 秒后才写的文件"不许出现） |
+| `src/openminis/server/main.py`（`_persist_assistant_turn` + 取消分支）/ `src/openminis/server/chat_store.py`（`interrupted` part + `parts_interrupted`）/ `src/openminis/server/chat_api.py`（多给一个 `interrupted` 字段） | 取消路径也要把已积累的正文/工具记录落库，并标一个中断标记；界面据标记显示「已中断」 | R10：`CancelledError` 从 `runtime.run` 传出来时，改前的"落库最终正文"整段被跳过 —— 屏幕上看得见的回答，刷新/切会话就没了（实时与历史不一致）。标记用的是 `parts_to_text` 不认识的 part 类型，**模型上下文一字不变**。护栏：`tests/test_interrupted_turn.py` |
+| `src/openminis/settings/store.py`（`revision()`）/ `src/openminis/server/main.py`（`GET/PUT /api/settings` 的 `revision` 与 409） | 配置加一个指纹：界面保存时带回来（`If-Match` / `expectedRevision`），过期就 409 | R11：两个窗口各握一份**全量**快照先后保存时，后写的会把前写的整段抹掉（A 加了 provider、B 一保存它就没了）。串行化请求解决不了"你的快照已过期"。护栏：`tests/test_settings.py::test_a_stale_full_save_is_rejected_with_409`（并断言磁盘上仍是别人那一份） |
 
 上游修好之后删掉这些改动即可回到「一行未改」——判据是 `curl` 一份上游 `main`
 的对应文件，确认问题已经不在。
@@ -90,6 +92,8 @@ desktop/                        原生窗口外壳（pywebview + 后台 uvicorn 
   window.py                     pywebview 窗口与 JS API
   instance.py                   单实例锁 + 宿主名片 + "再开一个窗口"的交接
   update_transaction.py         应用内更新的事务（一个 job、一个状态机、单飞）
+  redact.py                     日志脱敏（访问令牌不进日志/诊断包）
+  secrets_acl.py                把配置文件权限收到当前用户
   assets/icon.ico               应用图标
   assets/icon.png
 
@@ -104,6 +108,11 @@ packaging/OpenMinisDesktop.spec 桌面版 PyInstaller 配方
 scripts/make_icon.py            图标生成
 scripts/smoke_test.py           无图形环境的冒烟测试
 scripts/stub_llm.py             本地 OpenAI 兼容桩服务（仅用于验证链路）
+scripts/shell_id.py             壳指纹（含壳源码 / pyproject / uv.lock / Python 版本）
+scripts/make_payload.py         把内核与界面装成可替换的 payload/
+scripts/make_latest.py          生成更新清单 latest.json
+scripts/make_runtime_manifest.py 记录打包时实际装到的依赖版本
+scripts/update_drill.py         更新助手的真机演练（真跑 cmd）
 
 .github/workflows/build-windows.yml   Windows exe 构建与验证流水线
 docs/DESKTOP.md                 架构说明

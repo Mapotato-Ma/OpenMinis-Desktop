@@ -269,7 +269,13 @@ def desktop_routes(*, desktop_dir: Path | None, ui_active: bool) -> list[Any]:
                         continue
                     seen.add(arc)
                     try:
-                        zf.write(p, arcname=arc)
+                        # 导出前再过一遍脱敏（R18）：过滤器只管"以后"写下的日志，
+                        # 而用户目录里可能躺着更早那份（那时还没装过滤器）。诊断包是
+                        # 要发给别人的，凭据绝不能跟着出门。
+                        from .redact import redact_text  # noqa: PLC0415
+
+                        raw = p.read_bytes().decode("utf-8", errors="replace")
+                        zf.writestr(arc, redact_text(raw))
                         added += 1
                     except OSError:
                         continue

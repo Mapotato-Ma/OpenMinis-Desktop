@@ -143,6 +143,46 @@ def _text_parts(text: str) -> str:
     return json.dumps([{"type": "text", "text": text}], ensure_ascii=False)
 
 
+#: 「这一轮被中断了」的 part 标签（R10）。刻意让 ``parts_to_text`` 不认识它 ——
+#: 模型上下文一个字节都不变，只有界面读它。
+INTERRUPTED_PART_TYPE = "interrupted"
+
+
+def _parts_for_turn(
+    text: str,
+    *,
+    runs: list[dict[str, Any]] | None = None,
+    timeline: list[dict[str, Any]] | None = None,
+    interrupted: bool = False,
+) -> str:
+    """一条消息的 ``parts_json``：正文（+ 工具卡 + 时间线），必要时加个中断标记。"""
+    if runs or timeline:
+        raw = _parts_with_runs(text, runs, timeline)
+        if not interrupted:
+            return raw
+        try:
+            parts = json.loads(raw)
+        except ValueError:  # pragma: no cover - 自己刚序列化出来的
+            parts = [{"type": "text", "text": text}]
+        parts.append({"type": INTERRUPTED_PART_TYPE})
+        return json.dumps(parts, ensure_ascii=False)
+    parts = [{"type": "text", "text": text}]
+    if interrupted:
+        parts.append({"type": INTERRUPTED_PART_TYPE})
+    return json.dumps(parts, ensure_ascii=False)
+
+
+def parts_interrupted(parts_json: str) -> bool:
+    """这一轮是不是被中断的（界面标「已中断」用）。"""
+    try:
+        parts = json.loads(parts_json or "[]")
+    except ValueError:
+        return False
+    return isinstance(parts, list) and any(
+        isinstance(p, dict) and p.get("type") == INTERRUPTED_PART_TYPE for p in parts
+    )
+
+
 #: [T-tool-cards-persist-and-fold] 工具调用记录在 ``parts_json`` 里的类型标签。
 #: 一条助手回合的 parts 形如 ``[{text}, {tool}…]`` —— 复用了 Room 时代就有的
 #: 「parts 数组」结构，因此**不需要加列、不需要迁移**；``parts_to_text`` 本来
@@ -341,6 +381,9 @@ class ChatMessageInfo:
     #: [T-subagent-log-persist] 子代理消息：``{speaker, task, roomId, text}``。
     #: 正文在 ``subtext`` part 里（``text`` 字段因此是空的），所以同样不进上下文。
     sub: dict[str, Any] | None = None
+    #: 这一轮是被中断的（用户按了停止）—— R10：已积累的正文/工具记录会落库，
+    #: 界面在气泡上标一句「已中断」，而不是刷新之后整段消失。
+    interrupted: bool = False
 
 
 async def ensure_db() -> None:
@@ -654,6 +697,7 @@ async def load_messages(session_id: str) -> list[ChatMessageInfo]:
                 runs=parts_to_runs(r.parts_json) or None,
                 timeline=parts_to_timeline(r.parts_json) or None,
                 sub=parts_to_sub(r.parts_json),
+                interrupted=parts_interrupted(r.parts_json),
             )
             for r in rows
         ]
@@ -707,6 +751,9 @@ async def append_turn(
     #: [T-turn-timeline-order] 有序可视片段（正文段与工具卡交替）。给了就按它
     #: 落库，界面重放历史才能还原工具卡原本的位置。
     timeline: list[dict[str, Any]] | None = None,
+    #: 这一轮是**被中断**的（用户按了停止）。落一个标记 part：``parts_to_text``
+    #: 不认识它 → 模型上下文一字不变；界面据此在那条消息上标「已中断」（R10）。
+    interrupted: bool = False,
     model_label: str | None = None,
     token_usage: str | None = None,
     model_id: str | None = None,
@@ -743,9 +790,9 @@ async def append_turn(
                 id=uuid.uuid4().hex,
                 session_id=session_id,
                 role=role,
-                parts_json=(
-                    _parts_with_runs(text, runs, timeline)
-                    if (runs or timeline) else _text_parts(text)
+                parts_json=_parts_for_turn(
+                    text, runs=runs, timeline=timeline,
+                    interrupted=bool(interrupted),
                 ),
                 created_at=now,
                 sort_order=order,

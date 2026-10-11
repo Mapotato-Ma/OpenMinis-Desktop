@@ -160,6 +160,34 @@ for route in reversed(routes):            # 倒着插 → 清单顺序即匹配�
 历史消息里的 `runs` 字段是这一轮的工具调用记录（`{name,input,ok,output,ms}`），
 刷新页面后工具卡片就是靠它画回来的 —— 不参与模型上下文。
 
+### 设置的保存：乐观并发 + 两个不同的"重新加载"
+
+`GET /api/settings` 会带一个 `revision`（当前配置内容的指纹），保存时用 `If-Match`
+带回去；对不上就 **409**（"设置已在别处改过"）。没有它，两个窗口各拿一份全量快照先后
+保存时，后写的会把前写的整段抹掉 —— 典型现场：A 窗口加了个 provider，B 窗口用旧列表
+一保存，那个 provider 就没了。界面侧还有两条纪律（`web/desktop/app.js`）：
+
+* **保存的响应不许覆盖等待期间的新编辑**：进入保存时冻结草稿代次（`settings.gen`），
+  响应回来时代次变了就只换基线、不整份覆盖草稿；
+* **"重新加载"与"丢弃"是两件事**：前者保留草稿（别处改过/切窗口时用），后者草稿整份
+  丢掉、未保存的密钥也清掉（用户明确说不要这些改动时用）。改前它们共用同一个入口，
+  于是"丢弃"其实什么都没丢。
+
+### 凭据：明文但有边界
+
+**API Key 明文存在 `settings.json`**（内核的存储层如此，本项目的口径是把它说清楚而不是
+假装加密）。围绕它有四条约束：
+
+* `settings.json` 与数据目录的权限在启动时收到**只有当前用户**（`desktop/secrets_acl.py`，
+  用系统自带的 `icacls`；失败会如实记一笔，不谎报"已加密"）；
+* 界面/接口**不回显明文**：只给 `hasKey`（有没有配），保存时留空表示"保持已存密文"；
+* **访问令牌不进日志**：日志 handler 上装了脱敏过滤器（`desktop/redact.py`），
+  导出诊断包时再过一遍（连过滤器装上之前写下的那份日志也兜住）；
+* 密钥不进仓库、不进对话 —— 这条是仓库纪律，不是这里的实现。
+
+要真正"不落盘明文"需要换存储（Windows DPAPI / Credential Manager）并做迁移与降级，
+那是独立的一步，不在本轮。
+
 ---
 
 ## 4. 前端实现要点
@@ -492,6 +520,23 @@ python desktop_main.py --upstream-ui   # 用上游移动端界面
 
 `--fast` 跳过冒烟测试。换平台之后这份基线必须重跑 —— 同一套测试在本地 POSIX 与
 CI 的 Windows 上红的地方可以完全不同（见下面的验证记录）。
+
+### 发布门禁（R19）
+
+- **打包前必须过 verify**：`build-windows.yml` 里 `portable` 依赖一个 `verify` job，
+  它 `uses: ./.github/workflows/verify.yml`（就是 `scripts/check.py` 那条命令）。
+  改前两者互不相干，tag 一推就打包发版，"两边都绿"靠人记着看。
+- **依赖按 `uv.lock` 装**（`uv sync --frozen`），不用浮动的 `>=`（改前那样装，"当时
+  最新"就进包）。
+- **壳指纹把依赖也算进去**（`scripts/shell_id.py` 的输入含 `pyproject.toml` 与
+  `uv.lock`）：依赖一变，指纹就变，更新自动走整包 —— 否则会出现"壳没源码变化、
+  载荷却带着不兼容的依赖发下去，装完起不来"。
+- **窗口探针的崩溃会拦住发布**：那一步把结论写进 `dist\windowed-probe.json`，由紧接着
+  的判定步骤决定红绿 —— 只有"这台 runner 测不出来"（unsupported）允许放行，
+  "窗口模式崩了"（crash）直接失败。改前是 `continue-on-error` + `exit 0`：
+  日志里喊了崩，流水线照绿、release 照发。
+- 打包时顺带写一份 `payload/runtime.json`（`scripts/make_runtime_manifest.py`）：
+  记录当时实际装到的依赖版本与 `web/dist` 指纹，排障时不用猜。
 
 ---
 

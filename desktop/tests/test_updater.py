@@ -354,6 +354,30 @@ def test_pinned_shell_id_matches_the_shell_sources():
     assert compute() == SHELL_ID, "改了壳就跑 python scripts/shell_id.py --write"
 
 
+def _fake_shell_repo(tmp_path) -> Path:
+    """把**壳指纹会读到的那一份**原样复制出来（照 ``SHELL_INPUTS`` 走）。
+
+    手写"复哪些文件"会在下次往 SHELL_INPUTS 里加东西时静默腐坏 —— R19 加了
+    ``pyproject.toml`` / ``uv.lock`` 之后，这两条测试就是这么红的（复制出来的假仓库
+    少两个文件，指纹自然不一样）。现在让它自己照着清单复制。
+    """
+    import shutil
+
+    from scripts import shell_id
+
+    fake = tmp_path / "repo"
+    for entry in shell_id.SHELL_INPUTS:
+        src = shell_id.REPO / entry
+        dst = fake / entry
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        elif src.is_dir():
+            shutil.copytree(src, dst,
+                            ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
+    return fake
+
+
 def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
     """同一个提交，Linux(LF) 与 Windows(CRLF) 必须算出**同一个**壳指纹。
 
@@ -365,17 +389,9 @@ def test_shell_id_ignores_line_endings(tmp_path, monkeypatch):
     assert normalise(b"a\r\nb") == normalise(b"a\nb") == b"a\nb"
 
     # 把整个壳源码复制一份、全部转成 CRLF，指纹必须不变
-    import shutil
-
     from scripts import shell_id
 
-    fake = tmp_path / "repo"
-    shutil.copytree(shell_id.REPO / "desktop", fake / "desktop",
-                    ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
-    shutil.copy2(shell_id.REPO / "desktop_main.py", fake / "desktop_main.py")
-    (fake / "packaging").mkdir()
-    shutil.copy2(shell_id.REPO / "packaging" / "OpenMinisDesktop.spec",
-                 fake / "packaging" / "OpenMinisDesktop.spec")
+    fake = _fake_shell_repo(tmp_path)
     before = shell_id.compute()
     for path in fake.rglob("*"):
         if path.is_file():
@@ -564,17 +580,10 @@ def test_a_version_bump_alone_does_not_change_the_shell_id(tmp_path, monkeypatch
     这三行，指纹却变了，于是整包那条路被走了十几遍）。
     """
     import re
-    import shutil
 
     from scripts import shell_id
 
-    fake = tmp_path / "repo"
-    shutil.copytree(shell_id.REPO / "desktop", fake / "desktop",
-                    ignore=shutil.ignore_patterns("__pycache__", "tests", "assets"))
-    shutil.copy2(shell_id.REPO / "desktop_main.py", fake / "desktop_main.py")
-    (fake / "packaging").mkdir()
-    shutil.copy2(shell_id.REPO / "packaging" / "OpenMinisDesktop.spec",
-                 fake / "packaging" / "OpenMinisDesktop.spec")
+    fake = _fake_shell_repo(tmp_path)
 
     before = shell_id.compute()
     for rel in ("desktop/__init__.py", "desktop/ui_mount.py"):

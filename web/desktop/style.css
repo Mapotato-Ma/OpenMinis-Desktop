@@ -1581,6 +1581,8 @@ wa-dialog.import-dialog { --width: min(680px, 94vw); }
 .sub-tool.ok .sub-tool-note { color: var(--ok, #4ade80); }
 .sub-tool.err .sub-tool-note { color: var(--err, #f87171); }
 .fallback-note { font-size: 12px; color: var(--warn, #fbbf24); padding: 4px 0; }
+/* R10：被中断的那一轮（内容仍然保留，只是没跑完）。 */
+.msg-interrupted { font-size: 12px; color: var(--fg-faint, #8b8f96); padding: 2px 0 6px; }
 
 /* 记忆页：正文可看、可改、可删 */
 .mem-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }

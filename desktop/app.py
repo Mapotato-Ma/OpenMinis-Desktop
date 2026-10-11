@@ -136,6 +136,19 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(argv)
     _configure_logging(args.debug)
+    # 日志脱敏兜底（R18）：访问令牌是鉴权凭据，不能进日志、更不能随诊断包发出去。
+    from desktop import redact as _redact  # noqa: PLC0415
+
+    _redact.install()
+    # 配置文件的权限收紧（R17）：API Key 仍是明文（文档已披露），但这份文件不该被
+    # 同机其它用户读走。失败只记一笔 —— 权限收紧不该拦住启动。
+    try:
+        from desktop import secrets_acl  # noqa: PLC0415
+
+        for note in secrets_acl.tighten_data_root():
+            logger.info("secrets ACL: %s", note)
+    except Exception:  # pragma: no cover
+        logger.debug("secrets ACL step failed", exc_info=True)
     if log_file is not None:
         logger.info("no console attached — logs are in %s", log_file)
     # Worth a line in the log: when this is "skipped: process has a console"
@@ -284,11 +297,15 @@ def _present_headless(plan: BootPlan, args: argparse.Namespace) -> int:
             return 1
         url = plan.url_for(server.url, server.access_token)
 
-    logger.info("OpenMinis Desktop ready — %s", url)
+    # **不带令牌**（R18）：这个地址会被截进日志、也会随诊断包发出去。令牌是鉴权凭据，
+    # 谁读到谁能驱动本机这个手里有 shell 的 agent —— 日志里只留"后端在哪个端口"。
+    logger.info("OpenMinis Desktop ready — %s", url.split("?")[0])
     trace.report(version=__version__)
 
     if args.no_window:
-        logger.info("headless mode: backend running at %s (Ctrl+C to stop)", url)
+        # 同样不带令牌（R18）：这个地址会进日志、随诊断包发出去。
+        logger.info("headless mode: backend running at %s (Ctrl+C to stop)",
+                    url.split("?")[0])
         return _park(server)
 
     if not args.browser:

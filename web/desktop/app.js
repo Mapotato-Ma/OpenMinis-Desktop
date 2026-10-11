@@ -70,9 +70,14 @@ function toast(msg, kind) {
 
 /* ── REST helper ─────────────────────────────────────────────────────── */
 async function api(path, opts = {}) {
+  // 头部要**合并**：给了自定义头（如 If-Match）时不能把 Content-Type 挤掉。
+  const headers = {
+    ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(opts.headers || {}),
+  };
   const res = await fetch(API + path, {
-    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
     ...opts,
+    headers: Object.keys(headers).length ? headers : undefined,
   });
   const text = await res.text();
   let data = null;
@@ -934,6 +939,11 @@ function renderMessages(messages) {
   for (const m of messages) {
     const isUser = m.role === 'user';
     const node = el('div', 'msg ' + (isUser ? 'user' : 'assistant'));
+    // R10：这一轮是被用户中断的 —— 已积累的正文与工具记录都还在（不再"刷新就没了"），
+    // 但必须说清楚它没跑完，否则用户会以为模型话说到一半停了。
+    if (m.interrupted) {
+      node.appendChild(el('div', 'msg-interrupted', '已中断（这一轮没跑完，已积累的内容仍然保留）'));
+    }
     const role = el('div', 'msg-role');
     role.appendChild(isUser ? el('span', 'avatar', '你') : ic('sparkles', 'avatar'));
     role.appendChild(document.createTextNode(isUser ? '你' : 'OpenMinis'));
@@ -3226,6 +3236,9 @@ const settings = {
   model: null,      // SettingsModel 的状态（草稿 + baseline）。规则都在那个模块里。
   pane: 'models',
   probe: {},        // providerId -> last 测试连接 / 拉取模型列表 outcome
+  rev: '',          // 服务端配置指纹（R11）：保存时带回去，过期就让服务端拒绝
+  gen: 0,           // 草稿代次（R11）：每改一次 +1 —— 保存响应回来时据此判断
+                    // "等待期间用户又改了没有"，不许把新编辑抹掉
 };
 
 /* ── 设置状态怎么走 ────────────────────────────────────────────────────
@@ -3235,6 +3248,9 @@ const settings = {
    记账那套正是「点了某个按钮就莫名亮出未保存」的来源。
    ─────────────────────────────────────────────────────────────────────── */
 function dispatch(action) {
+  // 任何一次动作都算"草稿又动了"（R11）。保存的 await 期间用户改了东西时，我们靠
+  // 这个代次判断"响应里的服务端快照不能拿来覆盖当前草稿"。
+  settings.gen += 1;
   settings.model = SettingsModel.reduce(settings.model, action);
 }
 
@@ -3717,8 +3733,31 @@ async function loadSettings() {
   try {
     const data = await api('/settings');
     settings.data = data;
+    settings.rev = data.revision || '';
     // prev = 上一次的草稿：重新载入不该把用户没保存的编辑抹掉
     settings.model = SettingsModel.load(data, settings.model);
+    settings.loaded = true;
+    settings.probe = {};
+    renderSettings();
+    fillDataRoot();
+  } catch (e) {
+    toast('设置加载失败: ' + e.message, 'err');
+  }
+}
+
+/** 丢弃草稿：回到服务端那一份，**包括清掉还没保存的密钥**（R12）。
+
+    改前"丢弃"和"普通重新加载"共用同一个 `loadSettings(prev)` —— 而它刻意保留草稿，
+    于是用户点确定之后什么都没丢：agent/槽位那些改动还在，只有 providers 被重建了，
+    于是又留下"槽位指向一个不存在的 provider"这种悬空状态。两个动作必须是两件事：
+    * 重新加载（loadSettings）：保留草稿，只换基线 —— 别处改过/切窗口时用；
+    * 丢弃（这里）：草稿整份丢掉、密钥也清掉 —— 用户明确说"不要这些改动"。 */
+async function discardSettingsDraft() {
+  try {
+    const data = await api('/settings');
+    settings.data = data;
+    settings.rev = data.revision || '';
+    settings.model = SettingsModel.load(data, null);
     settings.loaded = true;
     settings.probe = {};
     renderSettings();
@@ -4360,6 +4399,9 @@ async function saveSettings({ silent } = {}) {
   // 载荷由模块组装 —— 「密钥留空=不变」「槽位要么完整要么 null」「只发真的改过
   // 的身份」这些规则都在那边，并有 node 测试盯着。
   const { body } = SettingsModel.toPayload(settings.model);
+  // R11：进入保存时冻结"代次"与"服务端指纹"。
+  const gen = settings.gen;
+  const rev = settings.rev;
 
   // 人格走的是另一条路（/system/soul），但它和别的设置共用这一个「保存」按钮 ——
   // 用户不会知道有两套。所以在这里一并提交，否则改完人格点保存会静默丢失。
@@ -4367,16 +4409,36 @@ async function saveSettings({ silent } = {}) {
   if (soulDirty()) ok = await saveSoul({ silent: true });
 
   try {
-    const data = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
+    const data = await api('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      // 过期就让服务端拒绝（409）—— 两个窗口各拿一份全量快照先后保存时，
+      // 后写的会把前写的整段抹掉（A 加了 provider、B 一保存它就没了）。
+      headers: rev ? { 'If-Match': rev } : undefined,
+    });
     settings.data = data;
-    // 服务端已接受：草稿即新的 baseline。密钥框因此清空 —— 与服务端「不把密钥
-    // 发回来」的约定一致，客户端从不需要搬运密文。
-    settings.model = SettingsModel.load(data, null);
+    settings.rev = data.revision || '';
+    if (settings.gen === gen) {
+      // 等待期间没再编辑：草稿即新的 baseline。密钥框因此清空 —— 与服务端
+      // 「不把密钥发回来」的约定一致，客户端从不需要搬运密文。
+      settings.model = SettingsModel.load(data, null);
+    } else {
+      // 等待期间用户又改了 —— **那次编辑必须留下**。只把基线换成服务端这一份
+      // （prev=当前草稿 = 保留未保存的编辑），绝不整份覆盖（R11 的那个 bug：
+      // 保存响应回来把等待期间敲进去的东西抹回旧值）。
+      settings.model = SettingsModel.load(data, settings.model);
+      toast('保存成功；等待期间的新改动还没保存');
+    }
     renderSettings();
     if (!silent && ok) toast('已保存');
     return ok;
   } catch (e) {
-    toast('保存失败: ' + e.message, 'err');
+    if (/改过|409/.test(String(e.message || ''))) {
+      // 别处改过：不能假装保存成功，也不能自动覆盖 —— 让用户决定
+      toast('设置已在别处改过：请点「重新加载」看最新值，再决定怎么保存', 'err');
+    } else {
+      toast('保存失败: ' + e.message, 'err');
+    }
     return false;
   }
 }
@@ -4402,7 +4464,8 @@ function renderAgentForm() {
 
 async function confirmCloseSettings() {
   if (sdirty().any && !(await confirmDialog('有未保存的改动，关闭就会丢掉。\n\n确定关闭吗？（点「取消」回去点保存）'))) return;
-  if (sdirty().any) loadSettings();   // 丢掉草稿，回到服务端那份
+  // R12：这里是**丢弃**，不是"重新加载" —— 必须真的把草稿（含未保存的密钥）丢掉。
+  if (sdirty().any) await discardSettingsDraft();
   closeSettings();
 }
 

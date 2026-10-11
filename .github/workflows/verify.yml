@@ -11,6 +11,10 @@ name: Verify
 # 它跑的就是 `scripts/check.py` —— 本地跑的是同一条命令。
 
 on:
+  # R19：让 build-windows.yml 能把这条流水线**当门禁用**（`uses: ./.github/workflows/verify.yml`）。
+  # 改前 Verify 与 Build/Release 是两个互不相干的 workflow —— tag 一推就开始打包发版，
+  # "等两边的绿"靠的是人记着看，不是流水线保证的。
+  workflow_call:
   workflow_dispatch:
   push:
     # 所有分支都跑（不写 branches 过滤）：特性分支上的红是**信号**，
